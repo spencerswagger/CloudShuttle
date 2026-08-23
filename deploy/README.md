@@ -70,7 +70,7 @@ docker compose up -d --build
 |---|---|---|
 | 云数据库 RDS PostgreSQL | 定义/执行历史 | 记下连接串 |
 | 云数据库 Redis | 状态快照/锁 | 记下连接串 |
-| SAE 2.0（Web 应用） | 控制面（推荐） | 镜像部署，可缩容到 0、无请求不分配 CPU、无小时保底；低流量更省 |
+| SAE 2.0（Web 应用） | 控制面（推荐） | 控制台 `saenext.console.aliyun.com`（旧 `sae.console` 已下线）；镜像部署，**Web 应用 + 按需分配 CPU** 才可缩容到 0、无请求不分配 CPU |
 | FC（函数计算） | 控制面（可选替代 SAE） | Node18+ 函数，HTTP 触发，代码包部署 |
 | OSS + CDN | 托管前端 | 静态桶，接 CDN |
 | 容器镜像 ACR | 控制面镜像 + 执行器镜像 | backend tar 与 runner 镜像推送位 |
@@ -93,11 +93,16 @@ docker compose up -d --build
 docker load -i cloudshuttle-backend-<tag>.tar
 docker tag cloudshuttle-backend:<tag> registry.cn-hangzhou.aliyuncs.com/<ns>/cloudshuttle-backend:<tag>
 docker push registry.cn-hangzhou.aliyuncs.com/<ns>/cloudshuttle-backend:<tag>
-# SAE 建 Web 应用（镜像部署）：容器端口 9000，健康检查路径 /healthz，
-# 绑自定义域名并写入 CONTROL_BASE；环境变量照 B.3。
-# 想加快冷启动可设 SKIP_BOOTSTRAP=1（跳过建表/seed），改由部署时手动执行一次：
-#   node backend/db/migrate.js + psql -f deploy/seed.sql
 ```
+
+在 **`saenext.console.aliyun.com`**（旧 `sae.console` 已下线）建 **Web 应用**（镜像部署）：
+
+- **应用类型**必须选 **`Web 应用`**（不是 `微服务应用`）——只有 Web 应用支持缩容到 0；
+- **CPU 分配模式**选 **`按需分配 CPU`（请求到来才分配）**——这是缩容到 0 的前提；Web 应用若选「固定分配 CPU」、或建微服务应用，都**没有**缩容到 0；
+- 容器端口 `9000`，健康检查路径 `/healthz`；绑自定义域名并写入 `CONTROL_BASE`；环境变量照 B.3；
+- 计费：Web 应用按需 CPU 模式按 **请求数 + 公网出流量 + 实际占用 CPU/内存** 计费，空闲不分配 CPU 故无空转费；
+- 冷启动：缩容到 0 后靠冷启动拉起（本项目 Node 控制面冷启动较快，比 Java 友好）；想加快可设 `SKIP_BOOTSTRAP=1`（跳过建表/seed），改由部署时手动执行一次：
+  `node backend/db/migrate.js` + `psql -f deploy/seed.sql`。
 
 **走 FC：**（需自行打包代码包，见 [backend/README.md](../backend/README.md)）上传 `cloudshuttle-fc-<tag>.zip`，建 Node18+ HTTP 触发函数，绑**自定义域名**（函数 URL 会随冷启动变化），域名填进 `CONTROL_BASE`，环境变量照 B.3。
 
