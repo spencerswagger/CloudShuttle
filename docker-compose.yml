@@ -31,6 +31,7 @@ services:
       - "6379:6379"
 
   backend:
+    image: cloudshuttle-backend:${BACKEND_TAG:-0.1}
     build:
       context: .
       dockerfile: backend/Dockerfile

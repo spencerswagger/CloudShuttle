@@ -34,6 +34,24 @@ node db/migrate.js            # 建表
 node local-server.js          # 监听 http://localhost:9000
 ```
 
+## 自行打包（发布产物）
+
+GitHub Release 上的 `cloudshuttle-backend-<tag>.tar` 即由下面方式产出，一般情况下直接下载即可，无需自己打包。
+
+**SAE / 本地容器 → Docker 镜像：**
+```bash
+docker build -f backend/Dockerfile -t cloudshuttle-backend:<tag> .
+docker save -o cloudshuttle-backend-<tag>.tar cloudshuttle-backend:<tag>
+# SAE 部署时：docker load 该 tar → docker tag 到 ACR → push → 「镜像部署」（见 deploy/README.md 方式 B）
+```
+
+**FC → 代码包**（FC 不用镜像，release 未提供，需此方式打包）：
+```bash
+cd backend && npm install --omit=dev
+zip -r ../cloudshuttle-fc-<tag>.zip node_modules index.js local-server.js config.js db providers steps handlers engine crypto
+# FC 建 Node18+ HTTP 触发函数，上传该 zip，入口由 index.js 的 handler（event）承接。
+```
+
 ## 环境变量
 
 必填/可选详见 [deploy/README.md](../deploy/README.md) 的变量表，核心：`PG_*`、`REDIS_URL`、`SM4_KEY`、`CONTROL_BASE`、`ALIYUN_*`。

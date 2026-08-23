@@ -22,7 +22,17 @@ frontend/src/
 ```bash
 npm install
 npm run dev      # 开发服务器
-npm run build    # 产出 frontend/dist/（上传到 CDN 即可）
+npm run build    # 产出 frontend/dist/
+```
+
+## 自行打包（发布产物）
+
+GitHub Release 上的 `cloudshuttle-web-<tag>.zip`（CDN 用）即由下面方式产出，可直接下载，无需自己打包。
+
+```bash
+npm run build                      # 产物 frontend/dist/
+cd dist && zip -r ../cloudshuttle-web-<tag>.zip .
+# 把 zip 内容上传到 OSS 静态桶并接 CDN 即可（见 deploy/README.md 方式 B.4）
 ```
 
 API 经由同域 `/api`、`/hook`、`/_/hook` 反代至控制面（见 [deploy/README.md](../deploy/README.md) 的 nginx/C相 反代规则）。
