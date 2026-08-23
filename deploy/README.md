@@ -118,12 +118,12 @@ unzip cloudshuttle-web-<tag>.zip -d cloudshuttle-web    # 解压即 `dist/` 内�
 ```
 
 - **部署物**：把解压出的**整个目录**上传到这个静态 OSS 桶，开启**静态网站托管**，接 CDN；
-- 入口文件就是 `index.html`；
-- 前端调用后端用的是相对路径 `/api/*` 等，因此需要一个**网关/CDN 规则**把这些路径**反向代理**到控制面自定义域名：
+- 入口文件是 `index.html`；
+- **CDN 无反代**：把目录里的 `cloudshuttle-config.js` 的 `apiBase` 改成控制面完整地址后再上传：
+  ```js
+  window.CloudShuttleConfig = { apiBase: "https://你的控制面域名/api" };
   ```
-  /api/*、/hook/*、/_/hook/*  →  反代到 https://你的控制面域名
-  ```
-- （自建打包见 [frontend/README.md](../frontend/README.md)）
+- 自建打包见 [frontend/README.md](../frontend/README.md)。
 
 ### B.5 执行器镜像（runner → ACR → ECI）
 
