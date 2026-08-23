@@ -82,10 +82,10 @@ docker compose up -d --build
 
 | 维度 | SAE 2.0（Web 应用，推荐） | FC（函数计算） |
 |---|---|---|
-| 用什么跑 | 监听 HTTP 的进程（`local-server.js`） | `index.js` 的 `handler(event)` |
-| 部署物 | **release 的后端 tar**（`docker load` → 推 ACR → 镜像部署） | 需**代码包**（release 未提供，见 backend/README.md 打包） |
+| 用什么跑 | 监听 HTTP 的进程（`local-server.js`） | `index.js` 的 `handler`（代码包）；或 `local-server.js`（自定义容器镜像） |
+| 部署物 | **release 的后端 tar**（`docker load` → 推 ACR → 镜像部署） | 代码包见 backend/README；或直接推 release 后端镜像做**自定义容器**（需 `SKIP_BOOTSTRAP=1`） |
 | 计费 | 缩容到 0 + 无请求不分配 CPU + 无小时保底 | 有「小时最低消费」：偶发调用也有空转费 |
-| 健康检查 | `GET /healthz`（已内置，供 liveness/readiness） | — |
+| 健康检查 | `GET /healthz`（已内置，供 liveness/readiness） | 容器探活/函数健康检查；镜像路径 `/healthz` |
 | 权衡 | 低流量更省；研究结论见 `docs/research/sae-vs-fc.md` | 同上 |
 
 **走 SAE（用 release tar）：**
@@ -104,7 +104,39 @@ docker push registry.cn-hangzhou.aliyuncs.com/<ns>/cloudshuttle-backend:<tag>
 - 冷启动：缩容到 0 后靠冷启动拉起（本项目 Node 控制面冷启动较快，比 Java 友好）；想加快可设 `SKIP_BOOTSTRAP=1`（跳过建表/seed），改由部署时手动执行一次：
   `node backend/db/migrate.js` + `psql -f deploy/seed.sql`。
 
-**走 FC：**（需自行打包代码包，见 [backend/README.md](../backend/README.md)）上传 `cloudshuttle-fc-<tag>.zip`，建 Node18+ HTTP 触发函数，绑**自定义域名**（函数 URL 会随冷启动变化），域名填进 `CONTROL_BASE`，环境变量照 B.3。
+**走 FC（自定义容器 · 完整步骤）：**
+
+> 用**镜像**在 FC 上跑控制面时，走「自定义容器/WEB 服务」模式，运行的是 `local-server.js`（:9000）。镜像的 `entrypoint.sh` 默认会 `waiting for postgres...` 等到 PG 就绪才起服务——**必须配 `SKIP_BOOTSTRAP=1`** 跳过它，否则服务起不来、探活超时被回收（日志表现：`Function instance health check failed on port 9000`）。最重要的是，**PG/Redis 必须真正配到 FC 能连通**。
+
+1. **建函数（自定义容器）**
+   - 镜像：选 ACR 里的 `<ns>/cloudshuttle-backend:<tag>`
+   - 监听端口：`9000`；健康检查路径：`/healthz`
+
+2. **网络（最易漏，决定 `waiting for postgres` 是否卡死）**
+   - FC 的 **VPC 配置**选与 RDS **相同**的 VPC、交换机、安全组；`PG_HOST` 用 RDS **内网**域名
+   - **RDS 白名单**加入该交换机网段 / FC 安全组
+   - Redis 同 VPC 或公网版，`REDIS_URL` 必须 FC 可达（否则 API 用到状态快照时再报错）
+
+3. **环境变量（逐项填；值见 B.3）**
+
+   | 变量 | 必填 | 说明 |
+   |---|---|---|
+   | `SKIP_BOOTSTRAP=1` | ✅ | 跳过等 PG + migrate/seed，服务立即起、探活秒过 |
+   | `PORT=9000` | ✅ | 与容器监听端口一致 |
+   | `PG_HOST` / `PG_PORT` / `PG_DB` / `PG_USER` / `PG_PASSWORD` | ✅ | 填 RDS 内网地址；**漏了必卡 `waiting for postgres`** |
+   | `REDIS_URL` | ✅ | FC 可达的 Redis |
+   | `CONTROL_BASE` | ⭕ | FC 自定义域名；漏了回调拼接可能错 |
+   | `SM4_KEY` | ⭕ | 用凭证库才填 |
+
+4. **首次迁移/seed**（因 `SKIP_BOOTSTRAP=1` 已跳过，只手动执行一次）：
+   ```bash
+   node backend/db/migrate.js
+   psql "$PG_URL" -f deploy/seed.sql
+   ```
+
+5. **绑自定义域名**并写入 `CONTROL_BASE`（默认函数 URL 会随冷启动变化）。
+
+**FC 走函数代码包（备选）**：见 [backend/README.md](../backend/README.md)，上传 `cloudshuttle-fc-<tag>.zip`，建 Node18+ HTTP 触发函数，入口 `index.js` 的 `handler`，同样要配 B.3 的 PG/REDIS 环境变量与 VPC 网络。
 
 ### B.3 环境变量（全局填这些）
 
