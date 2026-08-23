@@ -1,0 +1,7 @@
+[
+  { "name": "Node 20", "image": "node:20-alpine", "category": "language" },
+  { "name": "Golang 1.23", "image": "golang:1.23", "category": "language" },
+  { "name": "Python 3.12", "image": "python:3.12-slim", "category": "language" },
+  { "name": "Java 21", "image": "eclipse-temurin:21-jdk", "category": "language" },
+  { "name": "Docker+Git 构建", "image": "cloudshuttle/runner:0.1", "category": "toolchain" }
+]

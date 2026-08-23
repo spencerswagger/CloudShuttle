@@ -1,0 +1,51 @@
+# ===== 操作系统 / 通用 =====
+.DS_Store
+Thumbs.db
+*.swp
+*~
+*.bak
+
+# ===== IDE / 编辑器 =====
+.idea/
+*.iml
+.vscode/
+!.vscode/extensions.json
+*.code-workspace
+
+# ===== TRAE / AI 工具本地缓存 =====
+.trae/
+.trae-cn/
+.hyper/
+# 注意：docs/superpowers/ 是项目文档（specs/plans），务必保留，勿忽略
+
+# ===== Node / 前端 =====
+node_modules/
+dist/
+build/
+coverage/
+.turbo/
+.nx/
+.cache/
+*.tsbuildinfo
+*.tsbuildinfo.*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ===== 环境变量 / 密钥（保留示例）=====
+.env
+.env.*
+!.env.example
+
+# ===== 打包 / 其他语言 ====
+*.tgz
+*.tar.gz
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# ===== 日志 =====
+*.log
+logs/

@@ -1,0 +1,68 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: cloudshuttle-postgres
+    environment:
+      POSTGRES_USER: cloudshuttle
+      POSTGRES_PASSWORD: cloudshuttle
+      POSTGRES_DB: cloudshuttle
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cloudshuttle -d cloudshuttle"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7-alpine
+    container_name: cloudshuttle-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    ports:
+      - "6379:6379"
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: cloudshuttle-backend
+    environment:
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      PG_DB: cloudshuttle
+      PG_USER: cloudshuttle
+      PG_PASSWORD: cloudshuttle
+      REDIS_URL: redis://redis:6379
+      SM4_KEY: ${SM4_KEY:-}
+      CONTROL_BASE: ${CONTROL_BASE:-}
+      PORT: "9000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "9000:9000"
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: cloudshuttle-frontend
+    depends_on:
+      - backend
+    ports:
+      - "8080:80"
+
+volumes:
+  pg-data:
+  redis-data:

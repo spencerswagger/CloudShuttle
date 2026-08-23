@@ -1,0 +1,17 @@
+{
+  "name": "cloudshuttle-control-plane",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "start": "node index.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "pg": "^8.11.0",
+    "ioredis": "^5.3.2",
+    "sm-crypto": "^0.3.13",
+    "axios": "^1.7.0"
+  }
+}
