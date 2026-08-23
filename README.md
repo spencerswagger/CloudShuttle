@@ -26,7 +26,7 @@
 CDN（前端静态，0 成本 >  Vue3 画布）
         │ REST /api/*、/hook/*、/_/hook/*
         ▼
-控制面（Node；FC Web 函数 handler 或 SAE Web 镜像，可缩 0）
+控制面（Node；FC Web 函数 / 自定义容器，可缩 0）
         │ 下发一次性任务 / 收回调
         ▼
 执行器（阿里云 ECI 弹性容器，按秒计费、跑完即销毁）
@@ -37,8 +37,6 @@ Redis(状态快照/锁) · PostgreSQL(定义/执行历史)   ←  环境托管
 > 完整设计文档（节点模型、hook 路由约定、执行状态机、数据模型、接口清单）：[specs](./docs/superpowers/specs/2026-08-20-serverless-jenkins-design.md)
 >
 > 实施计划与任务拆分：[plans](./docs/superpowers/plans/2026-08-20-serverless-jenkins.md)
->
-> 控制面载体选型（FC vs SAE 计费对比结论）：[research](./docs/research/sae-vs-fc.md)
 
 ## 目录结构与文档导航
 
@@ -47,7 +45,7 @@ Redis(状态快照/锁) · PostgreSQL(定义/执行历史)   ←  环境托管
 | `backend/` | 控制面：Node 编排引擎、DB/Redis 层、SM4 加密、hook 路由、FC handler + local HTTP 双入口 | [backend/README.md](./backend/README.md) |
 | `frontend/` | Vue3 管理端：画布 / 凭证 / 镜像 / 执行页 | [frontend/README.md](./frontend/README.md) |
 | `runner/` | 执行器镜像：在 ECI 容器内跑 `git clone → build → push → kubectl` | [runner/README.md](./runner/README.md) |
-| `deploy/` | 部署：docker compose（本机）与纯阿里云托管（FC/SAE + CDN + ECI） | [deploy/README.md](./deploy/README.md) |
+| `deploy/` | 部署：docker compose（本机）与纯阿里云托管（FC + CDN + ECI） | [deploy/README.md](./deploy/README.md) |
 | `docs/` | 设计 / 计划 / 选型备忘 | 见上方链接 |
 
 ## 快速开始
@@ -60,7 +58,7 @@ docker compose up -d --build
 # 后端 API http://localhost:9000/api/pipelines
 ```
 
-对接阿里云（ECI / FC / SAE / CDN）的完整步骤见 [deploy/README.md](./deploy/README.md)。
+对接阿里云（ECI / FC / CDN）的完整步骤见 [deploy/README.md](./deploy/README.md)。
 
 ## License
 

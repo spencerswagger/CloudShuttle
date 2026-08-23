@@ -5,7 +5,7 @@
 | 方式 | 控制面 | 数据库 / Redis | 执行器(ECI) | 适用 |
 |---|---|---|---|---|
 | **A. docker compose（本机）** | 本地容器（可加载 release 镜像） | 本地容器（也可换云） | 阿里云 | 开发 / 演示 |
-| **B. 云端部署（纯阿里云）** | SAE（推荐）/ FC | 云 RDS / 云 Redis | 阿里云 | 生产 |
+| **B. 云端部署（纯阿里云）** | FC（函数计算） | 云 RDS / 云 Redis | 阿里云 | 生产 |
 
 > 无论哪种方式，**执行器（ECI）始终走阿里云**——它是按需拉起的容器，本机起不来。
 
@@ -17,12 +17,12 @@
 
 | 资产 | 内容 | 用在哪 |
 |---|---|---|
-| `cloudshuttle-backend-<tag>.tar` | 控制面后端镜像（docker tar） | 方式 A：`docker load`；方式 B：SAE 镜像部署 |
+| `cloudshuttle-backend-<tag>.tar` | 控制面后端镜像（docker tar） | 方式 A：`docker load`；方式 B：FC 自定义容器镜像 |
 | `cloudshuttle-web-<tag>.zip` | 前端静态包 | 方式 B：上传 OSS/CDN |
 
 这些资产由 GitHub Action 在打 tag 时自动产出。若要**自己打包源码**（本地开发 / FC 代码包 / 改镜像），见各子 README：
 
-- **后端（控制面）打包** → [backend/README.md](../backend/README.md)（含 SAE 镜像、FC 代码包两种打包）
+- **后端（控制面）打包** → [backend/README.md](../backend/README.md)（FC 代码包 / 镜像两种打包）
 - **前端打包** → [frontend/README.md](../frontend/README.md)
 - **执行器 runner 镜像** → [runner/README.md](../runner/README.md)
 
@@ -68,63 +68,36 @@ docker compose up -d --build
 
 | 资源 | 用途 | 说明 |
 |---|---|---|
-| 云数据库 RDS PostgreSQL | 定义/执行历史 | 记下连接串 |
-| 云数据库 Redis | 状态快照/锁 | 记下连接串 |
-| SAE 2.0（Web 应用） | 控制面（推荐） | 控制台 `saenext.console.aliyun.com`（旧 `sae.console` 已下线）；镜像部署，**Web 应用 + 按需分配 CPU** 才可缩容到 0、无请求不分配 CPU |
-| FC（函数计算） | 控制面（可选替代 SAE） | Node18+ 函数，HTTP 触发，代码包部署 |
+| 云数据库 RDS PostgreSQL | 定义/执行历史 | 记下连接串（B.3 有示例） |
+| 云数据库 Redis | 状态快照/锁 | 记下连接串（B.3 有示例） |
+| FC（函数计算，自定义容器） | 控制面 | 镜像部署（自定义容器/Web 服务），监听 :9000，需 `SKIP_BOOTSTRAP=1` |
 | OSS + CDN | 托管前端 | 静态桶，接 CDN |
 | 容器镜像 ACR | 控制面镜像 + 执行器镜像 | backend tar 与 runner 镜像推送位 |
 | 云容器 / ECI 权限 | 拉执行容器 | 见"执行器接入点" |
 
-### B.2 控制面：SAE 还是 FC（同一份代码）
+### B.2 控制面：FC（自定义容器）
 
-后端是**一份代码、两种入口**，选哪个阿里云产品承接它：
+后端以「**自定义容器/WEB 服务**」方式跑在 FC 上，运行 `local-server.js`（:9000），对外提供整个后端 API。
 
-| 维度 | SAE 2.0（Web 应用，推荐） | FC（函数计算） |
-|---|---|---|
-| 用什么跑 | 监听 HTTP 的进程（`local-server.js`） | `index.js` 的 `handler`（代码包）；或 `local-server.js`（自定义容器镜像） |
-| 部署物 | **release 的后端 tar**（`docker load` → 推 ACR → 镜像部署） | 代码包见 backend/README；或直接推 release 后端镜像做**自定义容器**（需 `SKIP_BOOTSTRAP=1`） |
-| 计费 | 缩容到 0 + 无请求不分配 CPU + 无小时保底 | 有「小时最低消费」：偶发调用也有空转费 |
-| 健康检查 | `GET /healthz`（已内置，供 liveness/readiness） | 容器探活/函数健康检查；镜像路径 `/healthz` |
-| 权衡 | 低流量更省；研究结论见 `docs/research/sae-vs-fc.md` | 同上 |
-
-**走 SAE（用 release tar）：**
-```bash
-docker load -i cloudshuttle-backend-<tag>.tar
-docker tag cloudshuttle-backend:<tag> registry.cn-hangzhou.aliyuncs.com/<ns>/cloudshuttle-backend:<tag>
-docker push registry.cn-hangzhou.aliyuncs.com/<ns>/cloudshuttle-backend:<tag>
-```
-
-在 **`saenext.console.aliyun.com`**（旧 `sae.console` 已下线）建 **Web 应用**（镜像部署）：
-
-- **应用类型**必须选 **`Web 应用`**（不是 `微服务应用`）——只有 Web 应用支持缩容到 0；
-- **CPU 分配模式**选 **`按需分配 CPU`（请求到来才分配）**——这是缩容到 0 的前提；Web 应用若选「固定分配 CPU」、或建微服务应用，都**没有**缩容到 0；
-- 容器端口 `9000`，健康检查路径 `/healthz`；绑自定义域名并写入 `CONTROL_BASE`；环境变量照 B.3；
-- 计费：Web 应用按需 CPU 模式按 **请求数 + 公网出流量 + 实际占用 CPU/内存** 计费，空闲不分配 CPU 故无空转费；
-- 冷启动：缩容到 0 后靠冷启动拉起（本项目 Node 控制面冷启动较快，比 Java 友好）；想加快可设 `SKIP_BOOTSTRAP=1`（跳过建表/seed），改由部署时手动执行一次：
-  `node backend/db/migrate.js` + `psql -f deploy/seed.sql`。
-
-**走 FC（自定义容器 · 完整步骤）：**
-
-> 用**镜像**在 FC 上跑控制面时，走「自定义容器/WEB 服务」模式，运行的是 `local-server.js`（:9000）。镜像的 `entrypoint.sh` 默认会 `waiting for postgres...` 等到 PG 就绪才起服务——**必须配 `SKIP_BOOTSTRAP=1`** 跳过它，否则服务起不来、探活超时被回收（日志表现：`Function instance health check failed on port 9000`）。最重要的是，**PG/Redis 必须真正配到 FC 能连通**。
+> 这一步最容易出错的是**环境变量（尤其是 PG 连接串）和 VPC 网络**没配对，导致 FC 探活失败。一步步照着填：
 
 1. **建函数（自定义容器）**
    - 镜像：选 ACR 里的 `<ns>/cloudshuttle-backend:<tag>`
    - 监听端口：`9000`；健康检查路径：`/healthz`
 
-2. **网络（最易漏，决定 `waiting for postgres` 是否卡死）**
+2. **网络（决定 `waiting for postgres` 是否卡死）**
    - FC 的 **VPC 配置**选与 RDS **相同**的 VPC、交换机、安全组；`PG_HOST` 用 RDS **内网**域名
    - **RDS 白名单**加入该交换机网段 / FC 安全组
-   - Redis 同 VPC 或公网版，`REDIS_URL` 必须 FC 可达（否则 API 用到状态快照时再报错）
+   - Redis 同 VPC 或公网版，`REDIS_URL` 必须 FC 可达
 
-3. **环境变量（逐项填；值见 B.3）**
+3. **环境变量（逐项填，连接串示例见 B.3）**
 
    | 变量 | 必填 | 说明 |
    |---|---|---|
-   | `SKIP_BOOTSTRAP=1` | ✅ | 跳过等 PG + migrate/seed，服务立即起、探活秒过 |
+   | `SKIP_BOOTSTRAP=1` | ✅ | 跳过「等 PG + migrate/seed」，服务立即起、探活秒过；不设会卡 `waiting for postgres` 导致探活超时（日志：`health check failed on port 9000`） |
    | `PORT=9000` | ✅ | 与容器监听端口一致 |
-   | `PG_HOST` / `PG_PORT` / `PG_DB` / `PG_USER` / `PG_PASSWORD` | ✅ | 填 RDS 内网地址；**漏了必卡 `waiting for postgres`** |
-   | `REDIS_URL` | ✅ | FC 可达的 Redis |
+   | `PG_HOST` / `PG_PORT` / `PG_DB` / `PG_USER` / `PG_PASSWORD` | ✅ | 填 RDS 内网地址与账号；**漏了必卡 `waiting for postgres`** |
+   | `REDIS_URL` | ✅ | 一串 URL（见 B.3 示例） |
    | `CONTROL_BASE` | ⭕ | FC 自定义域名；漏了回调拼接可能错 |
    | `SM4_KEY` | ⭕ | 用凭证库才填 |
 
@@ -136,7 +109,7 @@ docker push registry.cn-hangzhou.aliyuncs.com/<ns>/cloudshuttle-backend:<tag>
 
 5. **绑自定义域名**并写入 `CONTROL_BASE`（默认函数 URL 会随冷启动变化）。
 
-**FC 走函数代码包（备选）**：见 [backend/README.md](../backend/README.md)，上传 `cloudshuttle-fc-<tag>.zip`，建 Node18+ HTTP 触发函数，入口 `index.js` 的 `handler`，同样要配 B.3 的 PG/REDIS 环境变量与 VPC 网络。
+> **备选**：FC 走函数**代码包**（`index.js` 的 `handler`），见 [backend/README.md](../backend/README.md)，同样需配 B.3 的 PG/REDIS 与 VPC 网络。
 
 ### B.3 环境变量（全局填这些）
 
@@ -144,11 +117,19 @@ docker push registry.cn-hangzhou.aliyuncs.com/<ns>/cloudshuttle-backend:<tag>
 
 | 变量 | 必填 | 示例 | 说明 |
 |---|---|---|---|
-| `PG_HOST` / `PG_PORT` / `PG_DB` / `PG_USER` / `PG_PASSWORD` | ✅ | `xxx.pg.rds.aliyuncs.com` / `5432` … | 云 RDS PostgreSQL |
-| `REDIS_URL` | ✅ | `rediss://:pwd@xxx.redis.rds.aliyuncs.com:6379` | 云 Redis |
+| `PG_HOST` / `PG_PORT` / `PG_DB` / `PG_USER` / `PG_PASSWORD` | ✅ | `cp-prod-xxxxxxx.pg.rds.aliyuncs.com` / `5432` / `cloudshuttle` / `cloudshuttle` / `<密码>` | 云 RDS PostgreSQL |
+| `REDIS_URL` | ✅ | `redis://:密码@cp-prod-xxxxxx.redis.rds.aliyuncs.com:6379/0` | 云 Redis（内网不带 TLS 用 `redis://`；公网带 TLS 用 `rediss://`） |
 | `CONTROL_BASE` | ⭕ | `https://cloudshuttle.example.com` | 控制面自定义域名；填了最稳，不填则自动推导 |
-| `SM4_KEY` | ⭕ | 32 位 hex | 用凭证库时**必须**填；改 KEY 会令历史凭证解不开 |
+| `SM4_KEY` | ⭕ | `a1b2c3d4e5f60718293a4b5c6d7e8f90` | 用凭证库时**必须**填；改 KEY 会令历史凭证解不开 |
 | `ALIYUN_AK` / `ALIYUN_SK` / `ALIYUN_REGION` | ① | … | ECI 派发用（也可用 FC Role 授权替代） |
+
+**连接串写什么（示例，照着改域名/账号/密码即可）：**
+
+| 项 | 写法 |
+|---|---|
+| PostgreSQL（RDS 内网） | `PG_HOST = cp-prod-xxxxxxx.pg.rds.aliyuncs.com`<br>`PG_PORT = 5432`，`PG_DB = cloudshuttle`，`PG_USER = cloudshuttle`，`PG_PASSWORD = RDS控制台设置的密码` |
+| Redis（内网，无 TLS） | `REDIS_URL = redis://:密码@cp-prod-xxxxxx.redis.rds.aliyuncs.com:6379/0` |
+| Redis（公网，TLS） | `REDIS_URL = rediss://:密码@cp-prod-xxxxxx.redis.rds.aliyuncs.com:6379` |
 
 > ① ECI 相关：正式跑 shell 前必须配好。数据库迁移与 seed 可手动执行一次：
 > `node backend/db/migrate.js` + `psql "$PG_URL" -f deploy/seed.sql`（compose 已自动处理，云端需手动跑一次）。
