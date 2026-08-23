@@ -35,6 +35,9 @@ cd dist && zip -r ../cloudshuttle-web-<tag>.zip .
 # 把 zip 内容上传到 OSS 静态桶并接 CDN 即可（见 deploy/README.md 方式 B.4）
 ```
 
-API 经由同域 `/api`、`/hook`、`/_/hook` 反代至控制面（见 [deploy/README.md](../deploy/README.md) 的 nginx/C相 反代规则）。
+API 地址统一在前端 `dist/cloudshuttle-config.js` 的 `apiBase` 配置（默认同源 `/api`，构建时由 `public/` 原样带出，可部署时改）：
+
+- **docker-compose / 本机**：nginx 反代 `/api`、`/hook`、`/_/hook`，保持默认即可；
+- **云端 CDN**（无反代）：把 `apiBase` 改成控制面完整地址，如 `window.CloudShuttleConfig = { apiBase: "https://control.example.com/api" }`（见 [deploy/README.md](../deploy/README.md) 方式 B.4）。
 
 部署方式见 [deploy/README.md](../deploy/README.md)。
