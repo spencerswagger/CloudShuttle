@@ -27,7 +27,10 @@ const refresh = async () => {
 };
 onMounted(refresh);
 
-const trigger = async (id) => { await triggerExecution(id); await refresh(); };
+const trigger = async (id) => {
+  try { await triggerExecution(id); } catch { /* 失败提示已由全局拦截器统一展示 */ }
+  await refresh();
+};
 </script>
 
 <template>

@@ -42,9 +42,29 @@
       <RouterView />
     </main>
   </div>
+
+  <div class="toasts" aria-live="polite">
+    <div v-for="t in toasts" :key="t.id" class="toast">
+      <div class="toast-row">
+        <span class="toast-ico" aria-hidden="true">!</span>
+        <p class="toast-msg">{{ t.message }}</p>
+      </div>
+      <div v-if="t.requestId" class="toast-reqid">
+        <span class="mono-tag">requestId</span>
+        <code class="reqid-code">{{ t.requestId }}</code>
+        <button class="reqid-copy" @click="copyId(t.requestId)">复制</button>
+      </div>
+    </div>
+  </div>
 </template>
 
 <script setup>
+import { toasts } from "./lib/notify.js";
+
+const copyId = async (reqId) => {
+  try { await navigator.clipboard.writeText(reqId); } catch { /* 无剪贴板权限时忽略 */ }
+};
+
 const nav = [
   { to: "/", label: "管道画布", iconA: "M3 6h11M14 6a2.5 2.5 0 1 0 5 0 2.5 2.5 0 0 0-5 0zM3 12h11M14 12a2.5 2.5 0 1 0 5 0 2.5 2.5 0 0 0-5 0zM3 18h11M14 18a2.5 2.5 0 1 0 5 0 2.5 2.5 0 0 0-5 0z" },
   { to: "/credentials", label: "凭证", iconA: "M12 3a5 5 0 0 1 5 5 3 3 0 0 1 3 3v7a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-3a3 3 0 0 1 2-2.8", iconB: "M8.5 11.5V9a3.5 3.5 0 0 1 7 0" },
@@ -126,4 +146,48 @@ const nav = [
   height: 100%;
   padding: 28px 34px 48px;
 }
+
+/* ---- 全局错误提示 toast ---- */
+.toasts {
+  position: fixed; top: 18px; right: 18px; z-index: 100;
+  display: flex; flex-direction: column; gap: 10px;
+  max-width: 360px; pointer-events: none;
+}
+.toast {
+  pointer-events: auto;
+  background: linear-gradient(180deg, var(--bg-3), var(--bg-2));
+  border: 1px solid var(--line-strong);
+  border-left: 3px solid var(--err);
+  border-radius: 12px;
+  padding: 12px 14px;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(8px);
+  animation: toastIn 0.22s var(--ease);
+}
+.toast-row { display: flex; gap: 10px; align-items: flex-start; }
+.toast-ico {
+  flex: 0 0 20px; width: 20px; height: 20px;
+  display: grid; place-items: center;
+  border-radius: 50%;
+  background: var(--err-soft); color: var(--err);
+  font-family: var(--font-mono); font-weight: 700; font-size: 12px;
+}
+.toast-msg { margin: 0; font-size: 13px; line-height: 1.5; color: var(--text-1); word-break: break-word; }
+.toast-reqid {
+  display: flex; align-items: center; gap: 8px;
+  margin-top: 9px; padding-top: 8px;
+  border-top: 1px dashed var(--line);
+  font-family: var(--font-mono); font-size: 11px; color: var(--text-3);
+}
+.reqid-code { color: var(--text-2); user-select: all; }
+.reqid-copy {
+  margin-left: auto;
+  font-family: var(--font-display); font-size: 11px;
+  color: var(--accent); background: var(--accent-soft);
+  border: 1px solid var(--line-strong); border-radius: 6px;
+  padding: 3px 9px; cursor: pointer;
+  transition: all 0.15s var(--ease);
+}
+.reqid-copy:hover { color: #0b0e15; background: var(--accent); border-color: var(--accent); }
+@keyframes toastIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
 </style>

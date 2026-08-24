@@ -58,6 +58,8 @@ const submit = async () => {
     await createCredential(form.value);
     form.value = { name: "", kind: form.value.kind, secret: {} };
     list.value = await fetchCredentials();
+  } catch {
+    /* 失败提示已由全局拦截器统一展示 */
   } finally {
     saving.value = false;
   }

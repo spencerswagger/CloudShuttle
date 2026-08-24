@@ -48,11 +48,15 @@ const loadPipeline = (ev) => {
 
 const save = async () => {
   if (!current.value.name.trim()) { toast.value = "请先填写管道名称"; flash(); return; }
-  current.value.id
-    ? await updatePipeline(current.value.id, current.value)
-    : Object.assign(current.value, await createPipeline(current.value));
-  pipelines.value = await fetchPipelines();
-  toast.value = "已保存 ✓"; flash();
+  try {
+    current.value.id
+      ? await updatePipeline(current.value.id, current.value)
+      : Object.assign(current.value, await createPipeline(current.value));
+    pipelines.value = await fetchPipelines();
+    toast.value = "已保存 ✓"; flash();
+  } catch {
+    /* 失败提示已由全局拦截器统一展示 */
+  }
 };
 
 const flash = () => {

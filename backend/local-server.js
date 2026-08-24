@@ -31,11 +31,11 @@ const server = createServer(async (req, res) => {
 
   try {
     const out = await handler(event);
-    res.writeHead(out.statusCode ?? 200, { "content-type": "application/json" });
+    res.writeHead(out.statusCode ?? 200, { ...out.headers, "content-type": "application/json" });
     res.end(out.body);
   } catch (err) {
     res.writeHead(500, { "content-type": "application/json" });
-    res.end(JSON.stringify({ error: err?.message ?? String(err) }));
+    res.end(JSON.stringify({ ok: false, code: "INTERNAL_ERROR", message: "服务暂时不可用，请稍后再试" }));
   }
 });
 
