@@ -4,6 +4,7 @@
 import { pool } from "../db/pg.js";
 import { config } from "../config.js";
 import { sm4Encrypt } from "../crypto/sm4.js";
+import { HttpError } from "../errors.js";
 
 const rows = (r) => r.rows;
 
@@ -54,8 +55,11 @@ export async function listCredentials() {
 
 export async function createCredential(body) {
   if (!config.sm4Key) {
-    throw new Error(
-      "SM4_KEY not configured; cannot store secrets. Set SM4_KEY (16-byte hex) before creating credentials."
+    throw new HttpError(
+      500,
+      "SERVICE_MISCONFIG",
+      "系统加解密配置缺失，请联系管理员处理",
+      "SM4_KEY not configured in control plane env; secret cannot be stored",
     );
   }
   const enc = sm4Encrypt(config.sm4Key, body?.secret ?? {});

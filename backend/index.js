@@ -15,6 +15,7 @@ import { createOrchestrator } from "./engine/orchestrator.js";
 import { randomUUID } from "node:crypto";
 import axios from "axios";
 import { sm4Decrypt } from "./crypto/sm4.js";
+import { HttpError } from "./errors.js";
 
 import * as api from "./handlers/api.js";
 import * as hook from "./handlers/hook.js";
@@ -167,10 +168,13 @@ function parseHost(event) {
 async function ok(promise) {
   return { status: 200, body: await promise };
 }
-function fcResponse(statusCode, body) {
+function fcResponse(statusCode, body, requestId) {
   return {
     statusCode,
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      ...(requestId ? { "x-request-id": requestId } : {}),
+    },
     body: JSON.stringify(body ?? {}),
     isBase64Encoded: false,
   };
@@ -233,15 +237,31 @@ async function getApp() {
 
 // ---------- FC HTTP 触发器入口 ----------
 export async function handler(event) {
+  const requestId = randomUUID();
   const { path, method, body } = parseEvent(event);
-  const { handler: name } = routeToHandler(path, method, body);
-  const job = DISPATCH[name];
-  if (!job) return fcResponse(404, { error: "not found", path });
+  const startedAt = Date.now();
+  const finish = (status, out, warn = false) => {
+    const ms = Date.now() - startedAt;
+    const line = `[${requestId}] ${method} ${path} -> ${status} (${ms}ms)`;
+    if (warn) console.warn(line);
+    else console.log(line);
+    return fcResponse(status, out, requestId);
+  };
   try {
+    const { handler: name } = routeToHandler(path, method, body);
+    const job = DISPATCH[name];
+    if (!job) {
+      return finish(404, { ok: false, code: "NOT_FOUND", message: "请求的接口不存在", requestId }, true);
+    }
     const app = await getApp();
     const { status, body: out } = await job({ app, path, method, body, event });
-    return fcResponse(status, out);
+    return finish(status, out);
   } catch (err) {
-    return fcResponse(500, { error: err?.message ?? String(err) });
+    const reason = `[${requestId}] ${method} ${path} FAILED: ` + (err?.detail ? `${err.detail} | ` : "") + (err?.stack || err);
+    console.error(reason);
+    if (err instanceof HttpError) {
+      return finish(err.status, { ok: false, code: err.code, message: err.message, requestId }, true);
+    }
+    return finish(500, { ok: false, code: "INTERNAL_ERROR", message: "服务暂时不可用，请稍后再试", requestId }, true);
   }
 }
