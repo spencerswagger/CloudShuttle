@@ -1,6 +1,6 @@
 # backend · 控制面
 
-Node 编排引擎与控制面，单份代码支持 **FC handler** 与 **SAE/本地 HTTP 容器** 双入口。
+Node 编排引擎与控制面，单份代码支持 **FC handler** 与 **本地 HTTP 容器** 两个入口。
 
 ## 职责
 
@@ -14,7 +14,7 @@ Node 编排引擎与控制面，单份代码支持 **FC handler** 与 **SAE/本�
 ```
 backend/
   index.js            # FC handler 入口（event → routeToHandler）
-  local-server.js     # HTTP 入口（监听 :9000，含 /healthz），供 SAE / 本地容器
+  local-server.js     # HTTP 入口（监听 :9000，含 /healthz），供本地容器 / FC 自定义容器
   config.js           # 环境变量读取（PG/Redis/SM4_KEY/CONTROL_BASE/ALIYUN_*）
   db/                 # schema.sql / migrate.js / seed.sql、pg.js、redis.js
   engine/             # dag.js 拓扑、state.js、snapshot.js、mutex.js、orchestrator.js
@@ -32,6 +32,24 @@ npm install
 # 需本地 PG(库/账号 cloudshuttle) 与 Redis；见根目录 deploy/README.md 的 docker compose
 node db/migrate.js            # 建表
 node local-server.js          # 监听 http://localhost:9000
+```
+
+## 自行打包（发布产物）
+
+GitHub Release 上的 `cloudshuttle-backend-<tag>.tar` 即由下面方式产出，一般情况下直接下载即可，无需自己打包。
+
+**本地容器 / FC 自定义容器 → Docker 镜像：**
+```bash
+docker build -f backend/Dockerfile -t cloudshuttle-backend:<tag> .
+docker save -o cloudshuttle-backend-<tag>.tar cloudshuttle-backend:<tag>
+# FC 自定义容器部署时：docker load 该 tar → docker tag 到 ACR → push → 建「自定义容器/Web 服务」（见 deploy/README.md 方式 B，需配 SKIP_BOOTSTRAP=1）
+```
+
+**FC → 函数代码包**（不走镜像时，release 未提供，需此方式打包）：
+```bash
+cd backend && npm install --omit=dev
+zip -r ../cloudshuttle-fc-<tag>.zip node_modules index.js local-server.js config.js db providers steps handlers engine crypto
+# FC 建 Node18+ HTTP 触发函数，上传该 zip，入口由 index.js 的 handler（event）承接。
 ```
 
 ## 环境变量
