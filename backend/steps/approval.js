@@ -18,6 +18,10 @@ export function makeApprovalStep({
     const base = typeof controlPlaneBase === "function" ? controlPlaneBase(ctx) : controlPlaneBase;
     const callbackUrl = `${base}/hook/dingtalk/card/${token}?secret=${secret}`;
     const kind = await getCredentialKind(p.robot);
+    console.log(
+      `[approval] pipeline=${ctx.execId} node=${node.id} robot=${p.robot} kind=${kind} ` +
+      `(kind=dingtalk-corp → 新版 createAndDeliver;; 否则 → 老版 webhook actionCard)`
+    );
 
     if (kind === "dingtalk-corp") {
       const corp = await getCredentialSecrets(p.robot);
