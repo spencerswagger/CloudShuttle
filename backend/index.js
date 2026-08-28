@@ -59,6 +59,7 @@ export function routeToHandler(path, method, body) {
     if (m === "POST") return { handler: "api.createCredential" };
   }
   if (RE.credentialOne.test(path)) {
+    if (m === "GET") return { handler: "api.getCredential" };
     if (m === "DELETE") return { handler: "api.deleteCredential" };
     if (m === "PUT" || m === "PATCH") return { handler: "api.updateCredential" };
   }
@@ -67,6 +68,7 @@ export function routeToHandler(path, method, body) {
     if (m === "POST") return { handler: "api.createImage" };
   }
   if (RE.imageOne.test(path)) {
+    if (m === "GET") return { handler: "api.getImage" };
     if (m === "DELETE") return { handler: "api.deleteImage" };
     if (m === "PUT" || m === "PATCH") return { handler: "api.updateImage" };
   }
@@ -84,6 +86,7 @@ export function routeToHandler(path, method, body) {
     if (m === "POST") return { handler: "api.rerunExecution" };
   }
   if (RE.pipelineOne.test(path)) {
+    if (m === "GET") return { handler: "api.getPipeline" };
     if (m === "PUT" || m === "PATCH") return { handler: "api.updatePipeline" };
     if (m === "DELETE") return { handler: "api.deletePipeline" };
   }

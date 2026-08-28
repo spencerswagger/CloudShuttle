@@ -25,6 +25,16 @@ export async function listPipelines() {
   );
 }
 
+// 详情（编辑返显用）：单条流水线，含完整 spec_json
+export async function getPipeline(id) {
+  const { rows } = await pool.query(
+    `SELECT id, name, description, spec_json, rev, created_at, updated_at FROM pipeline WHERE id=$1`,
+    [id]
+  );
+  if (!rows[0]) throw new HttpError(404, "PIPELINE_NOT_FOUND", "流水线不存在");
+  return rows[0];
+}
+
 export async function createPipeline(body) {
   const spec = JSON.stringify(body?.spec_json ?? {});
   // 每个 git 仓库 hook 独立密钥，创建时生成并存库
@@ -169,6 +179,15 @@ export async function listCredentials() {
   );
 }
 
+// 详情（编辑返显用）：不回显 secret_enc 明文
+export async function getCredential(id) {
+  const { rows } = await pool.query(
+    `SELECT id, name, kind, created_at FROM credential WHERE id=$1`, [id]
+  );
+  if (!rows[0]) throw new HttpError(404, "CREDENTIAL_NOT_FOUND", "凭证不存在");
+  return rows[0];
+}
+
 export async function createCredential(body) {
   if (!config.sm4Key) {
     throw new HttpError(
@@ -209,6 +228,13 @@ export async function updateCredential(id, body) {
 // ---------- 镜像 ----------
 export async function listImages() {
   return rows(await pool.query("SELECT * FROM exec_image ORDER BY category,id"));
+}
+
+// 详情（编辑返显用）
+export async function getImage(id) {
+  const { rows } = await pool.query(`SELECT * FROM exec_image WHERE id=$1`, [id]);
+  if (!rows[0]) throw new HttpError(404, "IMAGE_NOT_FOUND", "镜像不存在");
+  return rows[0];
 }
 
 export async function createImage(body) {
