@@ -32,7 +32,7 @@ export function makeApprovalStep({
         callbackUrl, token,
       });
     }
-    await ctx.recordRegistry({ kind: "dingtalk", token, secret, execId: ctx.execId, nodeId: node.id });
+    await ctx.recordRegistry({ kind: "dingtalk", token, secret, credential: p.robot, execId: ctx.execId, nodeId: node.id });
     return { kind: "wait", ref: token };
   };
 }

@@ -6,7 +6,7 @@ import { safeEqual } from "../security.js";
 // 按 token 取登记记录；secret 与 exec_id/node_id 以库内为准，防 URL 篡改
 export async function lookupRegistry({ token, kind }) {
   const { rows: r } = await pool.query(
-    `SELECT exec_id, node_id, secret FROM webhook_registry
+    `SELECT exec_id, node_id, secret, credential FROM webhook_registry
       WHERE token=$1 AND kind=$2 AND expires_at > now()`,
     [token, kind]
   );

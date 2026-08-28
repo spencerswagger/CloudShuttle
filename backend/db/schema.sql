@@ -57,6 +57,8 @@ CREATE TABLE IF NOT EXISTS webhook_registry (
 
 -- 存量库兼容：补充 secret 列（幂等，重复执行无害）
 ALTER TABLE webhook_registry ADD COLUMN IF NOT EXISTS secret TEXT NOT NULL DEFAULT '';
+-- 存量库兼容：补充 credential 列，回调更新卡片状态时据此反查机器人凭证刷新 accessToken
+ALTER TABLE webhook_registry ADD COLUMN IF NOT EXISTS credential TEXT NOT NULL DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS credential (
   id BIGSERIAL PRIMARY KEY,

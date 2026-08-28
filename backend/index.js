@@ -208,14 +208,14 @@ async function buildApp() {
     config.controlPlaneBase ||
     (ctx?.spec?.authority ? `http://${ctx.spec.authority}` : "http://localhost:9000");
   // 回调登记落库：每个回调(token, kind) 独立密钥，供回拨时校验
-  async function recordRegistry({ kind, token, secret, execId, nodeId }) {
+  async function recordRegistry({ kind, token, secret, credential, execId, nodeId }) {
     await pool.query(
-      `INSERT INTO webhook_registry(token, exec_id, node_id, kind, secret, expires_at)
-       VALUES($1,$2,$3,$4,$5, now() + interval '24 hours')
+      `INSERT INTO webhook_registry(token, exec_id, node_id, kind, secret, credential, expires_at)
+       VALUES($1,$2,$3,$4,$5,$6, now() + interval '24 hours')
        ON CONFLICT (token) DO UPDATE
          SET exec_id=EXCLUDED.exec_id, node_id=EXCLUDED.node_id,
-             secret=EXCLUDED.secret, expires_at=EXCLUDED.expires_at`,
-      [token, execId, nodeId, kind, secret ?? ""]
+             secret=EXCLUDED.secret, credential=EXCLUDED.credential, expires_at=EXCLUDED.expires_at`,
+      [token, execId, nodeId, kind, secret ?? "", credential ?? ""]
     );
   }
   const steps = {
@@ -321,6 +321,13 @@ const DISPATCH = {
       decision: qs(path, "decision"),
       body,
       lookup: internal.lookupRegistry,
+      updateCard: (payload) =>
+        hook.updateDeliveredCard({
+          ...payload,
+          getCredentialSecrets: app.getCredentialSecrets,
+          getAccessToken: app.dingtalkTokenCache,
+          httpClient: axios,
+        }),
     }),
   "api.dingtalkGroups": async ({ app, body }) =>
     ok(api.listDingtalkGroups({

@@ -3,13 +3,16 @@
 import { pool } from "../db/pg.js";
 import { safeEqual } from "../security.js";
 
+const DING_BASE = "https://api.dingtalk.com";
+
 // 钉钉审批卡片按钮回调（统一入口 /hook/dingtalk/card/:token）
 // 兼容三种来源：
 //   - 群（RETURN_BACK）：钉钉服务器 POST，decision 在 body.content.callbackMsg.content
-//   - 群（新版 createAndDeliver）：回调走注册的 callbackRouteKey，token 在 body.outTrackId（前缀 cloudshuttle_）
+//   - 群（新版 createAndDeliver）：回调走注册的 callbackRouteKey，token 在 body.outTrackId（前缀 cloudshuttle_），
+//     决策在 body.value.params.action（agree/reject）；审批推进后回调 updateCard 把模板 status 变量更新为 agree/reject
 //   - 人/webhook（URL）：GET，decision 在 query
 // exec_id/node_id 一律以库内登记为准，防篡改。
-export async function dingtalkCardCb(orchestrator, { token, secret, decision, body, lookup }) {
+export async function dingtalkCardCb(orchestrator, { token, secret, decision, body, lookup, updateCard }) {
   const token_ = token || extractTokenFromOutTrack(body?.outTrackId);
   const row = await lookup({ token: token_, kind: "dingtalk" });
   if (!row) return { status: 403, body: { ok: false, code: "FORBIDDEN", message: "审批回调凭证无效" } };
@@ -18,11 +21,18 @@ export async function dingtalkCardCb(orchestrator, { token, secret, decision, bo
     return { status: 403, body: { ok: false, code: "FORBIDDEN", message: "审批回调凭证无效" } };
   }
   const decision_ = extractDecision(body, decision);
+  const agreed = decision_ === "reject" ? false : true;
   const out = await orchestrator.onApproval({
     execId: Number(row.exec_id),
     nodeId: row.node_id,
-    decision: decision_ === "reject" ? "reject" : "approve",
+    decision: agreed ? "approve" : "reject",
   });
+  // 审批已推进，异步把卡片状态更新为已同意/已拒绝（失败不影响审批结果）
+  if (typeof updateCard === "function") {
+    updateCard({ credential: row.credential, token: token_, status: agreed ? "agree" : "reject" }).catch((e) => {
+      console.warn("[dingtalk] update card status failed", e?.message);
+    });
+  }
   return { status: 200, body: out ?? {} };
 }
 
@@ -35,19 +45,18 @@ export function extractTokenFromOutTrack(outTrackId) {
   return null;
 }
 
-// 归一决策：优先取「回传请求」按钮回传的 decision，其次用 query
-// 兼容两种来源结构：
-//   - 普通版 StandardCard 回传：body.value 为 JSON 字符串，内含 params（按钮回传参数）
-//   - 老版 RETURN_BACK：body.content.callbackMsg.content 为 return_data JSON
+// 归一回调决策：优先取按钮「回传参数」的 action（accept/reject 命名的模板按钮），其次 decision，最后 query。
+// 兼容 TVORG 结构（官方回传：body.value 为 JSON 字符串，内含 params）与老版 RETURN_BACK。
 export function extractDecision(body, queryDecision) {
-  // 普通版 StandardCard：「回传请求」→ body.value = "{\"cardPrivateData\":{...},\"params\":{\"decision\":\"...\"}}"
   if (body && typeof body.value === "string") {
     try {
       const j = JSON.parse(body.value);
-      if (j?.params?.decision) return j.params.decision;
-      // 兜底：若钉钉未回传 params，则按当前点击按钮 id（cardPrivateData.actionIds）推断决策
+      const p = j?.params ?? {};
+      if (p.action === "agree" || p.action === "reject") return p.action;
+      if (p.decision === "approve" || p.decision === "reject") return p.decision;
+      // 兜底：按当前点击按钮 id（cardPrivateData.actionIds）推断决策
       const ids = Array.isArray(j?.cardPrivateData?.actionIds) ? j.cardPrivateData.actionIds : [];
-      const map = { approve: "approve", reject: "reject", act_ok: "approve", act_no: "reject" };
+      const map = { approve: "approve", reject: "reject", act_ok: "agree", act_no: "reject", agree: "agree" };
       for (const id of ids) if (map[id]) return map[id];
     } catch { /* 忽略解析失败 */ }
   }
@@ -61,6 +70,23 @@ export function extractDecision(body, queryDecision) {
     }
   }
   return queryDecision;
+}
+
+// 更新已投递卡片的模板状态变量（status=agree/reject），让卡片从「待审批」变为「已同意/已拒绝」
+export async function updateDeliveredCard({ credential, token, status, getCredentialSecrets, getAccessToken, httpClient }) {
+  if (!credential) return; // 老库记录无 credential，无从刷新 accessToken，直接跳过
+  const robot = await getCredentialSecrets(credential);
+  const accessToken = await getAccessToken(robot);
+  await httpClient.put(
+    `${DING_BASE}/v1.0/card/instances`,
+    {
+      outTrackId: `cloudshuttle_${token}`,
+      cardData: { cardParamMap: { status } },
+      cardUpdateOptions: { updateCardDataByKey: true },
+      userIdType: 1,
+    },
+    { headers: { "x-acs-dingtalk-access-token": accessToken, "content-type": "application/json" } }
+  );
 }
 
 // 按管道名解析 pipeline，返回 { pipelineId, gitHookSecret }（轻量查询 webhook 触发定位）
