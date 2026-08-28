@@ -42,6 +42,8 @@ const RE = {
   dingtalk: /^\/hook\/dingtalk\/([^/]+)/,
   dingtalkGroups: /^\/api\/dingtalk\/groups$/,
   dingtalkResolve: /^\/api\/dingtalk\/resolve-mobile$/,
+  dingtalkDepartments: /^\/api\/dingtalk\/departments$/,
+  dingtalkDeptUsers: /^\/api\/dingtalk\/department-users$/,
   eciDone: /^\/_\/hook\/ecidone\/(\d+)/,
   eciFail: /^\/_\/hook\/fail\/(\d+)/,
 };
@@ -95,7 +97,13 @@ export function routeToHandler(path, method, body) {
     if (m === "POST") return { handler: "api.dingtalkGroups" };
   }
   if (RE.dingtalkResolve.test(path)) {
-    if (m === "POST") return { handler: "api.dingtalkResolve" };
+    return { handler: "api.dingtalkResolveStub" };
+  }
+  if (RE.dingtalkDepartments.test(path)) {
+    if (m === "POST") return { handler: "api.listDepartments" };
+  }
+  if (RE.dingtalkDeptUsers.test(path)) {
+    if (m === "POST") return { handler: "api.listDepartmentUsers" };
   }
   if (RE.eciDone.test(path)) return { handler: "internal.eciDone" };
   if (RE.eciFail.test(path)) return { handler: "internal.eciFail" };
@@ -297,10 +305,18 @@ const DISPATCH = {
       getAccessToken: app.dingtalkTokenCache,
       httpClient: axios,
     })),
-  "api.dingtalkResolve": async ({ app, body }) =>
-    ok(api.resolveUsersByMobile({
-      credential: body?.credential,
-      mobiles: body?.mobiles,
+  "api.dingtalkResolveStub": async () =>
+    ok({ users: [], deprecated: true, message: "by_mobile 接口已不可用，请改用通讯录部门接口" }),
+  "api.listDepartments": async ({ app, body }) =>
+    ok(api.listDepartments({
+      credential: body?.credential, deptId: body?.deptId,
+      getCredentialSecrets: app.getCredentialSecrets,
+      getAccessToken: app.dingtalkTokenCache,
+      httpClient: axios,
+    })),
+  "api.listDepartmentUsers": async ({ app, body }) =>
+    ok(api.listDepartmentUsers({
+      credential: body?.credential, deptId: body?.deptId,
       getCredentialSecrets: app.getCredentialSecrets,
       getAccessToken: app.dingtalkTokenCache,
       httpClient: axios,

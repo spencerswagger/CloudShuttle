@@ -4,7 +4,7 @@ import { ref, reactive, computed, onMounted } from "vue";
 import draggable from "vuedraggable";
 import { fetchPipelines, createPipeline, updatePipeline } from "../api/pipeline.js";
 import { fetchImages } from "../api/image.js";
-import { fetchCredentials, resolveMobiles } from "../api/credential.js";
+import { fetchCredentials, listDepartments, listDepartmentUsers } from "../api/credential.js";
 
 const pipelines = ref([]);
 const images = ref([]);
@@ -32,28 +32,52 @@ const isCorpRobot = (name) => {
   return convKinds.includes(c?.kind);
 };
 
-// 按手机号解析 userId（免手填 openId）。临时输入存 mobileInputs[node.id]
-const mobileInputs = reactive({});
+// 通讯录选择器：按部门树逐层加载，勾选成员填回 target.openIds
+const orgOpen = ref(false);
+const orgLoading = ref(false);
+const orgCred = ref("");
+const orgNode = ref(null);
+const orgPath = ref([]);   // [{id,name}]
+const orgDepts = ref([]);
+const orgUsers = ref([]);
+const orgSel = reactive(new Map()); // userId -> name
 
-const resolveUsers = async (node) => {
-  if (!node.params.robot) { toast.value = "请先选择钉钉企业机器人"; flash(); return; }
-  const mobiles = (mobileInputs[node.id] ?? "")
-    .split(/[\n,，;；\s]+/).map((s) => s.trim()).filter(Boolean);
-  if (!mobiles.length) { toast.value = "请输入手机号（每行或逗号分隔）"; flash(); return; }
+async function orgLoad() {
+  orgLoading.value = true;
   try {
-    const { users } = await resolveMobiles(node.params.robot, mobiles);
-    const ok = users.filter((u) => u.userId && !u.error).map((u) => u.userId);
-    const fail = users.filter((u) => u.error);
-    if (ok.length) {
-      const t = nodeTarget(node);
-      const base = (t.openIds ?? "").split(",").map((s) => s.trim()).filter(Boolean);
-      t.openIds = [...new Set([...base, ...ok])].join(",");
-    }
-    if (fail.length) toast.value = `${fail.length} 个解析失败：` + fail.map((u) => `${u.mobile}(${u.error})`).join("；");
-    else toast.value = ok.length ? `已解析 ${ok.length} 个成员 openId` : "没有可解析的手机号";
-    flash();
+    const cur = orgPath.value.length ? orgPath.value[orgPath.value.length - 1] : null;
+    const deptId = cur ? cur.id : 1;
+    const [d, u] = await Promise.all([
+      listDepartments(orgCred.value, deptId),
+      listDepartmentUsers(orgCred.value, deptId),
+    ]);
+    orgDepts.value = d.departments ?? [];
+    orgUsers.value = u.users ?? [];
   } catch { /* 全局拦截器提示 */ }
-};
+  finally { orgLoading.value = false; }
+}
+function openOrg(node) {
+  if (!node.params.robot) { toast.value = "请先选择钉钉企业机器人"; flash(); return; }
+  orgCred.value = node.params.robot;
+  orgNode.value = node;
+  orgPath.value = [];
+  orgSel.clear();
+  orgOpen.value = true;
+  orgLoad();
+}
+function orgGoto(d) { orgPath.value.push({ id: d.id, name: d.name }); orgLoad(); }
+function orgGotoIndex(i) { orgPath.value.splice(i); orgLoad(); }
+function orgToggle(u) { orgSel.has(u.userId) ? orgSel.delete(u.userId) : orgSel.set(u.userId, u.name); }
+function orgConfirm() {
+  const node = orgNode.value;
+  const ids = [...orgSel.keys()];
+  const names = [...orgSel.values()];
+  if (!ids.length) { toast.value = "未选择成员"; flash(); return; }
+  nodeTarget(node).openIds = ids.join(",");
+  orgOpen.value = false;
+  toast.value = `已选 ${ids.length} 人：${names.join("、")}`;
+  flash();
+}
 
 // 保证旧节点也有 target 配置对象（惰性初始化）
 const nodeTarget = (n) =>
@@ -240,12 +264,11 @@ onMounted(async () => {
                         <p class="field-hint">钉钉无“列出全部群”接口，openConversationId 需在创建场景群时保存，或经 chatId 查询获取。</p>
                       </template>
                       <template v-else>
-                        <input class="input" v-model="nodeTarget(n).openIds" placeholder="如 u1,u2,u3" />
-                        <div class="group-row" style="margin-top:8px">
-                          <input class="input" v-model="mobileInputs[n.id]" placeholder="填手机号，点右侧解析成 openId" />
-                          <button type="button" class="btn btn-ghost" style="white-space:nowrap" @click="resolveUsers(n)">解析</button>
+                        <div class="group-row">
+                          <input class="input" v-model="nodeTarget(n).openIds" placeholder="如 u1,u2,u3（已选请勿手改）" />
+                          <button type="button" class="btn btn-ghost" style="white-space:nowrap" @click="openOrg(n)">从通讯录选择</button>
                         </div>
-                        <p class="field-hint">openId 无需手抄：填手机号（每行/逗号分隔）由后端调钉钉 by_mobile 换算。</p>
+                        <p class="field-hint">点“从通讯录选择”按部门树勾选成员，自动填 openId，免手抄。</p>
                       </template>
                     </div>
                   </div>
@@ -261,6 +284,45 @@ onMounted(async () => {
     <Transition name="toast">
       <div v-if="toast" class="toast">{{ toast }}</div>
     </Transition>
+
+    <!-- 通讯录成员选择器 -->
+    <div v-if="orgOpen" class="org-mask" @click.self="orgOpen = false">
+        <div class="org-panel">
+          <div class="org-head">
+            <strong>从通讯录选择成员</strong>
+            <button type="button" class="btn btn-ghost" @click="orgOpen = false">×</button>
+          </div>
+          <div v-if="orgLoading" class="org-body muted">加载中…</div>
+          <div v-else class="org-body">
+            <div class="org-crumb">
+              <a @click="orgGotoIndex(0); orgPath = []; orgLoad()">根部门</a>
+              <template v-for="(p, i) in orgPath" :key="p.id">
+                <span class="org-slash">/</span><a @click="orgPath=orgPath.slice(0,i+1); orgLoad()">{{ p.name }}</a>
+              </template>
+            </div>
+            <div v-if="orgDepts.length" class="org-depts">
+              <div v-for="d in orgDepts" :key="d.id" class="org-dept" @click="orgGoto(d)">
+                📁&nbsp;{{ d.name }}
+              </div>
+            </div>
+            <div class="org-users">
+              <label v-for="u in orgUsers" :key="u.userId" class="org-user">
+                <input type="checkbox" :checked="orgSel.has(u.userId)" @change="orgToggle(u)" />
+                <span>{{ u.name }}</span>
+                <span class="muted">{{ u.userId }}</span>
+              </label>
+              <div v-if="!orgUsers.length" class="muted org-empty">该部门暂无成员</div>
+            </div>
+          </div>
+          <div class="org-foot">
+            <span class="org-sel">已选 {{ orgSel.size }}：{{ [...orgSel.values()].join("、") || "—" }}</span>
+            <div>
+              <button type="button" class="btn btn-ghost" @click="orgOpen = false">取消</button>
+              <button type="button" class="btn" @click="orgConfirm">确认</button>
+            </div>
+          </div>
+        </div>
+      </div>
   </div>
 </template>
 
@@ -353,6 +415,26 @@ onMounted(async () => {
 .group-row { display: flex; gap: 8px; }
 .group-row .input { flex: 1; min-width: 0; }
 .field-hint { margin-top: 6px; font-size: 12px; color: var(--text-2); line-height: 1.5; }
+
+/* 通讯录选择器 */
+.org-mask { position: fixed; inset: 0; z-index: 60; background: rgba(0,0,0,.55); display: flex; align-items: center; justify-content: center; }
+.org-panel { width: 520px; max-width: 92vw; max-height: 80vh; background: var(--surface-2, #14181f); border: 1px solid var(--border, #2a313c); border-radius: 12px; display: flex; flex-direction: column; overflow: hidden; }
+.org-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid var(--border, #2a313c); }
+.org-body { padding: 8px 16px; overflow: auto; flex: 1; min-height: 180px; }
+.org-crumb { font-size: 12.5px; margin-bottom: 8px; flex-wrap: wrap; display: flex; }
+.org-crumb a { color: var(--accent, #22d3ee); cursor: pointer; }
+.org-slash { margin: 0 4px; color: var(--text-2, #8892a6); }
+.org-depts { display: flex; flex-direction: column; gap: 2px; margin-bottom: 8px; }
+.org-dept { padding: 7px 10px; cursor: pointer; border-radius: 6px; }
+.org-dept:hover { background: var(--bg-hover, #1c232d); }
+.org-users { display: flex; flex-direction: column; gap: 2px; }
+.org-user { display: flex; gap: 8px; align-items: center; padding: 6px 8px; cursor: pointer; border-radius: 6px; }
+.org-user:hover { background: var(--bg-hover, #1c232d); }
+.org-user .muted { font-size: 12px; margin-left: auto; }
+.org-empty { padding: 12px 0; }
+.org-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-top: 1px solid var(--border, #2a313c); }
+.org-foot > div { display: flex; gap: 8px; }
+.org-sel { font-size: 12.5px; color: var(--text-2, #8892a6); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .node-ghost { opacity: .35; }
 

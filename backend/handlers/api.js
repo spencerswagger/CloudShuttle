@@ -81,29 +81,49 @@ export async function listDingtalkGroups({ credential, getCredentialSecrets, get
   };
 }
 
-// 按手机号解析 userId（企业内部应用 /v1.0/contact/users/by_mobile），供用户免手填 openId
-export async function resolveUsersByMobile({ credential, mobiles, getCredentialSecrets, getAccessToken, httpClient }) {
-  if (!Array.isArray(mobiles) || !mobiles.length) return { users: [] };
+// 按手机号解析 userId —— 不使用（钉钉 by_mobile 接口已变更/不存在），改走通讯录部门接口
+// 保留函数签名以兼容引用，但建议用 listDepartments/listDepartmentUsers 代替。
+
+// 获取下一级部门（oapi /topapi/v2/department/listsub）
+export async function listDepartments({ credential, deptId, getCredentialSecrets, getAccessToken, httpClient }) {
   const secrets = await getCredentialSecrets(credential);
   const accessToken = await getAccessToken(secrets);
-  const users = [];
-  for (const mobile of mobiles) {
-    const m = String(mobile).trim();
-    if (!m) continue;
-    try {
-      const resp = await httpClient.post(
-        "https://api.dingtalk.com/v1.0/contact/users/by_mobile",
-        { mobile: m },
-        { headers: { "x-acs-dingtalk-access-token": accessToken, "content-type": "application/json" } }
-      );
-      const r = resp?.data?.result;
-      users.push({ mobile: m, userId: r?.userId ?? "", name: r?.name ?? "" });
-    } catch (e) {
-      users.push({ mobile: m, userId: "", name: "", error: (e?.response?.data?.message || e?.message || "解析失败").slice(0, 120) });
-    }
+  const resp = await httpClient.post(
+    "https://oapi.dingtalk.com/topapi/v2/department/listsub",
+    oapiForm({ access_token: accessToken, dept_id: deptId ?? 1 }),
+    { headers: { "content-type": "application/x-www-form-urlencoded" } }
+  );
+  const r = resp?.data ?? {};
+  if (r.errcode != null && r.errcode !== 0) {
+    throw new HttpError(502, "DINGTALK_ORG_FAILED", "获取部门列表失败",
+      `listsub errcode=${r.errcode} errmsg=${r.errmsg}`);
   }
-  return { users };
+  return {
+    departments: (r.result ?? []).map((d) => ({ id: d.dept_id, name: d.name, parentId: d.parent_id })),
+  };
 }
+
+// 获取部门内用户基础信息（oapi /topapi/user/listsimple，仅 userId+name，不含子部门）
+export async function listDepartmentUsers({ credential, deptId, getCredentialSecrets, getAccessToken, httpClient }) {
+  const secrets = await getCredentialSecrets(credential);
+  const accessToken = await getAccessToken(secrets);
+  const resp = await httpClient.post(
+    "https://oapi.dingtalk.com/topapi/user/listsimple",
+    oapiForm({ access_token: accessToken, dept_id: deptId ?? 1, cursor: 0, size: 100 }),
+    { headers: { "content-type": "application/x-www-form-urlencoded" } }
+  );
+  const r = resp?.data ?? {};
+  if (r.errcode != null && r.errcode !== 0) {
+    throw new HttpError(502, "DINGTALK_ORG_FAILED", "获取部门成员失败",
+      `listsimple errcode=${r.errcode} errmsg=${r.errmsg}`);
+  }
+  return {
+    users: (r.result?.list ?? []).map((u) => ({ userId: u.userid, name: u.name })),
+    hasMore: !!r.result?.has_more,
+  };
+}
+
+function oapiForm(data) { return new URLSearchParams(data).toString(); }
 
 export async function updatePipeline(id, body) {
   const spec = JSON.stringify(body?.spec_json ?? {});
