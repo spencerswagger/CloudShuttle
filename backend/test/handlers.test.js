@@ -20,6 +20,7 @@ test("入口模块可 import 不崩溃，且 CRUD 路由齐全", () => {
   assert.equal(routeToHandler("/api/credentials", "POST", {}).handler, "api.createCredential");
   assert.equal(routeToHandler("/api/images", "GET", null).handler, "api.listImages");
   assert.equal(routeToHandler("/api/executions", "GET", null).handler, "api.listExecutions");
+  assert.equal(routeToHandler("/api/credentials/9", "DELETE", null).handler, "api.deleteCredential");
   assert.equal(routeToHandler("/hook/dingtalk/card/tok1", "POST", {}).handler, "hook.dingtalkCardCb");
   assert.equal(routeToHandler("/hook/dingtalk/tok1", "GET", null).handler, "hook.dingtalkCardCb");
   assert.equal(routeToHandler("/api/dingtalk/groups", "POST", {}).handler, "api.dingtalkGroups");

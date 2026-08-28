@@ -29,6 +29,7 @@ const RE = {
   pipelinesList: /^\/api\/pipelines$/,
   pipelineOne: /^\/api\/pipelines\/(\d+)$/,
   credentials: /^\/api\/credentials$/,
+  credentialOne: /^\/api\/credentials\/(\d+)$/,
   images: /^\/api\/images$/,
   executions: /^\/api\/executions$/,
   executionOne: /^\/api\/executions\/(\d+)$/,
@@ -51,6 +52,9 @@ export function routeToHandler(path, method, body) {
   if (RE.credentials.test(path)) {
     if (m === "GET") return { handler: "api.listCredentials" };
     if (m === "POST") return { handler: "api.createCredential" };
+  }
+  if (RE.credentialOne.test(path)) {
+    if (m === "DELETE") return { handler: "api.deleteCredential" };
   }
   if (RE.images.test(path)) {
     if (m === "GET") return { handler: "api.listImages" };
@@ -246,6 +250,8 @@ const DISPATCH = {
   "api.deletePipeline": async ({ path }) => ok(api.deletePipeline(Number(m(path, RE.pipelineOne)))),
   "api.listCredentials": async () => ok(api.listCredentials()),
   "api.createCredential": async ({ body }) => ok(api.createCredential(body)),
+  "api.deleteCredential": async ({ path }) =>
+    ok(api.deleteCredential(Number(m(path, RE.credentialOne)))),
   "api.listImages": async () => ok(api.listImages()),
   "api.createImage": async ({ body }) => ok(api.createImage(body)),
   "api.listExecutions": async () => ok(api.listExecutions()),

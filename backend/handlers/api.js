@@ -92,7 +92,29 @@ export async function updatePipeline(id, body) {
 }
 
 export async function deletePipeline(id) {
-  const { rows: r } = await pool.query(`DELETE FROM pipeline WHERE id=$1 RETURNING id`, [id]);
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      `DELETE FROM webhook_registry WHERE exec_id IN (SELECT id FROM execution WHERE pipeline_id=$1)`, [id]);
+    await client.query(
+      `DELETE FROM execution_node WHERE exec_id IN (SELECT id FROM execution WHERE pipeline_id=$1)`, [id]);
+    await client.query(`DELETE FROM execution WHERE pipeline_id=$1`, [id]);
+    await client.query(`DELETE FROM pipeline_rev WHERE pipeline_id=$1`, [id]);
+    const { rows: r } = await client.query(`DELETE FROM pipeline WHERE id=$1 RETURNING id`, [id]);
+    await client.query("COMMIT");
+    return rows({ rows: r })[0];
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+export async function deleteCredential(id) {
+  const { rows: r } = await pool.query(
+    `DELETE FROM credential WHERE id=$1 RETURNING id,name`, [id]);
   return rows({ rows: r })[0];
 }
 
