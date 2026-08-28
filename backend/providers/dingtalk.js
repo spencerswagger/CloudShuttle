@@ -2,16 +2,15 @@
 // 机器人凭证不放在平台级环境变量，而是作为流程定义里的节点参数
 // (approval.params.robot = 凭证库名)，由 getCredentialSecrets 解出。
 import { createHmac } from "node:crypto";
+import { HttpError } from "../errors.js";
 
-// 钉钉机器人加签：timestamp\nsecret 作为 HmacSHA256 密钥，对空字符串签名
+// 钉钉机器人加签：以 secret 为 HMAC 密钥，对「ts\nsecret」签名，结果 base64 后做 URL 编码
 function signUrl(url, secret, ts) {
-  const key = `${ts}\n${secret}`;
-  const sign = createHmac("sha256", key)
-    .update("")
+  const sign = createHmac("sha256", secret)
+    .update(`${ts}\n${secret}`)
     .digest()
-    .toString("base64")
-    .replace(/\+/g, "%2B").replace(/\//g, "%2F").replace(/=/g, "%3D");
-  return `${url}&timestamp=${ts}&sign=${sign}`;
+    .toString("base64");
+  return `${url}&timestamp=${ts}&sign=${encodeURIComponent(sign)}`;
 }
 
 export function createDingtalkProvider({ httpClient, getCredentialSecrets, clock = Date }) {
@@ -33,10 +32,19 @@ export function createDingtalkProvider({ httpClient, getCredentialSecrets, clock
         `[✅ 通过](${decisionUrl("approve")})　[❌ 拒绝](${decisionUrl("reject")})`;
       let url = webhook;
       if (signSecret) url = signUrl(webhook, signSecret, clock.now());
-      await httpClient.post(url, {
+      const resp = await httpClient.post(url, {
         msgtype: "markdown",
         markdown: { title: `流水线审批卡点 #${token}`, text: md },
       });
+      const code = resp?.data?.errcode ?? 0;
+      if (code) {
+        throw new HttpError(
+          502,
+          "DINGTALK_SEND_FAILED",
+          "审批消息发送失败，请检查机器人配置或调用额度",
+          `dingtalk errcode=${code} errmsg=${resp?.data?.errmsg ?? ""}`,
+        );
+      }
     },
 
     // 决策归一：回调 query 只可能是 approve / reject
