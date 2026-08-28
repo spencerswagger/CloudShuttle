@@ -1,20 +1,10 @@
 // 凭证类型元数据（列表页与表单页共用）
 export const CRED_KINDS = [
   {
-    value: "dingtalk-robot",
-    label: "钉钉审批机器人",
-    icon: "M17 8a5 5 0 0 0-9.5 1.9A3 3 0 1 0 5 15h14a4 4 0 0 0 0-7z",
-    hint: "approval 节点通过 params.robot 引用这里创建的机器人名称",
-    fields: [
-      { k: "webhook", label: "Webhook 地址", ph: "https://oapi.dingtalk.com/robot/send?access_token=..." },
-      { k: "signSecret", label: "加签密钥（可选）", ph: "SEC...", secret: true },
-    ],
-  },
-  {
     value: "dingtalk-corp",
     label: "钉钉企业机器人",
     icon: "M6 3h12v18H6zM9.5 8h5M9.5 12h5M9.5 16h3",
-    hint: "走钉钉企业应用 OpenAPI，审批可发群或发人；发群与发人均需配置下方卡片模板 ID 与回调 routeKey",
+    hint: "走钉钉企业应用 OpenAPI，审批仅发人（机器人单聊互动卡片），需配置下方卡片模板 ID 与回调 routeKey",
     fields: [
       { k: "appKey", label: "AppKey", ph: "应用 AppKey" },
       { k: "appSecret", label: "AppSecret", ph: "应用 AppSecret", secret: true },

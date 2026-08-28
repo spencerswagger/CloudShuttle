@@ -81,7 +81,7 @@ const isCorpRobot = (name) => {
   return convKinds.includes(c?.kind);
 };
 
-// 通讯录选择器：按部门树逐层加载，勾选成员填回 target.openIds
+// 通讯录选择器：按部门树逐层加载，勾选成员填回 target.members（含部门层级），并同步 openIds 供后端使用
 const orgOpen = ref(false);
 const orgLoading = ref(false);
 const orgCred = ref("");
@@ -89,7 +89,7 @@ const orgNode = ref(null);
 const orgPath = ref([]);
 const orgDepts = ref([]);
 const orgUsers = ref([]);
-const orgSel = reactive(new Map());
+const orgSel = reactive(new Map()); // userId -> { name, dept }
 
 async function orgLoad() {
   orgLoading.value = true;
@@ -111,26 +111,47 @@ function openOrg(node) {
   orgNode.value = node;
   orgPath.value = [];
   orgSel.clear();
+  // 回显已有成员到选择器，便于增删
+  for (const m of nodeTarget(node).members ?? []) orgSel.set(m.userId, { name: m.name, dept: m.dept });
   orgOpen.value = true;
   orgLoad();
 }
 function orgGoto(d) { orgPath.value.push({ id: d.id, name: d.name }); orgLoad(); }
 function orgGotoIndex(i) { orgPath.value.splice(i); orgLoad(); }
-function orgToggle(u) { orgSel.has(u.userId) ? orgSel.delete(u.userId) : orgSel.set(u.userId, u.name); }
+function orgToggle(u) {
+  const dept = orgPath.value.map((p) => p.name).join(" / ");
+  orgSel.has(u.userId) ? orgSel.delete(u.userId) : orgSel.set(u.userId, { name: u.name, dept });
+}
 function orgConfirm() {
   const node = orgNode.value;
-  const ids = [...orgSel.keys()];
-  const names = [...orgSel.values()];
-  if (!ids.length) { notify({ type: "error", message: "未选择成员" }); return; }
-  nodeTarget(node).openIds = ids.join(",");
-  nodeTarget(node).openNames = names.join("、");
+  if (!orgSel.size) { notify({ type: "error", message: "未选择成员" }); return; }
+  const members = [...orgSel.entries()].map(([userId, v]) => ({ userId, name: v.name, dept: v.dept }));
+  nodeTarget(node).members = members;
+  nodeTarget(node).openIds = members.map((m) => m.userId).join(",");
+  nodeTarget(node).openNames = members.map((m) => m.name).join("、");
+  nodeTarget(node).type = "user";
+  nodeTarget(node).openConversationId = "";
   orgOpen.value = false;
-  notify({ type: "success", message: `已选 ${ids.length} 人：${names.join("、")}` });
+  notify({ type: "success", message: `已选 ${members.length} 人：${members.map((m) => m.name).join("、")}` });
 }
 
-// 保证旧节点也有 target 配置对象
+// 成员回显：优先 target.members（含部门层级）；老数据仅存 openNames 时退化为多行纯姓名（不可单独删除）
+const displayMembers = (n) => {
+  const t = nodeTarget(n);
+  if (Array.isArray(t.members) && t.members.length) return t.members;
+  return (t.openNames || "").split(/[、,]/).filter(Boolean).map((name) => ({ name, dept: "", userId: "" }));
+};
+function removeMember(n, i) {
+  const t = nodeTarget(n);
+  if (!Array.isArray(t.members)) return; // 老数据无 members，不可单独删
+  t.members.splice(i, 1);
+  t.openIds = t.members.map((m) => m.userId).join(",");
+  t.openNames = t.members.map((m) => m.name).join("、");
+}
+
+// 保证旧节点也有 target 配置对象（审批节点仅发人）
 const nodeTarget = (n) =>
-  n.params.target ?? (n.params.target = { type: "group", openConversationId: "", openIds: "" });
+  n.params.target ?? (n.params.target = { type: "user", openConversationId: "", openIds: "", members: [] });
 
 const addNode = (type) => {
   // 添加节点后会用到对应下拉，此时再按需加载其数据
@@ -143,7 +164,7 @@ const addNode = (type) => {
     params:
       type === "shell"
         ? { image: images.value[0]?.image ?? "alpine", command: "", env: [] }
-        : { approverUid: "", robot: "", target: { type: "group", openConversationId: "", openIds: "" } },
+        : { approverUid: "", robot: "", target: { type: "user", openConversationId: "", openIds: "", members: [] } },
   };
   current.value.spec_json.nodes.push(node);
 };
@@ -316,27 +337,20 @@ const back = () => router.push("/pipelines");
                   </div>
 
                   <div v-if="isCorpRobot(n.params.robot)" class="approval-grid" style="margin-top:14px">
-                    <div class="field">
-                      <label class="field-label">发送目标</label>
-                      <div class="kind-tabs mini">
-                        <button type="button" class="kind-tab" :class="{active:(nodeTarget(n).type==='group')}" @click="nodeTarget(n).type='group'">发到群聊</button>
-                        <button type="button" class="kind-tab" :class="{active:(nodeTarget(n).type==='user')}" @click="nodeTarget(n).type='user'">发给成员</button>
-                      </div>
-                    </div>
-                    <div class="field">
-                      <label class="field-label">{{ nodeTarget(n).type==='group' ? '目标群 openConversationId' : '目标成员 openId（逗号分隔）' }}</label>
-                      <template v-if="nodeTarget(n).type==='group'">
-                        <input class="input" v-model="nodeTarget(n).openConversationId" placeholder="群 openConversationId（创建场景群时获取）" />
-                        <p class="field-hint">钉钉无“列出全部群”接口，openConversationId 需在创建场景群时保存，或经 chatId 查询获取。</p>
-                      </template>
-                      <template v-else>
-                        <div class="group-row">
-                          <input class="input" :value="nodeTarget(n).openNames || nodeTarget(n).openIds || ''" readonly placeholder="未选择（点击右侧选择成员）" />
-                          <button type="button" class="btn btn-ghost" style="white-space:nowrap" @click="openOrg(n)">从通讯录选择</button>
+                    <div class="field" style="grid-column:1/-1">
+                      <label class="field-label">发送成员</label>
+                      <div class="member-list">
+                        <div v-for="(m, i) in displayMembers(n)" :key="i" class="member-row">
+                          <span v-if="m.dept" class="member-dept">{{ m.dept }}</span>
+                          <span class="member-name">{{ m.name }}</span>
+                          <span v-if="m.userId" class="member-id muted">{{ m.userId }}</span>
+                          <button v-if="m.userId" type="button" class="member-del" title="移除该成员" @click="removeMember(n, i)">×</button>
                         </div>
-                        <p v-if="nodeTarget(n).openNames" class="field-hint">已选 {{ nodeTarget(n).openIds.split(',').filter(Boolean).length }} 人 · openId：{{ nodeTarget(n).openIds }}</p>
-                        <p v-else class="field-hint">点“从通讯录选择”按部门树勾选成员，自动填 openId，显示成员姓名。</p>
-                      </template>
+                        <div v-if="!displayMembers(n).length" class="empty-tip muted">未选择审批人，点「从通讯录选择」按部门树勾选成员。</div>
+                      </div>
+                      <div class="group-row" style="margin-top:8px">
+                        <button type="button" class="btn" style="white-space:nowrap" @click="openOrg(n)">从通讯录选择</button>
+                      </div>
                     </div>
                   </div>
                 </template>
@@ -377,7 +391,7 @@ const back = () => router.push("/pipelines");
             </div>
           </div>
           <div class="org-foot">
-            <span class="org-sel">已选 {{ orgSel.size }}：{{ [...orgSel.values()].join("、") || "—" }}</span>
+            <span class="org-sel">已选 {{ orgSel.size }}：{{ [...orgSel.values()].map((v) => v.name).join("、") || "—" }}</span>
             <div>
               <button type="button" class="btn btn-ghost" @click="orgOpen = false">取消</button>
               <button type="button" class="btn" @click="orgConfirm">确认</button>
@@ -470,6 +484,22 @@ const back = () => router.push("/pipelines");
 .group-row { display: flex; gap: 8px; }
 .group-row .input { flex: 1; min-width: 0; }
 .group-row .select { flex: 1; min-width: 0; }
+
+.member-list { display: flex; flex-direction: column; gap: 6px; }
+.member-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 10px; border: 1px solid rgba(255,255,255,.08); border-radius: 8px; background: var(--bg-2);
+}
+.member-dept { color: var(--muted, var(--fg-3)); font-size: 12px; }
+.member-dept::after { content: "/"; margin: 0 6px; color: var(--fg-4, rgba(255,255,255,.3)); }
+.member-name { font-weight: 600; }
+.member-id { font-size: 12px; margin-left: auto; }
+.member-del {
+  border: 0; background: transparent; color: var(--fg-4, rgba(255,255,255,.45));
+  font-size: 18px; line-height: 1; cursor: pointer; padding: 2px 4px; border-radius: 6px;
+}
+.member-del:hover { color: #ff6b6b; background: var(--bg-3); }
+.empty-tip { font-size: 12.5px; padding: 2px 0; }
 .refresh-btn { flex: 0 0 auto; white-space: nowrap; }
 .field-hint { margin-top: 6px; font-size: 12px; color: var(--text-2); line-height: 1.5; }
 

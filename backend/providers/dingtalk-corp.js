@@ -17,15 +17,8 @@ export function createDingtalkCorpProvider({
   getToken,     // (corp) => Promise<accessToken>，含缓存
   clock = Date,
 }) {
-  // 目标缺省兜底：给了 openId 则发人；否则要求群，缺参会报错
+  // 目标：仅发人（IM_ROBOT）。兼容数组与逗号分隔字符串两种存储形态（通讯录选择器存逗号串）
   function resolveTarget(target, approver) {
-    if (target?.type === "group") {
-      if (!target.openConversationId) {
-        corpError(400, "BAD_TARGET", "未配置发送的目标群（openConversationId）", "approval target missing openConversationId");
-      }
-      return { type: "group", openConversationId: target.openConversationId };
-    }
-    // 兼容数组与逗号分隔字符串两种存储形态（通讯录选择器存逗号串）
     const raw = (target?.type === "user" ? target.openIds : null) ?? (approver ? [approver] : []);
     const openIds = (Array.isArray(raw) ? raw : String(raw ?? "").split(","))
       .map((s) => String(s).trim()).filter(Boolean);
@@ -36,8 +29,8 @@ export function createDingtalkCorpProvider({
   }
 
   return {
-    // 发送审批卡。robot 为企业机器人凭证（含 appKey/appSecret/robotCode/cardTemplateId/cardCallbackRouteKey）
-    // callbackUrl 保留以兼容旧签名，新版统一走 callbackRouteKey 回调，此处忽略。
+    // 发送审批卡（发人：IM_ROBOT 场域）。robot 为企业机器人凭证（含 appKey/appSecret/robotCode/cardTemplateId/cardCallbackRouteKey）
+    // callbackUrl 保留以兼容旧签名，回调统一走 callbackRouteKey，此处忽略。
     async sendApprovalCard({ robot, target, approver, text, callbackUrl, token }) {
       void callbackUrl;
       const accessToken = await getToken(robot);
@@ -47,12 +40,8 @@ export function createDingtalkCorpProvider({
         `**审批人**：${approver ?? "-"}\n\n` +
         `${text ?? "请审批该流水线卡点"}`;
       const outTrackId = `cloudshuttle_${token}`;
-      if (t.type === "user") {
-        for (const uid of t.openIds) {
-          await this._createAndDeliver(accessToken, robot, outTrackId, mdText, "IM_ROBOT", uid);
-        }
-      } else {
-        await this._createAndDeliver(accessToken, robot, outTrackId, mdText, "IM_GROUP", t.openConversationId);
+      for (const uid of t.openIds) {
+        await this._createAndDeliver(accessToken, robot, outTrackId, mdText, "IM_ROBOT", uid);
       }
     },
 

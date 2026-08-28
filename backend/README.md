@@ -19,7 +19,7 @@ backend/
   db/                 # schema.sql / migrate.js / seed.sql、pg.js、redis.js
   engine/             # dag.js 拓扑、state.js、snapshot.js、mutex.js、orchestrator.js
   steps/              # shell.js（→ECI 派发）、approval.js（钉钉卡点）
-  providers/          # eci.js、dingtalk.js
+  providers/          # eci.js、dingtalk-corp.js（企业机器人）、dingtalk-token.js
   handlers/           # api.js、hook.js、internal.js
   crypto/             # sm4.js
   test/               # node --test 单测

@@ -10,7 +10,7 @@ import { CRED_KINDS, credKind, credKindLabel } from "../lib/kinds.js";
 const route = useRoute();
 const router = useRouter();
 
-const form = ref({ name: "", kind: "dingtalk-robot", secret: {} });
+const form = ref({ name: "", kind: "dingtalk-corp", secret: {} });
 const loading = ref(false);
 const saving = ref(false);
 const deleting = ref(false);

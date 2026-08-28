@@ -5,7 +5,6 @@ import { pool } from "./db/pg.js";
 import { redis } from "./db/redis.js";
 import { config } from "./config.js";
 import { createEciProvider } from "./providers/eci.js";
-import { createDingtalkProvider } from "./providers/dingtalk.js";
 import { createDingtalkCorpProvider } from "./providers/dingtalk-corp.js";
 import { createDingtalkTokenCache } from "./providers/dingtalk-token.js";
 import { createSnapshotStore } from "./engine/snapshot.js";
@@ -180,14 +179,6 @@ async function buildApp() {
   const snapshotStore = createSnapshotStore(redis);
   const mutex = createMutex(redis);
   const eciProvider = createEciProvider({ create: createEciGroup });
-  const dingtalkProvider = createDingtalkProvider({
-    httpClient: axios,
-    getCredentialSecrets: async (name) => {
-      const { rows } = await pool.query(`SELECT secret_enc FROM credential WHERE name=$1`, [name]);
-      if (!rows[0]) throw new Error(`credential not found: ${name}`);
-      return sm4Decrypt(config.sm4Key, rows[0].secret_enc);
-    },
-  });
   // 凭证类型判定 + 解密（企业应用凭证用 corp provider）
   async function getCredentialKind(name) {
     const { rows } = await pool.query(`SELECT kind FROM credential WHERE name=$1`, [name]);
@@ -221,7 +212,7 @@ async function buildApp() {
   const steps = {
     shell: makeShellStep({ eciProvider, genToken: randomUUID, controlPlaneBase: resolveControlBase }),
     approval: makeApprovalStep({
-      dingtalkProvider, dingtalkCorpProvider, getCredentialKind, getCredentialSecrets,
+      dingtalkCorpProvider, getCredentialKind, getCredentialSecrets,
       genToken: randomUUID, controlPlaneBase: resolveControlBase,
     }),
   };
