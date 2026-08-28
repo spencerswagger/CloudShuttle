@@ -20,6 +20,7 @@ import { HttpError } from "./errors.js";
 import * as api from "./handlers/api.js";
 import * as hook from "./handlers/hook.js";
 import * as internal from "./handlers/internal.js";
+import { isPrivateIp, clientIp } from "./security.js";
 
 // ---------- 路径前缀匹配（纯函数，可单测） ----------
 const RE = {
@@ -31,6 +32,8 @@ const RE = {
   executionOne: /^\/api\/executions\/(\d+)$/,
   executionCancel: /^\/api\/executions\/(\d+)\/cancel$/,
   executionRerun: /^\/api\/executions\/(\d+)\/rerun$/,
+  gitHookSecret: /^\/api\/pipelines\/(\d+)\/git-hook-secret$/,
+  gitHookSecretReset: /^\/api\/pipelines\/(\d+)\/git-hook-secret\/reset$/,
   git: /^\/hook\/git\/([^/]+)/,
   dingtalk: /^\/hook\/dingtalk\/([^/]+)/,
   eciDone: /^\/_\/hook\/ecidone\/(\d+)/,
@@ -69,6 +72,12 @@ export function routeToHandler(path, method, body) {
   if (RE.pipelinesList.test(path)) {
     if (m === "GET") return { handler: "api.listPipelines" };
     if (m === "POST") return { handler: "api.createPipeline" };
+  }
+  if (RE.gitHookSecret.test(path)) {
+    if (m === "GET") return { handler: "api.getGitHookSecret" };
+  }
+  if (RE.gitHookSecretReset.test(path)) {
+    if (m === "POST") return { handler: "api.resetGitHookSecret" };
   }
   if (RE.git.test(path)) return { handler: "hook.gitWebhook" };
   if (RE.dingtalk.test(path)) return { handler: "hook.dingtalkCb" };
@@ -144,6 +153,17 @@ async function buildApp() {
   const resolveControlBase = (ctx) =>
     config.controlPlaneBase ||
     (ctx?.spec?.authority ? `http://${ctx.spec.authority}` : "http://localhost:9000");
+  // 回调登记落库：每个回调(token, kind) 独立密钥，供回拨时校验
+  async function recordRegistry({ kind, token, secret, execId, nodeId }) {
+    await pool.query(
+      `INSERT INTO webhook_registry(token, exec_id, node_id, kind, secret, expires_at)
+       VALUES($1,$2,$3,$4,$5, now() + interval '24 hours')
+       ON CONFLICT (token) DO UPDATE
+         SET exec_id=EXCLUDED.exec_id, node_id=EXCLUDED.node_id,
+             secret=EXCLUDED.secret, expires_at=EXCLUDED.expires_at`,
+      [token, execId, nodeId, kind, secret ?? ""]
+    );
+  }
   const steps = {
     shell: makeShellStep({ eciProvider, genToken: randomUUID, controlPlaneBase: resolveControlBase }),
     approval: makeApprovalStep({ dingtalkProvider, genToken: randomUUID, controlPlaneBase: resolveControlBase }),
@@ -152,6 +172,7 @@ async function buildApp() {
     stepRun: async (node, ctx) => steps[node.type](node, ctx),
     snapshot: snapshotStore.save,
     record: writeNodeRecord,
+    recordRegistry,
   });
   const orchestrator = createOrchestrator({
     loadSpec: loadPipelineRev,
@@ -210,31 +231,36 @@ const DISPATCH = {
     const pipelineId = await api.executionPipelineId(id);
     return ok(app.orchestrator.onGitWebhook({ pipelineId, trigger: { rerunOf: id } }));
   },
+  "api.getGitHookSecret": async ({ path }) => {
+    const out = await api.getGitHookSecret(Number(m(path, RE.gitHookSecret)));
+    if (!out) return { status: 404, body: { ok: false, code: "NOT_FOUND", message: "管道不存在" } };
+    return ok(out);
+  },
+  "api.resetGitHookSecret": async ({ path }) => {
+    const out = await api.resetGitHookSecret(Number(m(path, RE.gitHookSecretReset)));
+    if (!out) return { status: 404, body: { ok: false, code: "NOT_FOUND", message: "管道不存在" } };
+    return ok(out);
+  },
   "hook.gitWebhook": async ({ app, path, body, event }) =>
     ok(hook.gitWebhook(app.orchestrator, {
       pipelineName: m(path, RE.git), payload: body, authority: parseHost(event),
+      secret: qs(path, "secret"),
     })),
   "hook.dingtalkCb": async ({ app, path }) =>
-    ok(hook.dingtalkCb(app.orchestrator, {
+    hook.dingtalkCb(app.orchestrator, {
       token: m(path, RE.dingtalk),
-      execId: Number(qs(path, "execId")),
-      nodeId: qs(path, "nodeId"),
+      secret: qs(path, "secret"),
       decision: qs(path, "decision"),
-    })),
+      lookup: internal.lookupRegistry,
+    }),
   "internal.eciDone": async ({ app, path, body }) =>
-    ok(internal.eciDone(app.orchestrator, {
-      execId: Number(m(path, RE.eciDone)),
-      nodeId: body?.nodeId,
-      token: qs(path, "token"),
-      result: body,
-    })),
+    internal.eciDone(app.orchestrator, {
+      token: qs(path, "token"), secret: qs(path, "secret"), result: body,
+    }),
   "internal.eciFail": async ({ app, path, body }) =>
-    ok(internal.eciFail(app.orchestrator, {
-      execId: Number(m(path, RE.eciFail)),
-      nodeId: body?.nodeId,
-      token: qs(path, "token"),
-      reason: body?.reason,
-    })),
+    internal.eciFail(app.orchestrator, {
+      token: qs(path, "token"), secret: qs(path, "secret"), reason: body?.reason,
+    }),
 };
 
 function parseEvent(event) {
@@ -268,6 +294,13 @@ export async function handler(event) {
   };
   try {
     const { handler: name } = routeToHandler(path, method, body);
+    // /_/ 内部回调仅允许内网来源
+    if (path.startsWith("/_/")) {
+      const ip = clientIp(event);
+      if (!isPrivateIp(ip)) {
+        return finish(403, { ok: false, code: "FORBIDDEN", message: "内部接口仅允许内网访问", requestId }, true);
+      }
+    }
     const job = DISPATCH[name];
     if (!job) {
       return finish(404, { ok: false, code: "NOT_FOUND", message: "请求的接口不存在", requestId }, true);

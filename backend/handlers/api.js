@@ -5,6 +5,7 @@ import { pool } from "../db/pg.js";
 import { config } from "../config.js";
 import { sm4Encrypt } from "../crypto/sm4.js";
 import { HttpError } from "../errors.js";
+import { randomUUID } from "node:crypto";
 
 const rows = (r) => r.rows;
 
@@ -18,17 +19,48 @@ async function snapshotRev(pipelineId, rev, spec) {
 
 // ---------- 管道 ----------
 export async function listPipelines() {
-  return rows(await pool.query("SELECT * FROM pipeline ORDER BY id"));
+  // git_hook_secret 属敏感字段，仅能经 get/reset 接口显式获取
+  return rows(
+    await pool.query(`SELECT id, name, description, spec_json, rev, created_at, updated_at FROM pipeline ORDER BY id`)
+  );
 }
 
 export async function createPipeline(body) {
   const spec = JSON.stringify(body?.spec_json ?? {});
+  // 每个 git 仓库 hook 独立密钥，创建时生成并存库
+  const gitHookSecret = randomUUID();
   const { rows: r } = await pool.query(
-    `INSERT INTO pipeline(name, description, spec_json) VALUES($1,$2,$3::jsonb) RETURNING *`,
-    [body?.name, body?.description ?? null, spec]
+    `INSERT INTO pipeline(name, description, spec_json, git_hook_secret) VALUES($1,$2,$3::jsonb,$4) RETURNING *`,
+    [body?.name, body?.description ?? null, spec, gitHookSecret]
   );
   await snapshotRev(r[0].id, 1, spec);
   return r[0];
+}
+
+// 查看/生成该管道的 git hook 密钥（懒生成：为空则补一个）
+export async function getGitHookSecret(id) {
+  const { rows: r } = await pool.query(
+    `SELECT git_hook_secret FROM pipeline WHERE id=$1`,
+    [id]
+  );
+  if (!r[0]) return null;
+  let secret = r[0].git_hook_secret;
+  if (!secret) {
+    secret = randomUUID();
+    await pool.query(`UPDATE pipeline SET git_hook_secret=$2 WHERE id=$1`, [id, secret]);
+  }
+  return { id, gitHookSecret: secret };
+}
+
+// 重置 git hook 密钥（泄露或轮换用）
+export async function resetGitHookSecret(id) {
+  const secret = randomUUID();
+  const { rows: r } = await pool.query(
+    `UPDATE pipeline SET git_hook_secret=$2 WHERE id=$1 RETURNING id`,
+    [id, secret]
+  );
+  if (!r[0]) return null;
+  return { id, gitHookSecret: secret };
 }
 
 export async function updatePipeline(id, body) {

@@ -39,6 +39,12 @@ export function createOrchestrator({
       const spec = await loadSpecForExec(execId);
       return advance({ spec, snap: next, execId });
     },
+    // ECI 失败回调 → 该节点终态失败，整个执行结束
+    async onEciFail({ execId, nodeId }) {
+      const next = await markDone(nodeId, execId, true);
+      await record({ execId, nodeId, status: "failed", output: { kind: "eci", status: "failed" } });
+      return { status: "failed", done: next.done };
+    },
     // 钉钉审批回调：approve 续跑；reject 终止该执行
     async onApproval({ execId, nodeId, decision }) {
       if (decision === "reject") {

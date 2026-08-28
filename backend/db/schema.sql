@@ -4,9 +4,12 @@ CREATE TABLE IF NOT EXISTS pipeline (
   description TEXT,
   spec_json JSONB NOT NULL DEFAULT '{}',
   rev INT NOT NULL DEFAULT 1,
+  git_hook_secret TEXT NOT NULL DEFAULT '',   -- git webhook 访问密钥（创建时生成）
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE pipeline ADD COLUMN IF NOT EXISTS git_hook_secret TEXT NOT NULL DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS pipeline_rev (
   id BIGSERIAL PRIMARY KEY,
@@ -48,8 +51,12 @@ CREATE TABLE IF NOT EXISTS webhook_registry (
   exec_id BIGINT NOT NULL,
   node_id TEXT NOT NULL,
   kind TEXT NOT NULL,          -- eci | dingtalk
+  secret TEXT NOT NULL DEFAULT '',   -- 每个回调独立的访问密钥
   expires_at TIMESTAMPTZ NOT NULL
 );
+
+-- 存量库兼容：补充 secret 列（幂等，重复执行无害）
+ALTER TABLE webhook_registry ADD COLUMN IF NOT EXISTS secret TEXT NOT NULL DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS credential (
   id BIGSERIAL PRIMARY KEY,
