@@ -68,6 +68,9 @@ CREATE TABLE IF NOT EXISTS credential (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- 存量库兼容：credential 表补充 updated_at（updateCredential 依赖）
+ALTER TABLE credential ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+
 CREATE TABLE IF NOT EXISTS exec_image (
   id BIGSERIAL PRIMARY KEY,
   name TEXT NOT NULL UNIQUE,
