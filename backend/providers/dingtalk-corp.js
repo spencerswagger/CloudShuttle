@@ -57,10 +57,32 @@ export function createDingtalkCorpProvider({
       }
     },
 
-    // 群：StandardCard + RETURN_BACK，点击由钉钉服务器回调通知
+    // 群：普通版 StandardCard + 按钮「回传请求」，点击由钉钉 server 回调 callbackUrl（POST）
     async _sendToGroup(accessToken, robot, openConversationId, mdText, callbackUrl, token) {
       const cardBizId = `cloudshuttle_${token}`;
-      const rt = (d) => JSON.stringify({ decision: d });
+      // 普通版 StandardCard：cardData 必须是 JSON 字符串，结构为 config/header/contents，
+      // 按钮作为 contents 里的 button 组件，通过「回传请求」把 decision 放到回调的 value.params
+      const cardData = JSON.stringify({
+        config: { autoLayout: true, enableForward: true },
+        header: { title: { type: "text", text: `流水线审批卡点 #${token}` } },
+        contents: [
+          { type: "markdown", text: mdText },
+          {
+            type: "button",
+            content: "✅ 通过",
+            actionType: "RETURN_BACK",
+            actionId: "approve",
+            params: { decision: "approve" },
+          },
+          {
+            type: "button",
+            content: "❌ 拒绝",
+            actionType: "RETURN_BACK",
+            actionId: "reject",
+            params: { decision: "reject" },
+          },
+        ],
+      });
       const resp = await httpClient.post(
         `${BASE}/v1.0/im/v1.0/robot/interactiveCards/send`,
         {
@@ -69,14 +91,7 @@ export function createDingtalkCorpProvider({
           openConversationId,
           cardBizId,
           callbackUrl,
-          cardData: {
-            head: { title: `流水线审批卡点 #${token}` },
-            body: { text: mdText },
-            buttons: [
-              { name: "✅ 通过", type: "RETURN_BACK", return_data: rt("approve") },
-              { name: "❌ 拒绝", type: "RETURN_BACK", return_data: rt("reject") },
-            ],
-          },
+          cardData,
         },
         { headers: { "x-acs-dingtalk-access-token": accessToken, "content-type": "application/json" } }
       );

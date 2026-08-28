@@ -22,8 +22,18 @@ export async function dingtalkCardCb(orchestrator, { token, secret, decision, bo
   return { status: 200, body: out ?? {} };
 }
 
-// 归一决策：优先取 RETURN_BACK 回传的 decision，其次用 query
+// 归一决策：优先取「回传请求」按钮回传的 decision，其次用 query
+// 兼容两种来源结构：
+//   - 普通版 StandardCard 回传：body.value 为 JSON 字符串，内含 params（按钮回传参数）
+//   - 老版 RETURN_BACK：body.content.callbackMsg.content 为 return_data JSON
 export function extractDecision(body, queryDecision) {
+  // 普通版 StandardCard：「回传请求」→ body.value = "{\"cardPrivateData\":{...},\"params\":{\"decision\":\"...\"}}"
+  if (body && typeof body.value === "string") {
+    try {
+      const j = JSON.parse(body.value);
+      if (j?.params?.decision) return j.params.decision;
+    } catch { /* 忽略解析失败 */ }
+  }
   const cb = body?.content?.callbackMsg;
   if (cb?.type === "RETURN_BACK") {
     const inner = cb.content;
