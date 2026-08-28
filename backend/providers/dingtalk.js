@@ -24,17 +24,23 @@ export function createDingtalkProvider({ httpClient, getCredentialSecrets, clock
     async sendApprovalCard({ robot, approver, text, callbackUrl, token }) {
       const { webhook, signSecret } = await resolveRobot(robot);
       const decisionUrl = (d) => `${callbackUrl}&decision=${d}`;
-      const md =
+      const mdText =
         `### 流水线审批卡点 · #${token}\n\n` +
         `**审批人**：${approver ?? "-"}\n\n` +
-        `${text ?? "请审批该流水线卡点"}\n\n` +
-        `---\n\n` +
-        `[✅ 通过](${decisionUrl("approve")})　[❌ 拒绝](${decisionUrl("reject")})`;
+        `${text ?? "请审批该流水线卡点"}`;
       let url = webhook;
       if (signSecret) url = signUrl(webhook, signSecret, clock.now());
       const resp = await httpClient.post(url, {
-        msgtype: "markdown",
-        markdown: { title: `流水线审批卡点 #${token}`, text: md },
+        msgtype: "actionCard",
+        actionCard: {
+          title: `流水线审批卡点 #${token}`,
+          text: mdText,
+          btnOrientation: "1", // 不填默认 0（横排）；1 为竖排，上下按钮更醒目
+          btns: [
+            { title: "✅ 通过", actionURL: decisionUrl("approve") },
+            { title: "❌ 拒绝", actionURL: decisionUrl("reject") },
+          ],
+        },
       });
       const code = resp?.data?.errcode ?? 0;
       if (code) {

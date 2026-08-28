@@ -97,3 +97,37 @@ export async function createExecution(body) {
   );
   return r[0];
 }
+
+export async function getExecution(id) {
+  const { rows } = await pool.query(`SELECT * FROM execution WHERE id=$1`, [id]);
+  if (!rows[0]) throw new HttpError(404, "EXECUTION_NOT_FOUND", "执行记录不存在");
+  return rows[0];
+}
+
+export async function executionPipelineId(id) {
+  const { rows } = await pool.query(`SELECT pipeline_id FROM execution WHERE id=$1`, [id]);
+  if (!rows[0]) throw new HttpError(404, "EXECUTION_NOT_FOUND", "执行记录不存在");
+  return rows[0].pipeline_id;
+}
+
+// 取消/终止：仅排队或运行中的执行可取消；作废已派发的待回调 token，
+// 并把未终结的节点标记为 cancelled，防止迟到回调续跑。
+export async function cancelExecution(id) {
+  const { rows } = await pool.query(
+    `UPDATE execution SET status='cancelled', finished_at=now()
+      WHERE id=$1 AND status IN ('queued','running') RETURNING *`,
+    [id]
+  );
+  if (!rows[0]) {
+    const chk = await pool.query(`SELECT id,status FROM execution WHERE id=$1`, [id]);
+    if (!chk.rows[0]) throw new HttpError(404, "EXECUTION_NOT_FOUND", "执行记录不存在");
+    throw new HttpError(409, "NOT_CANCELLABLE", "仅排队或运行中的执行可以被取消");
+  }
+  await pool.query(`DELETE FROM webhook_registry WHERE exec_id=$1`, [id]);
+  await pool.query(
+    `UPDATE execution_node SET status='cancelled', finished_at=now()
+      WHERE exec_id=$1 AND status IN ('queued','running','dispatch','wait')`,
+    [id]
+  );
+  return rows[0];
+}

@@ -28,6 +28,9 @@ const RE = {
   credentials: /^\/api\/credentials$/,
   images: /^\/api\/images$/,
   executions: /^\/api\/executions$/,
+  executionOne: /^\/api\/executions\/(\d+)$/,
+  executionCancel: /^\/api\/executions\/(\d+)\/cancel$/,
+  executionRerun: /^\/api\/executions\/(\d+)\/rerun$/,
   git: /^\/hook\/git\/([^/]+)/,
   dingtalk: /^\/hook\/dingtalk\/([^/]+)/,
   eciDone: /^\/_\/hook\/ecidone\/(\d+)/,
@@ -49,6 +52,15 @@ export function routeToHandler(path, method, body) {
   if (RE.executions.test(path)) {
     if (m === "GET") return { handler: "api.listExecutions" };
     if (m === "POST") return { handler: "api.createExecution" };
+  }
+  if (RE.executionOne.test(path)) {
+    if (m === "GET") return { handler: "api.getExecution" };
+  }
+  if (RE.executionCancel.test(path)) {
+    if (m === "POST") return { handler: "api.cancelExecution" };
+  }
+  if (RE.executionRerun.test(path)) {
+    if (m === "POST") return { handler: "api.rerunExecution" };
   }
   if (RE.pipelineOne.test(path)) {
     if (m === "PUT" || m === "PATCH") return { handler: "api.updatePipeline" };
@@ -191,6 +203,13 @@ const DISPATCH = {
   "api.createImage": async ({ body }) => ok(api.createImage(body)),
   "api.listExecutions": async () => ok(api.listExecutions()),
   "api.createExecution": async ({ body }) => ok(api.createExecution(body)),
+  "api.getExecution": async ({ path }) => ok(api.getExecution(Number(m(path, RE.executionOne)))),
+  "api.cancelExecution": async ({ path }) => ok(api.cancelExecution(Number(m(path, RE.executionCancel)))),
+  "api.rerunExecution": async ({ app, path }) => {
+    const id = Number(m(path, RE.executionRerun));
+    const pipelineId = await api.executionPipelineId(id);
+    return ok(app.orchestrator.onGitWebhook({ pipelineId, trigger: { rerunOf: id } }));
+  },
   "hook.gitWebhook": async ({ app, path, body, event }) =>
     ok(hook.gitWebhook(app.orchestrator, {
       pipelineName: m(path, RE.git), payload: body, authority: parseHost(event),

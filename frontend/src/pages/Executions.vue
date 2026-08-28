@@ -1,7 +1,7 @@
 <!-- frontend/src/pages/Executions.vue -->
 <script setup>
 import { ref, onMounted } from "vue";
-import { fetchExecutions, triggerExecution } from "../api/execution.js";
+import { fetchExecutions, cancelExecution, rerunExecution } from "../api/execution.js";
 
 const list = ref([]);
 const loading = ref(false);
@@ -13,11 +13,13 @@ const STATUS = {
   done:       { label: "完成",   cls: "badge-ok",       dot: "var(--ok)" },
   failed:     { label: "失败",   cls: "badge-err",      dot: "var(--err)" },
   rejected:   { label: "已拒绝", cls: "badge-err",      dot: "var(--err)" },
+  cancelled:  { label: "已取消", cls: "badge-neutral",  dot: "var(--text-3)" },
   approve:    { label: "审批中", cls: "badge-warn",     dot: "var(--warn)" },
   eci:        { label: "运行中", cls: "badge-info",     dot: "var(--info)" },
 };
 const meta = (s) => STATUS[s] || { label: s, cls: "badge-neutral", dot: "var(--text-3)" };
 
+const CANCELLABLE = ["queued", "running"];
 const fmtDate = (iso) =>
   iso ? new Date(iso).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—";
 
@@ -27,8 +29,14 @@ const refresh = async () => {
 };
 onMounted(refresh);
 
-const trigger = async (id) => {
-  try { await triggerExecution(id); } catch { /* 失败提示已由全局拦截器统一展示 */ }
+const rerun = async (id) => {
+  try { await rerunExecution(id); } catch { /* 失败提示已由全局拦截器统一展示 */ }
+  await refresh();
+};
+
+const cancel = async (id) => {
+  if (!window.confirm(`确认终止执行 #${String(id).padStart(4, "0")}？该操作不可撤销。`)) return;
+  try { await cancelExecution(id); } catch { /* 失败提示已由全局拦截器统一展示 */ }
   await refresh();
 };
 </script>
@@ -61,7 +69,7 @@ const trigger = async (id) => {
               <th class="mono">Run</th>
               <th class="mono">状态</th>
               <th class="mono">触发时间</th>
-              <th class="mono"></th>
+              <th class="mono">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -71,8 +79,12 @@ const trigger = async (id) => {
               <td><span class="mono run">{{ e.run_no ?? "—" }}</span></td>
               <td><span class="badge" :class="meta(e.status).cls" :style="{ '--dot': meta(e.status).dot }">{{ meta(e.status).label }}</span></td>
               <td><span class="mono t time">{{ fmtDate(e.started_at) }}</span></td>
-              <td class="right">
-                <button class="btn btn-sm rerun" @click="trigger(e.pipeline_id)">
+              <td class="right acts">
+                <button v-if="CANCELLABLE.includes(e.status)" class="btn btn-sm kill" @click="cancel(e.id)">
+                  <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+                  终止
+                </button>
+                <button class="btn btn-sm rerun" @click="rerun(e.id)">
                   <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7M3 4v5h5"/></svg>
                   重跑
                 </button>
@@ -110,6 +122,9 @@ const trigger = async (id) => {
 .run { color: var(--accent); font-size: 12px; }
 .time { color: var(--text-2); font-size: 12px; }
 .right { text-align: right; }
+.acts { display: flex; gap: 8px; justify-content: flex-end; }
+.kill { color: var(--err); background: var(--err-soft, rgba(255,99,120,.1)); border-color: transparent; }
+.kill:hover { background: rgba(255,99,120,.2); }
 .rerun { color: var(--info); background: var(--info-soft); border-color: transparent; }
 .rerun:hover { background: rgba(111,156,255,.2); }
 </style>
