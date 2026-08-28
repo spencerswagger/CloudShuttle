@@ -44,9 +44,12 @@
   </div>
 
   <div class="toasts" aria-live="polite">
-    <div v-for="t in toasts" :key="t.id" class="toast">
+    <div v-for="t in toasts" :key="t.id" class="toast" :class="t.type === 'success' ? 'toast-ok' : 'toast-err'">
       <div class="toast-row">
-        <span class="toast-ico" aria-hidden="true">!</span>
+        <span class="toast-ico" aria-hidden="true">
+          <svg v-if="t.type === 'success'" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13l4 4 10-10"/></svg>
+          <template v-else>!</template>
+        </span>
         <p class="toast-msg">{{ t.message }}</p>
       </div>
       <div v-if="t.requestId" class="toast-reqid">
@@ -66,7 +69,7 @@ const copyId = async (reqId) => {
 };
 
 const nav = [
-  { to: "/", label: "管道画布", iconA: "M3 6h11M14 6a2.5 2.5 0 1 0 5 0 2.5 2.5 0 0 0-5 0zM3 12h11M14 12a2.5 2.5 0 1 0 5 0 2.5 2.5 0 0 0-5 0zM3 18h11M14 18a2.5 2.5 0 1 0 5 0 2.5 2.5 0 0 0-5 0z" },
+  { to: "/pipelines", label: "流水线", iconA: "M3 6h11M14 6a2.5 2.5 0 1 0 5 0 2.5 2.5 0 0 0-5 0zM3 12h11M14 12a2.5 2.5 0 1 0 5 0 2.5 2.5 0 0 0-5 0zM3 18h11M14 18a2.5 2.5 0 1 0 5 0 2.5 2.5 0 0 0-5 0z" },
   { to: "/credentials", label: "凭证", iconA: "M12 3a5 5 0 0 1 5 5 3 3 0 0 1 3 3v7a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-3a3 3 0 0 1 2-2.8", iconB: "M8.5 11.5V9a3.5 3.5 0 0 1 7 0" },
   { to: "/images", label: "镜像", iconA: "M20.2 6.1l-8-3.6a2 2 0 0 0-1.6 0l-8 3.6A2 2 0 0 0 1.5 8v8a2 2 0 0 0 1.3 1.9l8 3.6a2 2 0 0 0 1.6 0l8-3.6a2 2 0 0 0 1.3-1.9V8a2 2 0 0 0-1.5-1.9zM2 8l10 4.5L22 8M12 12.5V21" },
   { to: "/executions", label: "执行", iconA: "M21 7a4 4 0 0 1-6.6 3L9 15a4 4 0 1 1-2-2l5.4-5A4 4 0 1 1 21 7z" },
@@ -164,6 +167,8 @@ const nav = [
   backdrop-filter: blur(8px);
   animation: toastIn 0.22s var(--ease);
 }
+.toast-ok { border-left-color: var(--ok); }
+.toast-ok .toast-ico { background: var(--ok-soft); color: var(--ok); }
 .toast-row { display: flex; gap: 10px; align-items: flex-start; }
 .toast-ico {
   flex: 0 0 20px; width: 20px; height: 20px;

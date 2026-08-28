@@ -186,6 +186,26 @@ export async function createCredential(body) {
   return r[0];
 }
 
+// 编辑凭证：可改 name；当 secret 请求体非空时一并重加密落库（留空则保持原 secret）
+export async function updateCredential(id, body) {
+  let enc;
+  const secret = body?.secret;
+  if (secret && typeof secret === "object" && Object.keys(secret).length) {
+    if (!config.sm4Key) {
+      throw new HttpError(500, "SERVICE_MISCONFIG", "系统加解密配置缺失，请联系管理员处理",
+        "SM4_KEY not configured; cannot update credential secret");
+    }
+    enc = sm4Encrypt(config.sm4Key, secret);
+  }
+  const sql = enc
+    ? `UPDATE credential SET name=$2, secret_enc=$3, updated_at=now() WHERE id=$1 RETURNING id,name,kind`
+    : `UPDATE credential SET name=$2, updated_at=now() WHERE id=$1 RETURNING id,name,kind`;
+  const args = enc ? [id, body?.name, enc] : [id, body?.name];
+  const { rows: r } = await pool.query(sql, args);
+  if (!r[0]) throw new HttpError(404, "CREDENTIAL_NOT_FOUND", "凭证不存在");
+  return r[0];
+}
+
 // ---------- 镜像 ----------
 export async function listImages() {
   return rows(await pool.query("SELECT * FROM exec_image ORDER BY category,id"));
@@ -196,6 +216,21 @@ export async function createImage(body) {
     `INSERT INTO exec_image(name, image, category, builtin) VALUES($1,$2,$3,$4) RETURNING *`,
     [body?.name, body?.image, body?.category, body?.builtin ?? false]
   );
+  return r[0];
+}
+
+export async function updateImage(id, body) {
+  const { rows: r } = await pool.query(
+    `UPDATE exec_image SET name=$2, image=$3, category=$4 WHERE id=$1 RETURNING *`,
+    [id, body?.name, body?.image, body?.category ?? "通用"]
+  );
+  if (!r[0]) throw new HttpError(404, "IMAGE_NOT_FOUND", "镜像不存在");
+  return r[0];
+}
+
+export async function deleteImage(id) {
+  const { rows: r } = await pool.query(`DELETE FROM exec_image WHERE id=$1 RETURNING id`, [id]);
+  if (!r[0]) throw new HttpError(404, "IMAGE_NOT_FOUND", "镜像不存在");
   return r[0];
 }
 

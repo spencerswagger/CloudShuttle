@@ -1,19 +1,25 @@
-<!-- frontend/src/pages/Canvas.vue -->
+<!-- 流水线编辑页：路由驱动，新建(/pipelines/new) 或 编辑(/pipelines/:id) -->
 <script setup>
 import { ref, reactive, computed, onMounted } from "vue";
+import { useRoute, useRouter } from "vue-router";
 import draggable from "vuedraggable";
-import { fetchPipelines, createPipeline, updatePipeline, deletePipeline, runPipeline } from "../api/pipeline.js";
+import { notify } from "../lib/notify.js";
+import { fetchPipelines, createPipeline, updatePipeline, runPipeline } from "../api/pipeline.js";
 import { fetchImages } from "../api/image.js";
 import { fetchCredentials, listDepartments, listDepartmentUsers } from "../api/credential.js";
 
-const pipelines = ref([]);
+const route = useRoute();
+const router = useRouter();
+
 const images = ref([]);
 const creds = ref([]);
-const toast = ref("");
 
-const newPipeline = () => ({ name: "", spec_json: { nodes: [], edges: [] } });
+const newPipeline = () => ({ id: null, name: "", description: "", spec_json: { nodes: [], edges: [] } });
 const current = ref(newPipeline());
 const nodes = computed({ get: () => current.value.spec_json.nodes, set: (v) => (current.value.spec_json.nodes = v) });
+
+const isNew = computed(() => !route.params.id);
+const pageTitle = computed(() => (isNew.value ? "新建流水线" : `编辑流水线${current.value.name ? " · " + current.value.name : ""}`));
 
 const NODE_KINDS = {
   shell:    { label: "Shell 执行",   accent: "var(--accent)",  icon: "M4 5l6 7-6 7m8 0h8" },
@@ -37,10 +43,10 @@ const orgOpen = ref(false);
 const orgLoading = ref(false);
 const orgCred = ref("");
 const orgNode = ref(null);
-const orgPath = ref([]);   // [{id,name}]
+const orgPath = ref([]);
 const orgDepts = ref([]);
 const orgUsers = ref([]);
-const orgSel = reactive(new Map()); // userId -> name
+const orgSel = reactive(new Map());
 
 async function orgLoad() {
   orgLoading.value = true;
@@ -57,7 +63,7 @@ async function orgLoad() {
   finally { orgLoading.value = false; }
 }
 function openOrg(node) {
-  if (!node.params.robot) { toast.value = "请先选择钉钉企业机器人"; flash(); return; }
+  if (!node.params.robot) { notify({ type: "error", message: "请先选择钉钉企业机器人" }); return; }
   orgCred.value = node.params.robot;
   orgNode.value = node;
   orgPath.value = [];
@@ -72,15 +78,14 @@ function orgConfirm() {
   const node = orgNode.value;
   const ids = [...orgSel.keys()];
   const names = [...orgSel.values()];
-  if (!ids.length) { toast.value = "未选择成员"; flash(); return; }
+  if (!ids.length) { notify({ type: "error", message: "未选择成员" }); return; }
   nodeTarget(node).openIds = ids.join(",");
   nodeTarget(node).openNames = names.join("、");
   orgOpen.value = false;
-  toast.value = `已选 ${ids.length} 人：${names.join("、")}`;
-  flash();
+  notify({ type: "success", message: `已选 ${ids.length} 人：${names.join("、")}` });
 }
 
-// 保证旧节点也有 target 配置对象（惰性初始化）
+// 保证旧节点也有 target 配置对象
 const nodeTarget = (n) =>
   n.params.target ?? (n.params.target = { type: "group", openConversationId: "", openIds: "" });
 
@@ -97,79 +102,58 @@ const addNode = (type) => {
   current.value.spec_json.nodes.push(node);
 };
 
-const loadPipeline = (ev) => {
-  const id = ev.target.value;
-  if (!id) { current.value = newPipeline(); return; }
-  const p = pipelines.value.find((x) => x.id === +id);
-  if (p) current.value = JSON.parse(JSON.stringify(p));
-};
-
 const save = async () => {
-  if (!current.value.name.trim()) { toast.value = "请先填写管道名称"; flash(); return; }
+  if (!current.value.name.trim()) { notify({ type: "error", message: "请先填写流水线名称" }); return; }
   try {
-    current.value.id
-      ? await updatePipeline(current.value.id, current.value)
-      : Object.assign(current.value, await createPipeline(current.value));
-    pipelines.value = await fetchPipelines();
-    toast.value = "已保存 ✓"; flash();
-  } catch {
-    /* 失败提示已由全局拦截器统一展示 */
-  }
+    if (current.value.id) await updatePipeline(current.value.id, current.value);
+    else Object.assign(current.value, await createPipeline(current.value));
+    notify({ type: "success", message: "已保存流水线 ✓" });
+    router.push("/pipelines");
+  } catch { /* 全局拦截器提示 */ }
 };
 
 const run = async () => {
-  if (!current.value.id) { toast.value = "请先保存管道"; flash(); return; }
+  if (!current.value.id) { notify({ type: "error", message: "请先保存流水线再运行" }); return; }
   try {
     await runPipeline(current.value.id);
-    toast.value = "已触发运行，可在执行页查看进度"; flash();
+    notify({ type: "success", message: "已触发运行，可去执行页查看进度" });
   } catch { /* 全局拦截器提示 */ }
 };
 
-const remove = async () => {
-  if (!current.value.id) return;
-  if (!confirm(`确定删除管道「${current.value.name}」？其全部执行历史将一并删除，不可恢复。`)) return;
-  try {
-    await deletePipeline(current.value.id);
-    pipelines.value = await fetchPipelines();
-    current.value = newPipeline();
-    toast.value = "已删除"; flash();
-  } catch { /* 全局拦截器提示 */ }
-};
-
-const flash = () => {
-  setTimeout(() => (toast.value = ""), 2600);
-};
+const back = () => router.push("/pipelines");
 
 onMounted(async () => {
-  [pipelines.value, images.value, creds.value] = await Promise.all([
-    fetchPipelines(), fetchImages(), fetchCredentials(),
-  ]).catch(() => []);
+  const [, ims, crs] = await Promise.all([fetchPipelines(), fetchImages(), fetchCredentials()]).catch(() => []);
+  images.value = ims ?? [];
+  creds.value = crs ?? [];
+  if (route.params.id) {
+    const p = (await fetchPipelines().catch(() => []))?.find((x) => x.id === +route.params.id);
+    if (p) current.value = JSON.parse(JSON.stringify(p));
+  }
 });
 </script>
 
 <template>
   <div class="page">
     <header class="page-head rise">
-      <div>
-        <h1 class="head-title display">管道画布</h1>
-        <p class="head-sub muted">编排 shell 执行与人工审批节点，构建可重跑的 Serverless 工作流。</p>
+      <div class="title-wrap">
+        <button class="btn btn-ghost back-btn" @click="back">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+          返回列表
+        </button>
+        <div>
+          <h1 class="head-title display">{{ pageTitle }}</h1>
+          <p class="head-sub muted">编排 shell 执行与人工审批节点，保存后进入列表。</p>
+        </div>
       </div>
       <div class="head-actions">
-        <select class="select pipe-pick" :value="current.id ?? ''" @change="loadPipeline">
-          <option :value="''">＋ 新建管道</option>
-          <option v-for="p in pipelines" :key="p.id" :value="p.id">{{ p.name }} · #{{ String(p.id).slice(-3) }}</option>
-        </select>
         <button class="btn" @click="run" :disabled="!current.id" title="立即按当前配置触发一次运行">
           <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
           运行
         </button>
-        <button class="btn btn-ghost" @click="remove" :disabled="!current.id" title="删除当前管道及历史">
-          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>
-          删除
-        </button>
         <button class="btn btn-accent" @click="save">
           <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2zM17 21v-8H7v8M7 3v5h8"/></svg>
-          保存管道
+          保存流水线
         </button>
       </div>
     </header>
@@ -177,7 +161,7 @@ onMounted(async () => {
     <!-- 命名栏 -->
     <section class="name-bar card rise" style="animation-delay:.04s">
       <div class="field name-field">
-        <label class="field-label">管道名称</label>
+        <label class="field-label">流水线名称</label>
         <input class="input" v-model="current.name" placeholder="如：release-构建-发布" />
       </div>
       <div class="field">
@@ -221,7 +205,6 @@ onMounted(async () => {
       >
         <template #item="{ element: n, index: i }">
           <div class="node-row">
-            <!-- 连接线 -->
             <div class="rail">
               <div class="rail-dot" :style="{ background: NODE_KINDS[n.type].accent }"></div>
               <div class="rail-line" :class="{ fade: i === current.spec_json.nodes.length - 1 }"></div>
@@ -309,11 +292,6 @@ onMounted(async () => {
       </draggable>
     </section>
 
-    <!-- toast -->
-    <Transition name="toast">
-      <div v-if="toast" class="toast">{{ toast }}</div>
-    </Transition>
-
     <!-- 通讯录成员选择器 -->
     <div v-if="orgOpen" class="org-mask" @click.self="orgOpen = false">
         <div class="org-panel">
@@ -357,24 +335,20 @@ onMounted(async () => {
 
 <style scoped>
 .page { display: flex; flex-direction: column; gap: 18px; max-width: 880px; }
-
 .page-head {
   display: flex; align-items: flex-end; justify-content: space-between; gap: 16px;
-  padding-bottom: 2px;
+  padding-bottom: 2px; flex-wrap: wrap;
 }
-.head-title {
-  margin: 0; font-size: 26px; font-weight: 700; letter-spacing: 0.01em;
-}
+.title-wrap { display: flex; align-items: flex-end; gap: 14px; }
+.back-btn { flex: 0 0 auto; }
+.head-title { margin: 0; font-size: 26px; font-weight: 700; letter-spacing: 0.01em; }
 .head-sub { margin: 6px 0 0; font-size: 13.5px; }
 .head-actions { display: flex; gap: 8px; align-items: center; }
-.pipe-pick { width: 210px; }
 
-/* 命名栏 */
 .name-bar { display: flex; gap: 24px; align-items: flex-end; padding: 18px 20px; }
 .name-field { flex: 1; margin-bottom: 0; }
 .counter { font-size: 22px; font-weight: 600; color: var(--accent); line-height: 1; padding: 4px 0; }
 
-/* 工具箱 */
 .toolbox { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .node-add { display: inline-flex; }
 .node-add.shell { color: var(--accent); background: var(--accent-soft); border-color: transparent; }
@@ -382,7 +356,6 @@ onMounted(async () => {
 .node-add.approval { color: var(--ember); background: var(--warn-soft); border-color: transparent; }
 .node-add.approval:hover { background: rgba(255,192,77,.22); }
 
-/* 画布 */
 .canvas { position: relative; padding: 26px 26px 30px; overflow: hidden; }
 .canvas-grd {
   position: absolute; inset: 0; pointer-events: none; opacity: .7;
@@ -393,7 +366,6 @@ onMounted(async () => {
 }
 .node-list { position: relative; display: flex; flex-direction: column; }
 
-/* 节点行 + 连接轨道 */
 .node-row { display: flex; gap: 22px; align-items: stretch; }
 .rail { width: 18px; display: flex; flex-direction: column; align-items: center; padding-top: 30px; }
 .rail-dot { width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto; box-shadow: 0 0 0 4px rgba(255,255,255,.05); }
@@ -401,7 +373,6 @@ onMounted(async () => {
 .rail-line.fade { opacity: 0; }
 .node-row + .node-row .rail-line { display: none; }
 
-/* 节点卡片 */
 .node-card {
   flex: 1; min-width: 0; margin-bottom: 20px;
   background: linear-gradient(180deg, var(--bg-2), var(--bg-1));
@@ -445,34 +416,24 @@ onMounted(async () => {
 .group-row .input { flex: 1; min-width: 0; }
 .field-hint { margin-top: 6px; font-size: 12px; color: var(--text-2); line-height: 1.5; }
 
-/* 通讯录选择器 */
 .org-mask { position: fixed; inset: 0; z-index: 60; background: rgba(0,0,0,.55); display: flex; align-items: center; justify-content: center; }
-.org-panel { width: 520px; max-width: 92vw; max-height: 80vh; background: var(--surface-2, #14181f); border: 1px solid var(--border, #2a313c); border-radius: 12px; display: flex; flex-direction: column; overflow: hidden; }
-.org-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid var(--border, #2a313c); }
+.org-panel { width: 520px; max-width: 92vw; max-height: 80vh; background: var(--bg-2); border: 1px solid var(--line-strong); border-radius: 12px; display: flex; flex-direction: column; overflow: hidden; }
+.org-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid var(--line); }
 .org-body { padding: 8px 16px; overflow: auto; flex: 1; min-height: 180px; }
 .org-crumb { font-size: 12.5px; margin-bottom: 8px; flex-wrap: wrap; display: flex; }
-.org-crumb a { color: var(--accent, #22d3ee); cursor: pointer; }
-.org-slash { margin: 0 4px; color: var(--text-2, #8892a6); }
+.org-crumb a { color: var(--accent); cursor: pointer; }
+.org-slash { margin: 0 4px; color: var(--text-2); }
 .org-depts { display: flex; flex-direction: column; gap: 2px; margin-bottom: 8px; }
 .org-dept { padding: 7px 10px; cursor: pointer; border-radius: 6px; }
-.org-dept:hover { background: var(--bg-hover, #1c232d); }
+.org-dept:hover { background: var(--bg-3); }
 .org-users { display: flex; flex-direction: column; gap: 2px; }
 .org-user { display: flex; gap: 8px; align-items: center; padding: 6px 8px; cursor: pointer; border-radius: 6px; }
-.org-user:hover { background: var(--bg-hover, #1c232d); }
+.org-user:hover { background: var(--bg-3); }
 .org-user .muted { font-size: 12px; margin-left: auto; }
 .org-empty { padding: 12px 0; }
-.org-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-top: 1px solid var(--border, #2a313c); }
+.org-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-top: 1px solid var(--line); }
 .org-foot > div { display: flex; gap: 8px; }
-.org-sel { font-size: 12.5px; color: var(--text-2, #8892a6); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.org-sel { font-size: 12.5px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .node-ghost { opacity: .35; }
-
-/* toast */
-.toast {
-  position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%);
-  background: var(--bg-4); color: var(--text-1);
-  border: 1px solid var(--line-strong); border-radius: 10px;
-  padding: 11px 18px; font-family: var(--font-display); font-size: 13px;
-  box-shadow: var(--shadow); z-index: 50;
-}
 </style>

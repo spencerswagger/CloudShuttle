@@ -31,6 +31,7 @@ const RE = {
   credentials: /^\/api\/credentials$/,
   credentialOne: /^\/api\/credentials\/(\d+)$/,
   images: /^\/api\/images$/,
+  imageOne: /^\/api\/images\/(\d+)$/,
   executions: /^\/api\/executions$/,
   executionOne: /^\/api\/executions\/(\d+)$/,
   executionCancel: /^\/api\/executions\/(\d+)\/cancel$/,
@@ -59,10 +60,15 @@ export function routeToHandler(path, method, body) {
   }
   if (RE.credentialOne.test(path)) {
     if (m === "DELETE") return { handler: "api.deleteCredential" };
+    if (m === "PUT" || m === "PATCH") return { handler: "api.updateCredential" };
   }
   if (RE.images.test(path)) {
     if (m === "GET") return { handler: "api.listImages" };
     if (m === "POST") return { handler: "api.createImage" };
+  }
+  if (RE.imageOne.test(path)) {
+    if (m === "DELETE") return { handler: "api.deleteImage" };
+    if (m === "PUT" || m === "PATCH") return { handler: "api.updateImage" };
   }
   if (RE.executions.test(path)) {
     if (m === "GET") return { handler: "api.listExecutions" };
@@ -266,8 +272,10 @@ const DISPATCH = {
   "api.deletePipeline": async ({ path }) => ok(api.deletePipeline(Number(m(path, RE.pipelineOne)))),
   "api.listCredentials": async () => ok(api.listCredentials()),
   "api.createCredential": async ({ body }) => ok(api.createCredential(body)),
-  "api.deleteCredential": async ({ path }) =>
-    ok(api.deleteCredential(Number(m(path, RE.credentialOne)))),
+  "api.deleteCredential": async ({ path }) => ok(api.deleteCredential(Number(m(path, RE.credentialOne)))),
+  "api.updateCredential": async ({ path, body }) => ok(api.updateCredential(Number(m(path, RE.credentialOne)), body)),
+  "api.updateImage": async ({ path, body }) => ok(api.updateImage(Number(m(path, RE.imageOne)), body)),
+  "api.deleteImage": async ({ path }) => ok(api.deleteImage(Number(m(path, RE.imageOne)))),
   "api.listImages": async () => ok(api.listImages()),
   "api.createImage": async ({ body }) => ok(api.createImage(body)),
   "api.listExecutions": async () => ok(api.listExecutions()),
