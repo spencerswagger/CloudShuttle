@@ -1,10 +1,10 @@
 <!-- frontend/src/pages/Canvas.vue -->
 <script setup>
-import { ref, computed, onMounted } from "vue";
+import { ref, reactive, computed, onMounted } from "vue";
 import draggable from "vuedraggable";
 import { fetchPipelines, createPipeline, updatePipeline } from "../api/pipeline.js";
 import { fetchImages } from "../api/image.js";
-import { fetchCredentials, fetchDingtalkGroups } from "../api/credential.js";
+import { fetchCredentials, resolveMobiles } from "../api/credential.js";
 
 const pipelines = ref([]);
 const images = ref([]);
@@ -32,13 +32,25 @@ const isCorpRobot = (name) => {
   return convKinds.includes(c?.kind);
 };
 
-const queryGroups = async (node) => {
+// 按手机号解析 userId（免手填 openId）。临时输入存 mobileInputs[node.id]
+const mobileInputs = reactive({});
+
+const resolveUsers = async (node) => {
   if (!node.params.robot) { toast.value = "请先选择钉钉企业机器人"; flash(); return; }
+  const mobiles = (mobileInputs[node.id] ?? "")
+    .split(/[\n,，;；\s]+/).map((s) => s.trim()).filter(Boolean);
+  if (!mobiles.length) { toast.value = "请输入手机号（每行或逗号分隔）"; flash(); return; }
   try {
-    const { groups } = await fetchDingtalkGroups(node.params.robot);
-    node._groups = groups ?? [];
-    if (!node._groups.length) toast.value = "没有可发送的场景群，请先创建/加入";
-    else toast.value = `查到 ${node._groups.length} 个集群`;
+    const { users } = await resolveMobiles(node.params.robot, mobiles);
+    const ok = users.filter((u) => u.userId && !u.error).map((u) => u.userId);
+    const fail = users.filter((u) => u.error);
+    if (ok.length) {
+      const t = nodeTarget(node);
+      const base = (t.openIds ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+      t.openIds = [...new Set([...base, ...ok])].join(",");
+    }
+    if (fail.length) toast.value = `${fail.length} 个解析失败：` + fail.map((u) => `${u.mobile}(${u.error})`).join("；");
+    else toast.value = ok.length ? `已解析 ${ok.length} 个成员 openId` : "没有可解析的手机号";
     flash();
   } catch { /* 全局拦截器提示 */ }
 };
@@ -224,16 +236,17 @@ onMounted(async () => {
                     <div class="field">
                       <label class="field-label">{{ nodeTarget(n).type==='group' ? '目标群 openConversationId' : '目标成员 openId（逗号分隔）' }}</label>
                       <template v-if="nodeTarget(n).type==='group'">
-                        <div class="group-row">
-                          <input class="input" v-model="nodeTarget(n).openConversationId" placeholder="群 openConversationId" />
-                          <button type="button" class="btn btn-ghost" style="white-space:nowrap" @click="queryGroups(n)">查询群</button>
-                        </div>
-                        <select v-if="n._groups && n._groups.length" class="select" style="margin-top:8px" @change="nodeTarget(n).openConversationId = $event.target.value">
-                          <option :value="''" disabled>选择上面查到的群…</option>
-                          <option v-for="g in n._groups" :key="g.openConversationId" :value="g.openConversationId">{{ g.title || g.openConversationId }}</option>
-                        </select>
+                        <input class="input" v-model="nodeTarget(n).openConversationId" placeholder="群 openConversationId（创建场景群时获取）" />
+                        <p class="field-hint">钉钉无“列出全部群”接口，openConversationId 需在创建场景群时保存，或经 chatId 查询获取。</p>
                       </template>
-                      <input v-else class="input" v-model="nodeTarget(n).openIds" placeholder="如 u1,u2,u3" />
+                      <template v-else>
+                        <input class="input" v-model="nodeTarget(n).openIds" placeholder="如 u1,u2,u3" />
+                        <div class="group-row" style="margin-top:8px">
+                          <input class="input" v-model="mobileInputs[n.id]" placeholder="填手机号，点右侧解析成 openId" />
+                          <button type="button" class="btn btn-ghost" style="white-space:nowrap" @click="resolveUsers(n)">解析</button>
+                        </div>
+                        <p class="field-hint">openId 无需手抄：填手机号（每行/逗号分隔）由后端调钉钉 by_mobile 换算。</p>
+                      </template>
                     </div>
                   </div>
                 </template>
@@ -339,6 +352,7 @@ onMounted(async () => {
 }
 .group-row { display: flex; gap: 8px; }
 .group-row .input { flex: 1; min-width: 0; }
+.field-hint { margin-top: 6px; font-size: 12px; color: var(--text-2); line-height: 1.5; }
 
 .node-ghost { opacity: .35; }
 
