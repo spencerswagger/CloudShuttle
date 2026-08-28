@@ -19,6 +19,18 @@ const KINDS = [
     ],
   },
   {
+    value: "dingtalk-corp",
+    label: "钉钉企业机器人",
+    icon: "M6 3h12v18H6zM9.5 8h5M9.5 12h5M9.5 16h3",
+    hint: "走钉钉企业应用 OpenAPI，审批节点可配置发群或发人（回调后台直达）",
+    fields: [
+      { k: "appKey", label: "AppKey", ph: "应用 AppKey" },
+      { k: "appSecret", label: "AppSecret", ph: "应用 AppSecret", secret: true },
+      { k: "agentId", label: "AgentId", ph: "应用 AgentId" },
+      { k: "robotCode", label: "RobotCode", ph: "机器人编码" },
+    ],
+  },
+  {
     value: "docker-registry",
     label: "Docker 私有仓库",
     icon: "M20 7a4 4 0 0 1-6 3.5L9 15a4 4 0 1 1-2.8-2.3L11.4 8A4 4 0 1 1 20 7zM3.5 17.5L7 21M5 19.5l-1.5-1.5",

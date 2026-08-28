@@ -63,6 +63,24 @@ export async function resetGitHookSecret(id) {
   return { id, gitHookSecret: secret };
 }
 
+// 查询指定钉钉企业机器人可发送的场景群（供后台选取 openConversationId）
+export async function listDingtalkGroups({ credential, getCredentialSecrets, getAccessToken, httpClient }) {
+  const secrets = await getCredentialSecrets(credential);
+  const accessToken = await getAccessToken(secrets);
+  const resp = await httpClient.post(
+    "https://api.dingtalk.com/v1.0/im/robot/sceneGroups/queryAllGroups",
+    {},
+    { headers: { "x-acs-dingtalk-access-token": accessToken, "content-type": "application/json" } }
+  );
+  const result = resp?.data?.result ?? [];
+  return {
+    groups: result.map((g) => ({
+      openConversationId: g.openConversationId,
+      title: g.title ?? g.name ?? "",
+    })),
+  };
+}
+
 export async function updatePipeline(id, body) {
   const spec = JSON.stringify(body?.spec_json ?? {});
   const { rows: r } = await pool.query(

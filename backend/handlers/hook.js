@@ -3,6 +3,39 @@
 import { pool } from "../db/pg.js";
 import { safeEqual } from "../security.js";
 
+// 钉钉审批卡片按钮回调（统一入口 /hook/dingtalk/card/:token）
+// 兼容两种来源：
+//   - 群（RETURN_BACK）：钉钉服务器 POST，decision 在 body.content.callbackMsg.content
+//   - 人/webhook（URL）：GET，decision 在 query
+// exec_id/node_id 一律以库内登记为准，防篡改。
+export async function dingtalkCardCb(orchestrator, { token, secret, decision, body, lookup }) {
+  const row = await lookup({ token, kind: "dingtalk" });
+  if (!row || !safeEqual(row.secret, secret ?? "")) {
+    return { status: 403, body: { ok: false, code: "FORBIDDEN", message: "审批回调凭证无效" } };
+  }
+  const decision_ = extractDecision(body, decision);
+  const out = await orchestrator.onApproval({
+    execId: Number(row.exec_id),
+    nodeId: row.node_id,
+    decision: decision_ === "reject" ? "reject" : "approve",
+  });
+  return { status: 200, body: out ?? {} };
+}
+
+// 归一决策：优先取 RETURN_BACK 回传的 decision，其次用 query
+export function extractDecision(body, queryDecision) {
+  const cb = body?.content?.callbackMsg;
+  if (cb?.type === "RETURN_BACK") {
+    const inner = cb.content;
+    if (typeof inner === "string") {
+      try { const j = JSON.parse(inner); if (j && j.decision) return j.decision; } catch { /* 忽略 */ }
+    } else if (inner && inner.decision) {
+      return inner.decision;
+    }
+  }
+  return queryDecision;
+}
+
 // 按管道名解析 pipeline，返回 { pipelineId, gitHookSecret }（轻量查询 webhook 触发定位）
 export async function resolvePipelineByName(name) {
   const { rows: r } = await pool.query(`SELECT id, git_hook_secret FROM pipeline WHERE name=$1`, [name]);
@@ -23,17 +56,4 @@ export async function gitWebhook(orchestrator, { pipelineName, payload, authorit
   return { status: 200, body: { ok: true, waiting: out?.waiting ?? null } };
 }
 
-// 钉钉审批卡片按钮回调：token+secret 双因子校验，exec_id/node_id 取库内值续跑
-export async function dingtalkCb(orchestrator, { token, secret, decision, lookup }) {
-  const row = await lookup({ token, kind: "dingtalk" });
-  if (!row) return { status: 401, body: { ok: false, code: "AUTH_REQUIRED", message: "无效的回调凭证" } };
-  if (!safeEqual(row.secret, secret)) {
-    return { status: 403, body: { ok: false, code: "FORBIDDEN", message: "回调密钥不正确" } };
-  }
-  const out = await orchestrator.onApproval({
-    execId: Number(row.exec_id),
-    nodeId: row.node_id,
-    decision: decision === "reject" ? "reject" : "approve",
-  });
-  return { status: 200, body: out ?? {} };
-}
+// 钉钉审批卡片按钮回调请见 dingtalkCardCb（上方），此处仅保留 git 逻辑

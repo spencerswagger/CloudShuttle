@@ -6,6 +6,8 @@ import { redis } from "./db/redis.js";
 import { config } from "./config.js";
 import { createEciProvider } from "./providers/eci.js";
 import { createDingtalkProvider } from "./providers/dingtalk.js";
+import { createDingtalkCorpProvider } from "./providers/dingtalk-corp.js";
+import { createDingtalkTokenCache } from "./providers/dingtalk-token.js";
 import { createSnapshotStore } from "./engine/snapshot.js";
 import { createMutex } from "./engine/mutex.js";
 import { createAdvancer } from "./engine/state.js";
@@ -35,7 +37,9 @@ const RE = {
   gitHookSecret: /^\/api\/pipelines\/(\d+)\/git-hook-secret$/,
   gitHookSecretReset: /^\/api\/pipelines\/(\d+)\/git-hook-secret\/reset$/,
   git: /^\/hook\/git\/([^/]+)/,
+  dingtalkCard: /^\/hook\/dingtalk\/card\/([^/]+)/,
   dingtalk: /^\/hook\/dingtalk\/([^/]+)/,
+  dingtalkGroups: /^\/api\/dingtalk\/groups$/,
   eciDone: /^\/_\/hook\/ecidone\/(\d+)/,
   eciFail: /^\/_\/hook\/fail\/(\d+)/,
 };
@@ -80,7 +84,11 @@ export function routeToHandler(path, method, body) {
     if (m === "POST") return { handler: "api.resetGitHookSecret" };
   }
   if (RE.git.test(path)) return { handler: "hook.gitWebhook" };
-  if (RE.dingtalk.test(path)) return { handler: "hook.dingtalkCb" };
+  if (RE.dingtalkCard.test(path)) return { handler: "hook.dingtalkCardCb" };
+  if (RE.dingtalk.test(path)) return { handler: "hook.dingtalkCardCb" };
+  if (RE.dingtalkGroups.test(path)) {
+    if (m === "POST") return { handler: "api.dingtalkGroups" };
+  }
   if (RE.eciDone.test(path)) return { handler: "internal.eciDone" };
   if (RE.eciFail.test(path)) return { handler: "internal.eciFail" };
   return { handler: "404" };
@@ -149,6 +157,21 @@ async function buildApp() {
       return sm4Decrypt(config.sm4Key, rows[0].secret_enc);
     },
   });
+  // 凭证类型判定 + 解密（企业应用凭证用 corp provider）
+  async function getCredentialKind(name) {
+    const { rows } = await pool.query(`SELECT kind FROM credential WHERE name=$1`, [name]);
+    return rows[0]?.kind ?? "";
+  }
+  async function getCredentialSecrets(name) {
+    const { rows } = await pool.query(`SELECT secret_enc FROM credential WHERE name=$1`, [name]);
+    if (!rows[0]) throw new Error(`credential not found: ${name}`);
+    return sm4Decrypt(config.sm4Key, rows[0].secret_enc);
+  }
+  const dingtalkTokenCache = createDingtalkTokenCache({ httpClient: axios });
+  const dingtalkCorpProvider = createDingtalkCorpProvider({
+    httpClient: axios,
+    getToken: async (corp) => dingtalkTokenCache(corp),
+  });
   // 回调 base：显式 CONTROL_BASE 优先，否则用触发请求的 Host 推导
   const resolveControlBase = (ctx) =>
     config.controlPlaneBase ||
@@ -166,7 +189,10 @@ async function buildApp() {
   }
   const steps = {
     shell: makeShellStep({ eciProvider, genToken: randomUUID, controlPlaneBase: resolveControlBase }),
-    approval: makeApprovalStep({ dingtalkProvider, genToken: randomUUID, controlPlaneBase: resolveControlBase }),
+    approval: makeApprovalStep({
+      dingtalkProvider, dingtalkCorpProvider, getCredentialKind, getCredentialSecrets,
+      genToken: randomUUID, controlPlaneBase: resolveControlBase,
+    }),
   };
   const advancer = createAdvancer({
     stepRun: async (node, ctx) => steps[node.type](node, ctx),
@@ -181,7 +207,7 @@ async function buildApp() {
     advance: advancer.advanceOnce,
     record: writeNodeRecord,
   });
-  return { orchestrator, snapshotStore, mutex };
+  return { orchestrator, snapshotStore, mutex, getCredentialSecrets, dingtalkTokenCache };
 }
 
 // ---------- 分发辅助 ----------
@@ -246,13 +272,21 @@ const DISPATCH = {
       pipelineName: m(path, RE.git), payload: body, authority: parseHost(event),
       secret: qs(path, "secret"),
     })),
-  "hook.dingtalkCb": async ({ app, path }) =>
-    hook.dingtalkCb(app.orchestrator, {
-      token: m(path, RE.dingtalk),
+  "hook.dingtalkCardCb": async ({ app, path, body }) =>
+    hook.dingtalkCardCb(app.orchestrator, {
+      token: m(path, RE.dingtalkCard) || m(path, RE.dingtalk),
       secret: qs(path, "secret"),
       decision: qs(path, "decision"),
+      body,
       lookup: internal.lookupRegistry,
     }),
+  "api.dingtalkGroups": async ({ app, body }) =>
+    ok(api.listDingtalkGroups({
+      credential: body?.credential,
+      getCredentialSecrets: app.getCredentialSecrets,
+      getAccessToken: app.dingtalkTokenCache,
+      httpClient: axios,
+    })),
   "internal.eciDone": async ({ app, path, body }) =>
     internal.eciDone(app.orchestrator, {
       token: qs(path, "token"), secret: qs(path, "secret"), result: body,

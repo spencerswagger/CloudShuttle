@@ -4,7 +4,7 @@ import { ref, computed, onMounted } from "vue";
 import draggable from "vuedraggable";
 import { fetchPipelines, createPipeline, updatePipeline } from "../api/pipeline.js";
 import { fetchImages } from "../api/image.js";
-import { fetchCredentials } from "../api/credential.js";
+import { fetchCredentials, fetchDingtalkGroups } from "../api/credential.js";
 
 const pipelines = ref([]);
 const images = ref([]);
@@ -26,6 +26,27 @@ const drainId = (id) => {
   return m ? "#" + m[1].slice(-4) : s;
 };
 
+const convKinds = ["dingtalk-corp"];
+const isCorpRobot = (name) => {
+  const c = creds.value.find((x) => x.name === name);
+  return convKinds.includes(c?.kind);
+};
+
+const queryGroups = async (node) => {
+  if (!node.params.robot) { toast.value = "请先选择钉钉企业机器人"; flash(); return; }
+  try {
+    const { groups } = await fetchDingtalkGroups(node.params.robot);
+    node._groups = groups ?? [];
+    if (!node._groups.length) toast.value = "没有可发送的场景群，请先创建/加入";
+    else toast.value = `查到 ${node._groups.length} 个集群`;
+    flash();
+  } catch { /* 全局拦截器提示 */ }
+};
+
+// 保证旧节点也有 target 配置对象（惰性初始化）
+const nodeTarget = (n) =>
+  n.params.target ?? (n.params.target = { type: "group", openConversationId: "", openIds: "" });
+
 const addNode = (type) => {
   const node = {
     id: `n${Date.now()}`,
@@ -34,7 +55,7 @@ const addNode = (type) => {
     params:
       type === "shell"
         ? { image: images.value[0]?.image ?? "alpine", command: "", env: [] }
-        : { approverUid: "", robot: "" },
+        : { approverUid: "", robot: "", target: { type: "group", openConversationId: "", openIds: "" } },
   };
   current.value.spec_json.nodes.push(node);
 };
@@ -180,15 +201,39 @@ onMounted(async () => {
                 <template v-else>
                   <div class="approval-grid">
                     <div class="field">
-                      <label class="field-label">审批人 openId</label>
-                      <input class="input" v-model="n.params.approverUid" placeholder="用户 openId" />
-                    </div>
-                    <div class="field">
                       <label class="field-label">钉钉机器人</label>
                       <select class="select" v-model="n.params.robot">
-                        <option :value="''">默认机器人</option>
+                        <option :value="''">请选择机器人</option>
                         <option v-for="c in creds" :key="c.id" :value="c.name">{{ c.name }}</option>
                       </select>
+                    </div>
+                    <div class="field">
+                      <label class="field-label">审批人 openId（可选）</label>
+                      <input class="input" v-model="n.params.approverUid" placeholder="用户 openId" />
+                    </div>
+                  </div>
+
+                  <div v-if="isCorpRobot(n.params.robot)" class="approval-grid" style="margin-top:14px">
+                    <div class="field">
+                      <label class="field-label">发送目标</label>
+                      <div class="kind-tabs mini">
+                        <button type="button" class="kind-tab" :class="{active:(nodeTarget(n).type==='group')}" @click="nodeTarget(n).type='group'">发到群聊</button>
+                        <button type="button" class="kind-tab" :class="{active:(nodeTarget(n).type==='user')}" @click="nodeTarget(n).type='user'">发给成员</button>
+                      </div>
+                    </div>
+                    <div class="field">
+                      <label class="field-label">{{ nodeTarget(n).type==='group' ? '目标群 openConversationId' : '目标成员 openId（逗号分隔）' }}</label>
+                      <template v-if="nodeTarget(n).type==='group'">
+                        <div class="group-row">
+                          <input class="input" v-model="nodeTarget(n).openConversationId" placeholder="群 openConversationId" />
+                          <button type="button" class="btn btn-ghost" style="white-space:nowrap" @click="queryGroups(n)">查询群</button>
+                        </div>
+                        <select v-if="n._groups && n._groups.length" class="select" style="margin-top:8px" @change="nodeTarget(n).openConversationId = $event.target.value">
+                          <option :value="''" disabled>选择上面查到的群…</option>
+                          <option v-for="g in n._groups" :key="g.openConversationId" :value="g.openConversationId">{{ g.title || g.openConversationId }}</option>
+                        </select>
+                      </template>
+                      <input v-else class="input" v-model="nodeTarget(n).openIds" placeholder="如 u1,u2,u3" />
                     </div>
                   </div>
                 </template>
@@ -282,6 +327,18 @@ onMounted(async () => {
 
 .node-body { padding: 16px; }
 .approval-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.kind-tabs.mini { display: flex; gap: 8px; }
+.kind-tabs.mini .kind-tab {
+  flex: 1; justify-content: center; padding: 8px 6px;
+  font-family: var(--font-display); font-size: 12px; font-weight: 500;
+  color: var(--text-2); background: var(--bg-1); border: 1px solid var(--line);
+  border-radius: 9px; cursor: pointer; transition: all .16s var(--ease);
+}
+.kind-tabs.mini .kind-tab.active {
+  color: var(--ember); background: var(--warn-soft); border-color: var(--ember);
+}
+.group-row { display: flex; gap: 8px; }
+.group-row .input { flex: 1; min-width: 0; }
 
 .node-ghost { opacity: .35; }
 
