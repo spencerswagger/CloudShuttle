@@ -1,6 +1,6 @@
-// 审批卡点用钉钉企业应用（开源 OpenAPI）发送互动卡片。
+// 审批卡点用钉钉企业应用（OpenAPI）发送互动卡片。
 // 支持两类目标：
-//   - 群聊：/v1.0/im/v1.0/robot/interactiveCards/send（StandardCard，按钮 RETURN_BACK 服务端回传）
+//   - 群聊：/v1.0/im/v1.0/robot/interactiveCards/send（普通版 StandardCard，竖排按钮 RETURN_BACK 服务端回传）
 //   - 单人：/v1.0/robot/oToMessages/batchSend（机器人单聊消息，按钮为 URL，需用户已建会话）
 // 企业信息（appKey/appSecret/agentId/robotCode）来自凭证库，SM4 解密后使用。
 import { HttpError } from "../errors.js";
@@ -57,32 +57,41 @@ export function createDingtalkCorpProvider({
       }
     },
 
-    // 群：普通版 StandardCard + 按钮「回传请求」，点击由钉钉 server 回调 callbackUrl（POST）
+    // 群：普通版 StandardCard + 竖排按钮「回传请求」，点击由钉钉服务端 POST 回调 callbackUrl。
+    // cardData 必须是 JSON 字符串，结构为 config/header/contents；
+    // 正文用 markdown 元素，按钮用 action 组件（actionType=RETURN_BACK + params.decision）。
+    // 注意：按钮结构不可用 {head,body,buttons} 旧对象，否则钉钉回退默认模板渲染 #singleTitle# 占位符。
     async _sendToGroup(accessToken, robot, openConversationId, mdText, callbackUrl, token) {
       const cardBizId = `cloudshuttle_${token}`;
-      // 普通版 StandardCard：cardData 必须是 JSON 字符串，结构为 config/header/contents，
-      // 按钮作为 contents 里的 button 组件，通过「回传请求」把 decision 放到回调的 value.params
-      const cardData = JSON.stringify({
+      const card = {
         config: { autoLayout: true, enableForward: true },
         header: { title: { type: "text", text: `流水线审批卡点 #${token}` } },
         contents: [
           { type: "markdown", text: mdText },
           {
-            type: "button",
-            content: "✅ 通过",
-            actionType: "RETURN_BACK",
-            actionId: "approve",
-            params: { decision: "approve" },
-          },
-          {
-            type: "button",
-            content: "❌ 拒绝",
-            actionType: "RETURN_BACK",
-            actionId: "reject",
-            params: { decision: "reject" },
+            type: "action",
+            isVertical: true,
+            actions: [
+              {
+                type: "button",
+                contentType: "text",
+                content: "✅ 同意",
+                actionType: "RETURN_BACK",
+                actionId: "approve",
+                params: { decision: "approve" },
+              },
+              {
+                type: "button",
+                contentType: "text",
+                content: "❌ 拒绝",
+                actionType: "RETURN_BACK",
+                actionId: "reject",
+                params: { decision: "reject" },
+              },
+            ],
           },
         ],
-      });
+      };
       const resp = await httpClient.post(
         `${BASE}/v1.0/im/v1.0/robot/interactiveCards/send`,
         {
@@ -91,7 +100,7 @@ export function createDingtalkCorpProvider({
           openConversationId,
           cardBizId,
           callbackUrl,
-          cardData,
+          cardData: JSON.stringify(card),
         },
         { headers: { "x-acs-dingtalk-access-token": accessToken, "content-type": "application/json" } }
       );
@@ -116,17 +125,17 @@ export function createDingtalkCorpProvider({
 
     _assertOk(resp, api, msg) {
       const body = resp?.data ?? {};
-      // interactiveCards/send 走 processCode；oToMessages 走 processQueryKey，统一看非空
-      if (Array.isArray(body?.processQueryKeys)) {
-        return;
+      // 成功判定：返回体含业务标识即成功（interactiveCards → processQueryKey；oToMessages → processQueryKeys）
+      const hasProcess =
+        typeof body?.processQueryKey === "string" && body.processQueryKey.length > 0
+        || Array.isArray(body?.processQueryKeys)
+        || typeof body?.processCode === "string" && body.processCode.length > 0;
+      if (hasProcess) return;
+      if (resp?.status >= 400) {
+        throw new HttpError(502, "DINGTALK_SEND_FAILED", `${msg}，请检查机器人配置或权限`, JSON.stringify(body).slice(0, 300));
       }
-      if (body?.processCode) return;
-      // 报错结构兜底
-      const code = body?.code || (resp?.status && resp.status >= 400 ? resp.status : 0);
-      const detail = body?.message || body?.code || resp?.data ? JSON.stringify(body).slice(0, 300) : "";
-      if (code) {
-        throw new HttpError(502, "DINGTALK_SEND_FAILED", `${msg}，请检查机器人配置或权限`, detail);
-      }
+      // 无明确业务标识但 HTTP 200：视为已受理，仅记录日志提示
+      throw new HttpError(502, "DINGTALK_SEND_FAILED", `${msg}，请检查机器人配置或权限`, `unexpected response: ${JSON.stringify(body).slice(0, 300)}`);
     },
 
     normalizeDecision(d) {
