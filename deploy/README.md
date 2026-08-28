@@ -137,7 +137,23 @@ docker push registry.cn-hangzhou.aliyuncs.com/<ns>/cloudshuttle-runner:0.1
 
 ### B.6 审批机器人（可选）
 
-审批卡点用**钉钉群机器人**发送。先在 Web 画布的"凭证"页创建 `dingtalk-robot` 凭证（webhook 地址 + 可选加签密钥），再把凭证名填进管道 approval 节点的 `params.robot`。无需任何平台级环境变量。
+审批卡点用**钉钉**发送，支持两种凭证：
+
+1. **群自定义机器人（webhook）**：审批卡点用 `actionCard` 两个按钮，点击后在钉钉内置 webview 回调后端续跑。无需企业应用与额外权限。凭证页创建 `dingtalk` 凭证（webhook + 可选加签 secret），节点填 `params.robot`。
+2. **企业机器人（推荐，可后台回调）**：走官方互动卡片，按钮点击由**钉钉服务器后台回调**（不进浏览器）。凭证页创建 `dingtalk-corp` 凭证（企业应用 AppKey/AppSecret/AgentId/RobotCode）。审批节点可配置**发群**（填 `openConversationId`）或**发成员**（从通讯录按部门树勾选）。
+
+**企业机器人所需的企业应用权限**（在钉钉开发者后台「权限管理」发起/授予，未开通会导致对应接口报错）：
+
+| 权限代码 | 权限名 | 用途 |
+|---|---|---|
+| `qyapi_get_department_member` | 通讯录部门成员读权限 | 拉取部门内成员 userId/name（构建通讯录选择器） |
+| `qyapi_get_department_list` | 通讯录部门信息读权限 | 拉取部门列表（构建部门树） |
+
+相关 OpenAPI（oapi，用企业 accessToken 调用）：
+- `POST /topapi/v2/department/listsub` 查下一级部门
+- `POST /topapi/user/listsimple` 查部门内成员
+
+> 注意：审批/发成员选择器依赖以上两个权限；若只需 webhook 群机器人发卡可忽略。`openConversationId` 钉钉没有"列出全部群"接口，需在创建场景群时保存。
 
 ---
 

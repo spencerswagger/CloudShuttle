@@ -37,6 +37,7 @@ const RE = {
   executionRerun: /^\/api\/executions\/(\d+)\/rerun$/,
   gitHookSecret: /^\/api\/pipelines\/(\d+)\/git-hook-secret$/,
   gitHookSecretReset: /^\/api\/pipelines\/(\d+)\/git-hook-secret\/reset$/,
+  pipelineRun: /^\/api\/pipelines\/(\d+)\/run$/,
   git: /^\/hook\/git\/([^/]+)/,
   dingtalkCard: /^\/hook\/dingtalk\/card\/([^/]+)/,
   dingtalk: /^\/hook\/dingtalk\/([^/]+)/,
@@ -79,6 +80,9 @@ export function routeToHandler(path, method, body) {
   if (RE.pipelineOne.test(path)) {
     if (m === "PUT" || m === "PATCH") return { handler: "api.updatePipeline" };
     if (m === "DELETE") return { handler: "api.deletePipeline" };
+  }
+  if (RE.pipelineRun.test(path)) {
+    if (m === "POST") return { handler: "api.runPipeline" };
   }
   if (RE.pipelinesList.test(path)) {
     if (m === "GET") return { handler: "api.listPipelines" };
@@ -270,6 +274,10 @@ const DISPATCH = {
   "api.createExecution": async ({ body }) => ok(api.createExecution(body)),
   "api.getExecution": async ({ path }) => ok(api.getExecution(Number(m(path, RE.executionOne)))),
   "api.cancelExecution": async ({ path }) => ok(api.cancelExecution(Number(m(path, RE.executionCancel)))),
+  "api.runPipeline": async ({ app, path }) => {
+    const id = Number(RE.pipelineRun.exec(path)?.[1]);
+    return ok(app.orchestrator.onGitWebhook({ pipelineId: id, trigger: { trigger: "manual" } }));
+  },
   "api.rerunExecution": async ({ app, path }) => {
     const id = Number(m(path, RE.executionRerun));
     const pipelineId = await api.executionPipelineId(id);

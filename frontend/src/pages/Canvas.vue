@@ -2,7 +2,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted } from "vue";
 import draggable from "vuedraggable";
-import { fetchPipelines, createPipeline, updatePipeline } from "../api/pipeline.js";
+import { fetchPipelines, createPipeline, updatePipeline, deletePipeline, runPipeline } from "../api/pipeline.js";
 import { fetchImages } from "../api/image.js";
 import { fetchCredentials, listDepartments, listDepartmentUsers } from "../api/credential.js";
 
@@ -74,6 +74,7 @@ function orgConfirm() {
   const names = [...orgSel.values()];
   if (!ids.length) { toast.value = "未选择成员"; flash(); return; }
   nodeTarget(node).openIds = ids.join(",");
+  nodeTarget(node).openNames = names.join("、");
   orgOpen.value = false;
   toast.value = `已选 ${ids.length} 人：${names.join("、")}`;
   flash();
@@ -116,6 +117,25 @@ const save = async () => {
   }
 };
 
+const run = async () => {
+  if (!current.value.id) { toast.value = "请先保存管道"; flash(); return; }
+  try {
+    await runPipeline(current.value.id);
+    toast.value = "已触发运行，可在执行页查看进度"; flash();
+  } catch { /* 全局拦截器提示 */ }
+};
+
+const remove = async () => {
+  if (!current.value.id) return;
+  if (!confirm(`确定删除管道「${current.value.name}」？其全部执行历史将一并删除，不可恢复。`)) return;
+  try {
+    await deletePipeline(current.value.id);
+    pipelines.value = await fetchPipelines();
+    current.value = newPipeline();
+    toast.value = "已删除"; flash();
+  } catch { /* 全局拦截器提示 */ }
+};
+
 const flash = () => {
   setTimeout(() => (toast.value = ""), 2600);
 };
@@ -139,6 +159,14 @@ onMounted(async () => {
           <option :value="''">＋ 新建管道</option>
           <option v-for="p in pipelines" :key="p.id" :value="p.id">{{ p.name }} · #{{ String(p.id).slice(-3) }}</option>
         </select>
+        <button class="btn" @click="run" :disabled="!current.id" title="立即按当前配置触发一次运行">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+          运行
+        </button>
+        <button class="btn btn-ghost" @click="remove" :disabled="!current.id" title="删除当前管道及历史">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>
+          删除
+        </button>
         <button class="btn btn-accent" @click="save">
           <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2zM17 21v-8H7v8M7 3v5h8"/></svg>
           保存管道
@@ -265,10 +293,11 @@ onMounted(async () => {
                       </template>
                       <template v-else>
                         <div class="group-row">
-                          <input class="input" v-model="nodeTarget(n).openIds" placeholder="如 u1,u2,u3（已选请勿手改）" />
+                          <input class="input" :value="nodeTarget(n).openNames || nodeTarget(n).openIds || ''" readonly placeholder="未选择（点击右侧选择成员）" />
                           <button type="button" class="btn btn-ghost" style="white-space:nowrap" @click="openOrg(n)">从通讯录选择</button>
                         </div>
-                        <p class="field-hint">点“从通讯录选择”按部门树勾选成员，自动填 openId，免手抄。</p>
+                        <p v-if="nodeTarget(n).openNames" class="field-hint">已选 {{ nodeTarget(n).openIds.split(',').filter(Boolean).length }} 人 · openId：{{ nodeTarget(n).openIds }}</p>
+                        <p v-else class="field-hint">点“从通讯录选择”按部门树勾选成员，自动填 openId，显示成员姓名。</p>
                       </template>
                     </div>
                   </div>
