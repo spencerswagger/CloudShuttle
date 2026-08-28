@@ -5,27 +5,20 @@ import { useRouter } from "vue-router";
 import { notify } from "../lib/notify.js";
 import ConfirmDialog from "../components/ConfirmDialog.vue";
 import { fetchImages, deleteImage } from "../api/image.js";
-import { fetchPipelines } from "../api/pipeline.js";
 
 const router = useRouter();
 const list = ref([]);
-const pipelines = ref([]);
 const loading = ref(false);
 const selected = ref(new Set());
 
 const confirm = ref({ open: false, message: "", detail: "", ids: [] });
 const deleting = ref(false);
 
-const usedCount = (im) =>
-  (pipelines.value || []).filter((p) => (p.spec_json?.nodes ?? []).some((n) => n.type === "shell" && n.params?.image === im.image)).length;
-
+// 列表页只拉自身数据；「引用流水线」列改为跳转到筛选项，由目标列表页自行查询，不再预拉全量流水线
 const refresh = async () => {
   loading.value = true;
-  try {
-    const [ims, pipes] = await Promise.all([fetchImages().catch(() => []), fetchPipelines().catch(() => [])]);
-    list.value = ims;
-    pipelines.value = pipes;
-  } finally { loading.value = false; }
+  try { list.value = await fetchImages().catch(() => []); }
+  finally { loading.value = false; }
 };
 onMounted(refresh);
 
@@ -128,8 +121,7 @@ const doDelete = async () => {
                 <span v-else class="cell-mono dim">自定义</span>
               </td>
               <td>
-                <a v-if="usedCount(im) > 0" class="link" @click="router.push(`/pipelines?image=${encodeURIComponent(im.image)}`)">{{ usedCount(im) }} 条 →</a>
-                <span v-else class="cell-mono dim">—</span>
+                <a class="link" @click="router.push(`/pipelines?image=${encodeURIComponent(im.image)}`)">查看引用 →</a>
               </td>
               <td class="col-actions">
                 <div class="cell-actions">

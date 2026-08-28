@@ -5,12 +5,10 @@ import { useRouter } from "vue-router";
 import { notify } from "../lib/notify.js";
 import ConfirmDialog from "../components/ConfirmDialog.vue";
 import { fetchCredentials, deleteCredential } from "../api/credential.js";
-import { fetchPipelines } from "../api/pipeline.js";
 import { credKind, credKindLabel } from "../lib/kinds.js";
 
 const router = useRouter();
 const list = ref([]);
-const pipelines = ref([]);
 const loading = ref(false);
 const selected = ref(new Set());
 
@@ -20,17 +18,11 @@ const deleting = ref(false);
 const fmtDate = (iso) =>
   iso ? new Date(iso).toLocaleString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" }) : "—";
 
-// 计算每条凭证被哪些流水线的审批节点引用（params.robot === 凭证名）
-const usedCount = (c) =>
-  (pipelines.value || []).filter((p) => (p.spec_json?.nodes ?? []).some((n) => n.type === "approval" && n.params?.robot === c.name)).length;
-
+// 列表页只拉自身数据；「引用流水线」列改为跳转到筛选项，由目标列表页自行查询，不再预拉全量流水线
 const refresh = async () => {
   loading.value = true;
-  try {
-    const [creds, pipes] = await Promise.all([fetchCredentials().catch(() => []), fetchPipelines().catch(() => [])]);
-    list.value = creds;
-    pipelines.value = pipes;
-  } finally { loading.value = false; }
+  try { list.value = await fetchCredentials().catch(() => []); }
+  finally { loading.value = false; }
 };
 onMounted(refresh);
 
@@ -127,8 +119,7 @@ const doDelete = async () => {
               </td>
               <td><span class="badge badge-neutral" :style="{ color: 'var(--accent)', background: 'var(--accent-soft)' }">{{ credKindLabel(c.kind) }}</span></td>
               <td>
-                <a v-if="usedCount(c) > 0" class="link" @click="router.push(`/pipelines?credential=${encodeURIComponent(c.name)}`)">{{ usedCount(c) }} 条 →</a>
-                <span v-else class="cell-mono dim">—</span>
+                <a class="link" @click="router.push(`/pipelines?credential=${encodeURIComponent(c.name)}`)">查看引用 →</a>
               </td>
               <td class="cell-time">{{ fmtDate(c.created_at) }}</td>
               <td class="col-actions">

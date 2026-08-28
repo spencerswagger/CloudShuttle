@@ -4,7 +4,7 @@ import { ref, computed, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { notify } from "../lib/notify.js";
 import ConfirmDialog from "../components/ConfirmDialog.vue";
-import { fetchImages, createImage, updateImage, deleteImage } from "../api/image.js";
+import { fetchImages, getImage, createImage, updateImage, deleteImage } from "../api/image.js";
 
 const route = useRoute();
 const router = useRouter();
@@ -17,6 +17,26 @@ const confirmDel = ref(false);
 
 const isNew = computed(() => !route.params.id);
 const pageTitle = computed(() => (isNew.value ? "新建镜像" : `编辑镜像${form.value.name ? " · " + form.value.name : ""}`));
+
+// 详情接口优先；后端尚未发布详情接口(404)时回退列表查找，保证返显可用
+async function loadForm() {
+  const id = +route.params.id;
+  let im = null;
+  try { im = await getImage(id); }
+  catch (e) {
+    if (e?.status !== 404) { notify({ type: "error", message: e?.message || "加载镜像失败" }); return; }
+    im = null;
+  }
+  if (!im) im = (await fetchImages().catch(() => []))?.find((x) => Number(x.id) === id);
+  if (im) form.value = { name: im.name, image: im.image, category: im.category || "通用", builtin: !!im.builtin };
+  else notify({ type: "error", message: "未找到该镜像，可能已被删除" });
+}
+
+onMounted(async () => {
+  loading.value = true;
+  try { if (!isNew.value) await loadForm(); }
+  finally { loading.value = false; }
+});
 
 const save = async () => {
   if (!form.value.name.trim()) { notify({ type: "error", message: "请填写镜像名称" }); return; }

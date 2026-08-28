@@ -1,6 +1,7 @@
 // frontend/src/api/credential.js
 import { client } from "./client.js";
 export const fetchCredentials = () => client.get("/credentials");
+export const getCredential = (id) => client.get(`/credentials/${id}`, { silent: true });
 export const createCredential = (d) => client.post("/credentials", d);
 export const updateCredential = (id, d) => client.put(`/credentials/${id}`, d);
 export const deleteCredential = (id) => client.delete(`/credentials/${id}`);

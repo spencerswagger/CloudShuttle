@@ -4,7 +4,7 @@ import { ref, computed, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { notify } from "../lib/notify.js";
 import ConfirmDialog from "../components/ConfirmDialog.vue";
-import { fetchCredentials, createCredential, updateCredential, deleteCredential } from "../api/credential.js";
+import { fetchCredentials, getCredential, createCredential, updateCredential, deleteCredential } from "../api/credential.js";
 import { CRED_KINDS, credKind, credKindLabel } from "../lib/kinds.js";
 
 const route = useRoute();
@@ -21,6 +21,26 @@ const pageTitle = computed(() => (isNew.value ? "新建凭证" : `编辑凭证${
 
 const kindMeta = computed(() => credKind(form.value.kind));
 const kindFields = computed(() => kindMeta.value?.fields ?? []);
+
+// 详情接口优先；后端尚未发布详情接口(404)时回退列表查找，保证返显可用
+async function loadForm() {
+  const id = +route.params.id;
+  let c = null;
+  try { c = await getCredential(id); }
+  catch (e) {
+    if (e?.status !== 404) { notify({ type: "error", message: e?.message || "加载凭证失败" }); return; }
+    c = null;
+  }
+  if (!c) c = (await fetchCredentials().catch(() => []))?.find((x) => Number(x.id) === id);
+  if (c) form.value = { name: c.name, kind: c.kind, secret: {} };
+  else notify({ type: "error", message: "未找到该凭证，可能已被删除" });
+}
+
+onMounted(async () => {
+  loading.value = true;
+  try { if (!isNew.value) await loadForm(); }
+  finally { loading.value = false; }
+});
 
 const save = async () => {
   if (!form.value.name.trim()) { notify({ type: "error", message: "请填写凭证名称" }); return; }

@@ -282,7 +282,7 @@ body {
 /* ============================================================
    列表 CRUD 通用样式
    ============================================================ */
-.listpage { display: flex; flex-direction: column; gap: 18px; max-width: 1080px; }
+.listpage { display: flex; flex-direction: column; gap: 18px; width: 100%; max-width: 1600px; margin: 0 auto; }
 .lp-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; padding-bottom: 2px; }
 .lp-title { margin: 0; font-size: 26px; font-weight: 700; letter-spacing: 0.01em; }
 .lp-sub { margin: 6px 0 0; font-size: 13.5px; }
@@ -376,7 +376,7 @@ body {
 }
 .btn-danger-solid:hover { background: linear-gradient(180deg, #ff8a94, #ff6472); border-color: transparent; }
 
-.form-page { display: flex; flex-direction: column; gap: 18px; max-width: 900px; }
+.form-page { display: flex; flex-direction: column; gap: 18px; width: 100%; max-width: 1280px; margin: 0 auto; }
 .form-sheet { padding: 22px; }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 20px; }
 .form-footer { display: flex; justify-content: flex-end; gap: 10px; padding-top: 4px; }

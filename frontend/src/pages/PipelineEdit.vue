@@ -1,10 +1,10 @@
 <!-- 流水线编辑页：路由驱动，新建(/pipelines/new) 或 编辑(/pipelines/:id) -->
 <script setup>
-import { ref, reactive, computed, onMounted } from "vue";
+import { ref, reactive, computed, onMounted, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import draggable from "vuedraggable";
 import { notify } from "../lib/notify.js";
-import { fetchPipelines, createPipeline, updatePipeline, runPipeline } from "../api/pipeline.js";
+import { fetchPipelines, getPipeline, createPipeline, updatePipeline, runPipeline } from "../api/pipeline.js";
 import { fetchImages } from "../api/image.js";
 import { fetchCredentials, listDepartments, listDepartmentUsers } from "../api/credential.js";
 
@@ -13,13 +13,54 @@ const router = useRouter();
 
 const images = ref([]);
 const creds = ref([]);
+const imagesLoading = ref(false);
+const credsLoading = ref(false);
+
+// 下拉数据按需懒加载：仅在需要时请求，并提供刷新
+async function loadImages() {
+  imagesLoading.value = true;
+  try { images.value = await fetchImages().catch(() => []); }
+  finally { imagesLoading.value = false; }
+}
+async function loadCreds() {
+  credsLoading.value = true;
+  try { creds.value = await fetchCredentials().catch(() => []); }
+  finally { credsLoading.value = false; }
+}
 
 const newPipeline = () => ({ id: null, name: "", description: "", spec_json: { nodes: [], edges: [] } });
 const current = ref(newPipeline());
 const nodes = computed({ get: () => current.value.spec_json.nodes, set: (v) => (current.value.spec_json.nodes = v) });
 
-const isNew = computed(() => !route.params.id);
+// 由路由参数判定是否编辑态：新建/编辑不再依赖返显是否成功
+const editingId = computed(() => (route.params.id ? +route.params.id : null));
+const isNew = computed(() => !editingId.value);
 const pageTitle = computed(() => (isNew.value ? "新建流水线" : `编辑流水线${current.value.name ? " · " + current.value.name : ""}`));
+
+async function hydrate() {
+  if (!editingId.value) { current.value = newPipeline(); return; }
+  /* 详情接口优先；后端尚未发布详情接口(404)时回退列表查找，保证返显可用 */
+  try {
+    let p = null;
+    try { p = await getPipeline(editingId.value); }
+    catch (e) {
+      if (e?.status !== 404) { notify({ type: "error", message: e?.message || "加载流水线失败" }); return; }
+      p = null;
+    }
+    if (!p) p = (await fetchPipelines().catch(() => []))?.find((x) => Number(x.id) === editingId.value);
+    if (p) {
+      current.value = JSON.parse(JSON.stringify(p));
+      // 下拉数据懒加载：仅当节点实际用到镜像/凭证才请求，避免挂载即连拉 3 个接口
+      const ns = current.value.spec_json?.nodes ?? [];
+      if (ns.some((n) => n.type === "shell")) loadImages();
+      if (ns.some((n) => n.type === "approval")) loadCreds();
+    } else {
+      notify({ type: "error", message: "未找到该流水线，可能已被删除" });
+    }
+  } catch { /* 全局拦截器提示 */ }
+}
+watch(() => route.params.id, hydrate);
+onMounted(hydrate);
 
 const NODE_KINDS = {
   shell:    { label: "Shell 执行",   accent: "var(--accent)",  icon: "M4 5l6 7-6 7m8 0h8" },
@@ -90,6 +131,9 @@ const nodeTarget = (n) =>
   n.params.target ?? (n.params.target = { type: "group", openConversationId: "", openIds: "" });
 
 const addNode = (type) => {
+  // 添加节点后会用到对应下拉，此时再按需加载其数据
+  if (type === "shell") loadImages();
+  if (type === "approval") loadCreds();
   const node = {
     id: `n${Date.now()}`,
     type,
@@ -104,8 +148,13 @@ const addNode = (type) => {
 
 const save = async () => {
   if (!current.value.name.trim()) { notify({ type: "error", message: "请先填写流水线名称" }); return; }
+  // 编辑态下若返显失败（id 缺失）则不静默新建、也不空覆盖，提示重试
+  if (editingId.value && !current.value.id) {
+    notify({ type: "error", message: "流水线数据尚未加载完成，请稍候或刷新后重试" });
+    return;
+  }
   try {
-    if (current.value.id) await updatePipeline(current.value.id, current.value);
+    if (editingId.value) await updatePipeline(editingId.value, current.value);
     else Object.assign(current.value, await createPipeline(current.value));
     notify({ type: "success", message: "已保存流水线 ✓" });
     router.push("/pipelines");
@@ -121,16 +170,6 @@ const run = async () => {
 };
 
 const back = () => router.push("/pipelines");
-
-onMounted(async () => {
-  const [, ims, crs] = await Promise.all([fetchPipelines(), fetchImages(), fetchCredentials()]).catch(() => []);
-  images.value = ims ?? [];
-  creds.value = crs ?? [];
-  if (route.params.id) {
-    const p = (await fetchPipelines().catch(() => []))?.find((x) => x.id === +route.params.id);
-    if (p) current.value = JSON.parse(JSON.stringify(p));
-  }
-});
 </script>
 
 <template>
@@ -236,9 +275,14 @@ onMounted(async () => {
                 <template v-if="n.type === 'shell'">
                   <div class="field">
                     <label class="field-label">运行镜像</label>
-                    <select class="select" v-model="n.params.image">
-                      <option v-for="im in images" :key="im.image" :value="im.image">{{ im.name }} · {{ im.image }}</option>
-                    </select>
+                    <div class="group-row">
+                      <select class="select" v-model="n.params.image">
+                        <option v-if="!images.length && !imagesLoading" :value="n.params.image" hidden></option>
+                        <option v-for="im in images" :key="im.image" :value="im.image">{{ im.name }} · {{ im.image }}</option>
+                      </select>
+                      <button type="button" class="btn btn-sm btn-ghost refresh-btn" title="加载/刷新镜像" @click="loadImages" :disabled="imagesLoading">⟳</button>
+                    </div>
+                    <p v-if="!images.length" class="field-hint">{{ imagesLoading ? "加载中…" : "暂无镜像，点击右侧刷新图标加载" }}</p>
                   </div>
                   <div class="field">
                     <label class="field-label">Shell 命令</label>
@@ -249,10 +293,15 @@ onMounted(async () => {
                   <div class="approval-grid">
                     <div class="field">
                       <label class="field-label">钉钉机器人</label>
-                      <select class="select" v-model="n.params.robot">
-                        <option :value="''">请选择机器人</option>
-                        <option v-for="c in creds" :key="c.id" :value="c.name">{{ c.name }}</option>
-                      </select>
+                      <div class="group-row">
+                        <select class="select" v-model="n.params.robot">
+                          <option :value="''">请选择机器人</option>
+                          <option v-if="!creds.length && !credsLoading" :value="n.params.robot" hidden></option>
+                          <option v-for="c in creds" :key="c.id" :value="c.name">{{ c.name }}</option>
+                        </select>
+                        <button type="button" class="btn btn-sm btn-ghost refresh-btn" title="加载/刷新机器人" @click="loadCreds" :disabled="credsLoading">⟳</button>
+                      </div>
+                      <p v-if="!creds.length" class="field-hint">{{ credsLoading ? "加载中…" : "暂无机器人，点击右侧刷新图标加载" }}</p>
                     </div>
                     <div class="field">
                       <label class="field-label">审批人 openId（可选）</label>
@@ -334,7 +383,7 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-.page { display: flex; flex-direction: column; gap: 18px; max-width: 880px; }
+.page { display: flex; flex-direction: column; gap: 18px; max-width: 1280px; width: 100%; margin: 0 auto; }
 .page-head {
   display: flex; align-items: flex-end; justify-content: space-between; gap: 16px;
   padding-bottom: 2px; flex-wrap: wrap;
@@ -414,6 +463,8 @@ onMounted(async () => {
 }
 .group-row { display: flex; gap: 8px; }
 .group-row .input { flex: 1; min-width: 0; }
+.group-row .select { flex: 1; min-width: 0; }
+.refresh-btn { flex: 0 0 auto; white-space: nowrap; }
 .field-hint { margin-top: 6px; font-size: 12px; color: var(--text-2); line-height: 1.5; }
 
 .org-mask { position: fixed; inset: 0; z-index: 60; background: rgba(0,0,0,.55); display: flex; align-items: center; justify-content: center; }

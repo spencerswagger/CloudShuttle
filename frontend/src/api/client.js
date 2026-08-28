@@ -17,11 +17,13 @@ client.interceptors.response.use(
   (r) => r.data,
   (e) => {
     // 统一把后端错误归一化并弹出可复制的 requestId 提示
+    // silent=true 的请求（如详情探测回退）不弹全局吐司，由调用方自理
+    const cfg = e?.config || {};
     const data = e?.response?.data;
     const isApi = data && typeof data === "object" && data.ok === false;
     const message = (isApi && data.message) || "请求失败，请稍后再试";
     const requestId = (isApi && data.requestId) || e?.response?.headers?.["x-request-id"] || "";
-    notify({ type: "error", message, requestId });
+    if (!cfg.silent) notify({ type: "error", message, requestId });
     return Promise.reject({ status: e?.response?.status, message, requestId, data });
   }
 );
