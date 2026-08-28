@@ -45,31 +45,46 @@ export function extractTokenFromOutTrack(outTrackId) {
   return null;
 }
 
-// 归一回调决策：优先取按钮「回传参数」的 action（accept/reject 命名的模板按钮），其次 decision，最后 query。
-// 兼容 TVORG 结构（官方回传：body.value 为 JSON 字符串，内含 params）与老版 RETURN_BACK。
+// 归一回调决策：兼容三种回调来源的按钮回传参数结构，允许 action=agree/reject 与 decision 两种命名。
+//   A) 新版 createAndDeliver 卡片实例回调：content = JSON 字符串 {cardPrivateData:{actionIds,params}}
+//   B) 普通版 StandardCard 回传：value = JSON 字符串，params 在 value.params 或 value.cardPrivateData.params
+//   C) 老版 RETURN_BACK：body.content 为对象 {callbackMsg:{type,content:return_data}}
+//   最后回退到 query decision。
 export function extractDecision(body, queryDecision) {
+  if (body && typeof body.content === "string") {
+    const d = extractFromCardPrivateData(body.content);
+    if (d) return d;
+  }
   if (body && typeof body.value === "string") {
+    const d = extractFromCardPrivateData(body.value);
+    if (d) return d;
     try {
       const j = JSON.parse(body.value);
       const p = j?.params ?? {};
       if (p.action === "agree" || p.action === "reject") return p.action;
       if (p.decision === "approve" || p.decision === "reject") return p.decision;
-      // 兜底：按当前点击按钮 id（cardPrivateData.actionIds）推断决策
-      const ids = Array.isArray(j?.cardPrivateData?.actionIds) ? j.cardPrivateData.actionIds : [];
-      const map = { approve: "approve", reject: "reject", act_ok: "agree", act_no: "reject", agree: "agree" };
-      for (const id of ids) if (map[id]) return map[id];
     } catch { /* 忽略解析失败 */ }
   }
-  const cb = body?.content?.callbackMsg;
-  if (cb?.type === "RETURN_BACK") {
-    const inner = cb.content;
-    if (typeof inner === "string") {
-      try { const j = JSON.parse(inner); if (j && j.decision) return j.decision; } catch { /* 忽略 */ }
-    } else if (inner && inner.decision) {
-      return inner.decision;
-    }
+  const inner = body?.content?.callbackMsg?.content;
+  if (typeof inner === "string") {
+    try { const j = JSON.parse(inner); if (j.decision === "approve" || j.decision === "reject") return j.decision; } catch { /* 忽略 */ }
+  } else if (inner && (inner.decision === "approve" || inner.decision === "reject")) {
+    return inner.decision;
   }
   return queryDecision;
+}
+
+// 从 cardPrivateData JSON 中提取决策：优先 params.action（agree/reject），其次 params.decision，最后按按钮 id 兜底
+function extractFromCardPrivateData(str) {
+  let j;
+  try { j = JSON.parse(str); } catch { return null; }
+  const p = j?.cardPrivateData?.params ?? {};
+  if (p.action === "agree" || p.action === "reject") return p.action;
+  if (p.decision === "approve" || p.decision === "reject") return p.decision;
+  const ids = Array.isArray(j?.cardPrivateData?.actionIds) ? j.cardPrivateData.actionIds : [];
+  const map = { approve: "approve", reject: "reject", act_ok: "agree", act_no: "reject", agree: "agree" };
+  for (const id of ids) if (map[id]) return map[id];
+  return null;
 }
 
 // 更新已投递卡片的模板状态变量（status=agree/reject），让卡片从「待审批」变为「已同意/已拒绝」
