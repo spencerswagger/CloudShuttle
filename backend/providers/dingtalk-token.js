@@ -16,11 +16,22 @@ export function createDingtalkTokenCache({ httpClient }) {
     const cached = cache.get(key);
     if (isFresh(cached, 30_000)) return cached.token; // 到期前 30s 续期
 
-    const resp = await httpClient.post(
-      "https://api.dingtalk.com/v1.0/oauth2/accessToken",
-      { clientId: key, clientSecret: corp.appSecret, grantType: "client_credentials" },
-      { headers: { "content-type": "application/json" } }
-    );
+    let resp;
+    try {
+      resp = await httpClient.post(
+        "https://api.dingtalk.com/v1.0/oauth2/accessToken",
+        { appKey: key, appSecret: corp.appSecret },
+        { headers: { "content-type": "application/json" } }
+      );
+    } catch (e) {
+      const detail = e?.response?.data ? JSON.stringify(e.response.data).slice(0, 400) : String(e?.message ?? e);
+      throw new HttpError(
+        401,
+        "DINGTALK_TOKEN_FAILED",
+        "获取钉钉访问令牌失败，请检查 AppKey/AppSecret 与权限",
+        `gettoken ${detail}`
+      );
+    }
     const body = resp?.data ?? {};
     const accessToken = body?.accessToken;
     if (!accessToken) {

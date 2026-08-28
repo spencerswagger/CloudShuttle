@@ -41,6 +41,7 @@ const RE = {
   dingtalkCard: /^\/hook\/dingtalk\/card\/([^/]+)/,
   dingtalk: /^\/hook\/dingtalk\/([^/]+)/,
   dingtalkGroups: /^\/api\/dingtalk\/groups$/,
+  dingtalkResolve: /^\/api\/dingtalk\/resolve-mobile$/,
   eciDone: /^\/_\/hook\/ecidone\/(\d+)/,
   eciFail: /^\/_\/hook\/fail\/(\d+)/,
 };
@@ -92,6 +93,9 @@ export function routeToHandler(path, method, body) {
   if (RE.dingtalk.test(path)) return { handler: "hook.dingtalkCardCb" };
   if (RE.dingtalkGroups.test(path)) {
     if (m === "POST") return { handler: "api.dingtalkGroups" };
+  }
+  if (RE.dingtalkResolve.test(path)) {
+    if (m === "POST") return { handler: "api.dingtalkResolve" };
   }
   if (RE.eciDone.test(path)) return { handler: "internal.eciDone" };
   if (RE.eciFail.test(path)) return { handler: "internal.eciFail" };
@@ -289,6 +293,14 @@ const DISPATCH = {
   "api.dingtalkGroups": async ({ app, body }) =>
     ok(api.listDingtalkGroups({
       credential: body?.credential,
+      getCredentialSecrets: app.getCredentialSecrets,
+      getAccessToken: app.dingtalkTokenCache,
+      httpClient: axios,
+    })),
+  "api.dingtalkResolve": async ({ app, body }) =>
+    ok(api.resolveUsersByMobile({
+      credential: body?.credential,
+      mobiles: body?.mobiles,
       getCredentialSecrets: app.getCredentialSecrets,
       getAccessToken: app.dingtalkTokenCache,
       httpClient: axios,

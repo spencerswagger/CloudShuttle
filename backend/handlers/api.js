@@ -81,6 +81,30 @@ export async function listDingtalkGroups({ credential, getCredentialSecrets, get
   };
 }
 
+// 按手机号解析 userId（企业内部应用 /v1.0/contact/users/by_mobile），供用户免手填 openId
+export async function resolveUsersByMobile({ credential, mobiles, getCredentialSecrets, getAccessToken, httpClient }) {
+  if (!Array.isArray(mobiles) || !mobiles.length) return { users: [] };
+  const secrets = await getCredentialSecrets(credential);
+  const accessToken = await getAccessToken(secrets);
+  const users = [];
+  for (const mobile of mobiles) {
+    const m = String(mobile).trim();
+    if (!m) continue;
+    try {
+      const resp = await httpClient.post(
+        "https://api.dingtalk.com/v1.0/contact/users/by_mobile",
+        { mobile: m },
+        { headers: { "x-acs-dingtalk-access-token": accessToken, "content-type": "application/json" } }
+      );
+      const r = resp?.data?.result;
+      users.push({ mobile: m, userId: r?.userId ?? "", name: r?.name ?? "" });
+    } catch (e) {
+      users.push({ mobile: m, userId: "", name: "", error: (e?.response?.data?.message || e?.message || "解析失败").slice(0, 120) });
+    }
+  }
+  return { users };
+}
+
 export async function updatePipeline(id, body) {
   const spec = JSON.stringify(body?.spec_json ?? {});
   const { rows: r } = await pool.query(
