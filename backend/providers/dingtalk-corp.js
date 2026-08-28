@@ -57,59 +57,41 @@ export function createDingtalkCorpProvider({
       }
     },
 
-    // 群：普通版 StandardCard + 按钮「回传请求」（actionType=request），点击由钉钉服务端 POST 回调 callbackUrl。
-    // cardData 必须是 JSON 字符串，结构为 config/header/contents，严格对齐钉钉官方普通版卡片模板：
-    //   标题 header.title{type,text}，正文 markdown{type,text}，按钮 type:"action" > actions[] > button，
-    //   按钮文案用 label{type:"text",text}，回传参数用 params；actionType 用 "request"（不要用 RETURN_BACK）。
+    // 群：新版卡片实例 API createAndDeliver（IM_GROUP 投放）。
+    // 卡片内容由「卡片平台」模板 cardTemplateId 决定，正文经 cardData.cardParamMap.markdown 填充，
+    // 按钮在模板内预配置（「回传请求」decision=approve/reject），点击经 callbackRouteKey 回调到服务端。
     async _sendToGroup(accessToken, robot, openConversationId, mdText, callbackUrl, token) {
-      const cardBizId = `cloudshuttle_${token}`;
-      const card = {
-        config: { autoLayout: true, enableForward: true },
-        header: {
-          title: { type: "text", text: `流水线审批卡点`, id: "card_title" },
-        },
-        contents: [
-          { type: "markdown", text: mdText, id: "card_md" },
-          { type: "divider", id: "card_div" },
-          {
-            type: "action",
-            id: "card_actions",
-            actions: [
-              {
-                type: "button",
-                label: { type: "text", text: "✅ 同意", id: "act_ok_label" },
-                iconCode: "icon_accept",
-                actionType: "request",
-                status: "primary",
-                params: { decision: "approve" },
-                id: "act_ok",
-              },
-              {
-                type: "button",
-                label: { type: "text", text: "❌ 拒绝", id: "act_no_label" },
-                iconCode: "icon_wd_close",
-                actionType: "request",
-                status: "normal",
-                params: { decision: "reject" },
-                id: "act_no",
-              },
-            ],
-          },
-        ],
-      };
+      void callbackUrl; // createAndDeliver 回调走注册的 callbackRouteKey，不再在请求体带 callbackUrl
+      const cardTemplateId = robot.cardTemplateId;
+      const routeKey = robot.cardCallbackRouteKey;
+      if (!cardTemplateId || !routeKey) {
+        corpError(400, "BAD_CREDENTIAL",
+          "群审批需在机器人凭证中配置 cardTemplateId（卡片平台模板ID）与 cardCallbackRouteKey（注册的回调routeKey）",
+          "dingtalk-corp missing cardTemplateId/cardCallbackRouteKey");
+      }
+      const outTrackId = `cloudshuttle_${token}`;
       const resp = await httpClient.post(
-        `${BASE}/v1.0/im/v1.0/robot/interactiveCards/send`,
+        `${BASE}/v1.0/card/instances/createAndDeliver`,
         {
-          robotCode: robot.robotCode,
-          cardTemplateId: "StandardCard",
-          openConversationId,
-          cardBizId,
-          callbackUrl,
-          cardData: JSON.stringify(card),
+          cardTemplateId,
+          outTrackId,
+          callbackType: "HTTP",
+          callbackRouteKey: routeKey,
+          cardData: { cardParamMap: { markdown: mdText } },
+          openSpaceId: `dtv1.card//IM_GROUP.${openConversationId}`,
+          imGroupOpenSpaceModel: { supportForward: true },
+          imGroupOpenDeliverModel: { robotCode: robot.robotCode },
         },
         { headers: { "x-acs-dingtalk-access-token": accessToken, "content-type": "application/json" } }
       );
-      this._assertOk(resp, "interactiveCards/send", "审批卡片发送失败");
+      // createAndDeliver：success + result.deliverResults[] 逐场域判定
+      const body = resp?.data ?? {};
+      if (body?.success === true) return;
+      const dRes = body?.result?.deliverResults ?? [];
+      const okDeliver = dRes.length && dRes.every((r) => r?.success === true);
+      if (okDeliver) return;
+      const detail = JSON.stringify(dRes[0] ?? body).slice(0, 300);
+      corpError(502, "DINGTALK_SEND_FAILED", "审批卡片发送失败，请检查卡片模板/回调routeKey配置", detail);
     },
 
     // 人：机器人单聊富文本按钮（按钮为 URL，以来电 webview 快闪回调）

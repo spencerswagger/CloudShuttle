@@ -41,6 +41,7 @@ const RE = {
   pipelineRun: /^\/api\/pipelines\/(\d+)\/run$/,
   git: /^\/hook\/git\/([^/]+)/,
   dingtalkCard: /^\/hook\/dingtalk\/card\/([^/]+)/,
+  dingtalkCardFixed: /^\/hook\/dingtalk\/card\/?$/,
   dingtalk: /^\/hook\/dingtalk\/([^/]+)/,
   dingtalkGroups: /^\/api\/dingtalk\/groups$/,
   dingtalkResolve: /^\/api\/dingtalk\/resolve-mobile$/,
@@ -105,6 +106,7 @@ export function routeToHandler(path, method, body) {
   }
   if (RE.git.test(path)) return { handler: "hook.gitWebhook" };
   if (RE.dingtalkCard.test(path)) return { handler: "hook.dingtalkCardCb" };
+  if (RE.dingtalkCardFixed.test(path)) return { handler: "hook.dingtalkCardCb" };
   if (RE.dingtalk.test(path)) return { handler: "hook.dingtalkCardCb" };
   if (RE.dingtalkGroups.test(path)) {
     if (m === "POST") return { handler: "api.dingtalkGroups" };

@@ -4,13 +4,17 @@ import { pool } from "../db/pg.js";
 import { safeEqual } from "../security.js";
 
 // 钉钉审批卡片按钮回调（统一入口 /hook/dingtalk/card/:token）
-// 兼容两种来源：
+// 兼容三种来源：
 //   - 群（RETURN_BACK）：钉钉服务器 POST，decision 在 body.content.callbackMsg.content
+//   - 群（新版 createAndDeliver）：回调走注册的 callbackRouteKey，token 在 body.outTrackId（前缀 cloudshuttle_）
 //   - 人/webhook（URL）：GET，decision 在 query
 // exec_id/node_id 一律以库内登记为准，防篡改。
 export async function dingtalkCardCb(orchestrator, { token, secret, decision, body, lookup }) {
-  const row = await lookup({ token, kind: "dingtalk" });
-  if (!row || !safeEqual(row.secret, secret ?? "")) {
+  const token_ = token || extractTokenFromOutTrack(body?.outTrackId);
+  const row = await lookup({ token: token_, kind: "dingtalk" });
+  if (!row) return { status: 403, body: { ok: false, code: "FORBIDDEN", message: "审批回调凭证无效" } };
+  // 旧版 path+query 携带 secret 时校验；新版 routeKey 回传体无 secret，以随机 outTrackId 中的 token 为凭据
+  if (secret && !safeEqual(row.secret, secret)) {
     return { status: 403, body: { ok: false, code: "FORBIDDEN", message: "审批回调凭证无效" } };
   }
   const decision_ = extractDecision(body, decision);
@@ -20,6 +24,15 @@ export async function dingtalkCardCb(orchestrator, { token, secret, decision, bo
     decision: decision_ === "reject" ? "reject" : "approve",
   });
   return { status: 200, body: out ?? {} };
+}
+
+// 从新版回调体 outTrackId（形如 cloudshuttle_<token>）提取 token
+export function extractTokenFromOutTrack(outTrackId) {
+  if (typeof outTrackId === "string" && outTrackId.startsWith("cloudshuttle_")) {
+    const t = outTrackId.slice("cloudshuttle_".length);
+    if (t) return t;
+  }
+  return null;
 }
 
 // 归一决策：优先取「回传请求」按钮回传的 decision，其次用 query

@@ -14,12 +14,14 @@ export const CRED_KINDS = [
     value: "dingtalk-corp",
     label: "钉钉企业机器人",
     icon: "M6 3h12v18H6zM9.5 8h5M9.5 12h5M9.5 16h3",
-    hint: "走钉钉企业应用 OpenAPI，审批节点可配置发群或发人（回调后台直达）",
+    hint: "走钉钉企业应用 OpenAPI，审批节点可配置发群或发人（发群需填卡片模板相关字段）",
     fields: [
       { k: "appKey", label: "AppKey", ph: "应用 AppKey" },
       { k: "appSecret", label: "AppSecret", ph: "应用 AppSecret", secret: true },
       { k: "agentId", label: "AgentId", ph: "应用 AgentId" },
       { k: "robotCode", label: "RobotCode", ph: "机器人编码" },
+      { k: "cardTemplateId", label: "卡片模板 ID", ph: "卡片平台中模板的 templateId", hint: "发群审查的「卡片平台」模板 ID" },
+      { k: "cardCallbackRouteKey", label: "回调 routeKey", ph: "开发者后台注册卡片回调地址后的 routeKey", hint: "模板按钮「回传请求」回调路由标识" },
     ],
   },
   {
