@@ -32,6 +32,10 @@ export function extractDecision(body, queryDecision) {
     try {
       const j = JSON.parse(body.value);
       if (j?.params?.decision) return j.params.decision;
+      // 兜底：若钉钉未回传 params，则按当前点击按钮 id（cardPrivateData.actionIds）推断决策
+      const ids = Array.isArray(j?.cardPrivateData?.actionIds) ? j.cardPrivateData.actionIds : [];
+      const map = { approve: "approve", reject: "reject", act_ok: "approve", act_no: "reject" };
+      for (const id of ids) if (map[id]) return map[id];
     } catch { /* 忽略解析失败 */ }
   }
   const cb = body?.content?.callbackMsg;

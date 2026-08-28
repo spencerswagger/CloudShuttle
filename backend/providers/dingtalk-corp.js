@@ -57,36 +57,41 @@ export function createDingtalkCorpProvider({
       }
     },
 
-    // 群：普通版 StandardCard + 竖排按钮「回传请求」，点击由钉钉服务端 POST 回调 callbackUrl。
-    // cardData 必须是 JSON 字符串，结构为 config/header/contents；
-    // 正文用 markdown 元素，按钮用 action 组件（actionType=RETURN_BACK + params.decision）。
-    // 注意：按钮结构不可用 {head,body,buttons} 旧对象，否则钉钉回退默认模板渲染 #singleTitle# 占位符。
+    // 群：普通版 StandardCard + 按钮「回传请求」（actionType=request），点击由钉钉服务端 POST 回调 callbackUrl。
+    // cardData 必须是 JSON 字符串，结构为 config/header/contents，严格对齐钉钉官方普通版卡片模板：
+    //   标题 header.title{type,text}，正文 markdown{type,text}，按钮 type:"action" > actions[] > button，
+    //   按钮文案用 label{type:"text",text}，回传参数用 params；actionType 用 "request"（不要用 RETURN_BACK）。
     async _sendToGroup(accessToken, robot, openConversationId, mdText, callbackUrl, token) {
       const cardBizId = `cloudshuttle_${token}`;
       const card = {
         config: { autoLayout: true, enableForward: true },
-        header: { title: { type: "text", text: `流水线审批卡点 #${token}` } },
+        header: {
+          title: { type: "text", text: `流水线审批卡点`, id: "card_title" },
+        },
         contents: [
-          { type: "markdown", text: mdText },
+          { type: "markdown", text: mdText, id: "card_md" },
+          { type: "divider", id: "card_div" },
           {
             type: "action",
-            isVertical: true,
+            id: "card_actions",
             actions: [
               {
                 type: "button",
-                contentType: "text",
-                content: "✅ 同意",
-                actionType: "RETURN_BACK",
-                actionId: "approve",
+                label: { type: "text", text: "✅ 同意", id: "act_ok_label" },
+                iconCode: "icon_accept",
+                actionType: "request",
+                status: "primary",
                 params: { decision: "approve" },
+                id: "act_ok",
               },
               {
                 type: "button",
-                contentType: "text",
-                content: "❌ 拒绝",
-                actionType: "RETURN_BACK",
-                actionId: "reject",
+                label: { type: "text", text: "❌ 拒绝", id: "act_no_label" },
+                iconCode: "icon_wd_close",
+                actionType: "request",
+                status: "normal",
                 params: { decision: "reject" },
+                id: "act_no",
               },
             ],
           },
