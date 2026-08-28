@@ -31,7 +31,7 @@ jobs:
             if (!ok) core.setFailed(`release tag ${tag} 不在 main 上 (status=${cmp.status})；其他分支请改用带后缀的预发布 tag: ${tag}-rc1`);
 
   backend:
-    name: Package backend (docker tar)
+    name: Package & push backend
     needs: [guard]
     runs-on: ubuntu-latest
     steps:
@@ -40,13 +40,29 @@ jobs:
       - name: Build backend image
         run: docker build -f backend/Dockerfile -t cloudshuttle-backend:${GITHUB_REF_NAME} .
 
-      - name: Save image to tar
-        run: docker save -o cloudshuttle-backend-${GITHUB_REF_NAME}.tar cloudshuttle-backend:${GITHUB_REF_NAME}
+      - name: Login & push image to registry (tags only)
+        if: github.ref_type == 'tag' && env.REGISTRY != '' && env.IMAGE != ''
+        env:
+          REGISTRY: ${{ secrets.DOCKER_REGISTRY }}
+          IMAGE: ${{ secrets.DOCKER_IMAGE }}
+          USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+        run: |
+          if [ -z "$USERNAME" ] || [ -z "$PASSWORD" ]; then
+            echo "SKIP: 未配置 DOCKER_USERNAME/DOCKER_PASSWORD，跳过推送"
+            exit 0
+          fi
+          echo "$PASSWORD" | docker login "$REGISTRY" -u "$USERNAME" --password-stdin
+          docker tag cloudshuttle-backend:${GITHUB_REF_NAME} "$REGISTRY/$IMAGE:${GITHUB_REF_NAME}"
+          docker push "$REGISTRY/$IMAGE:${GITHUB_REF_NAME}"
+
+      - name: Save image tar.gz
+        run: docker save cloudshuttle-backend:${GITHUB_REF_NAME} | gzip -9 > cloudshuttle-backend-${GITHUB_REF_NAME}.tar.gz
 
       - uses: actions/upload-artifact@v4
         with:
           name: backend-tar
-          path: cloudshuttle-backend-${{ github.ref_name }}.tar
+          path: cloudshuttle-backend-${{ github.ref_name }}.tar.gz
           if-no-files-found: error
 
   frontend:
