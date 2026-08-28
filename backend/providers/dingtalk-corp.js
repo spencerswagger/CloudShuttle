@@ -24,7 +24,10 @@ export function createDingtalkCorpProvider({
       }
       return { type: "group", openConversationId: target.openConversationId };
     }
-    const openIds = ((target?.type === "user" ? target.openIds : null) ?? (approver ? [approver] : [])).filter(Boolean);
+    // 兼容数组与逗号分隔字符串两种存储形态（通讯录选择器存逗号串）
+    const raw = (target?.type === "user" ? target.openIds : null) ?? (approver ? [approver] : []);
+    const openIds = (Array.isArray(raw) ? raw : String(raw ?? "").split(","))
+      .map((s) => String(s).trim()).filter(Boolean);
     if (!openIds.length) {
       corpError(400, "BAD_TARGET", "未配置发送的审批人（openId）", "approval target missing openIds/approver");
     }
