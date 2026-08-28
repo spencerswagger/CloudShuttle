@@ -63,16 +63,6 @@ const doDelete = async () => {
   } catch { /* 全局拦截器提示 */ }
   finally { deleting.value = false; }
 };
-
-onMounted(async () => {
-  loading.value = true;
-  try {
-    if (route.params.id) {
-      const c = (await fetchCredentials().catch(() => []))?.find((x) => x.id === +route.params.id);
-      if (c) form.value = { name: c.name, kind: c.kind, secret: {} };
-    }
-  } finally { loading.value = false; }
-});
 </script>
 
 <template>

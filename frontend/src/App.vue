@@ -43,6 +43,11 @@
     </main>
   </div>
 
+  <!-- 全局接口在途提示：任意 API 请求进行中时显示顶部进度条 -->
+  <Transition name="bar">
+    <div v-if="pending > 0" ref="bar" class="busy-bar" aria-hidden="true"></div>
+  </Transition>
+
   <div class="toasts" aria-live="polite">
     <div v-for="t in toasts" :key="t.id" class="toast" :class="t.type === 'success' ? 'toast-ok' : 'toast-err'">
       <div class="toast-row">
@@ -63,6 +68,7 @@
 
 <script setup>
 import { toasts } from "./lib/notify.js";
+import { pending } from "./lib/busy.js";
 
 const copyId = async (reqId) => {
   try { await navigator.clipboard.writeText(reqId); } catch { /* 无剪贴板权限时忽略 */ }
@@ -195,4 +201,17 @@ const nav = [
 }
 .reqid-copy:hover { color: #0b0e15; background: var(--accent); border-color: var(--accent); }
 @keyframes toastIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+
+/* 全局接口在途进度条：固定顶部，非确定性流动动画 */
+.busy-bar {
+  position: fixed; top: 0; left: 0; z-index: 120;
+  height: 3px; width: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--warn), var(--accent));
+  background-size: 220% 100%;
+  animation: busyFlow 1.1s linear infinite;
+  box-shadow: 0 0 10px var(--accent);
+}
+.bar-enter-active, .bar-leave-active { transition: opacity 0.22s var(--ease); }
+.bar-enter-from, .bar-leave-to { opacity: 0; }
+@keyframes busyFlow { 0% { background-position: 0% 0; } 100% { background-position: -220% 0; } }
 </style>

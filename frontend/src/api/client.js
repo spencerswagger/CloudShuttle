@@ -1,6 +1,7 @@
 // frontend/src/api/client.js
 import axios from "axios";
 import { notify } from "../lib/notify.js";
+import { pending } from "../lib/busy.js";
 
 // baseURL 优先级：
 //   开发模式(dev)  -> 仅读取 .env.development 的 VITE_API_BASE（该文件已被 .gitignore 忽略，不会提交）
@@ -13,9 +14,18 @@ const apiBase =
   "/api";
 
 export const client = axios.create({ baseURL: apiBase });
+// 请求发起与结束统一增减在途计数，驱动全局顶部进度条
+client.interceptors.request.use(
+  (cfg) => { pending.value++; return cfg; },
+  (e) => { pending.value = Math.max(0, pending.value - 1); return Promise.reject(e); }
+);
 client.interceptors.response.use(
-  (r) => r.data,
+  (r) => {
+    pending.value = Math.max(0, pending.value - 1);
+    return r.data;
+  },
   (e) => {
+    pending.value = Math.max(0, pending.value - 1);
     // 统一把后端错误归一化并弹出可复制的 requestId 提示
     // silent=true 的请求（如详情探测回退）不弹全局吐司，由调用方自理
     const cfg = e?.config || {};

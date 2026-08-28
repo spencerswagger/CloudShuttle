@@ -15,6 +15,8 @@ const images = ref([]);
 const creds = ref([]);
 const imagesLoading = ref(false);
 const credsLoading = ref(false);
+const saving = ref(false);
+const running = ref(false);
 
 // 下拉数据按需懒加载：仅在需要时请求，并提供刷新
 async function loadImages() {
@@ -153,20 +155,24 @@ const save = async () => {
     notify({ type: "error", message: "流水线数据尚未加载完成，请稍候或刷新后重试" });
     return;
   }
+  saving.value = true;
   try {
     if (editingId.value) await updatePipeline(editingId.value, current.value);
     else Object.assign(current.value, await createPipeline(current.value));
     notify({ type: "success", message: "已保存流水线 ✓" });
     router.push("/pipelines");
   } catch { /* 全局拦截器提示 */ }
+  finally { saving.value = false; }
 };
 
 const run = async () => {
   if (!current.value.id) { notify({ type: "error", message: "请先保存流水线再运行" }); return; }
+  running.value = true;
   try {
     await runPipeline(current.value.id);
     notify({ type: "success", message: "已触发运行，可去执行页查看进度" });
   } catch { /* 全局拦截器提示 */ }
+  finally { running.value = false; }
 };
 
 const back = () => router.push("/pipelines");
@@ -186,13 +192,13 @@ const back = () => router.push("/pipelines");
         </div>
       </div>
       <div class="head-actions">
-        <button class="btn" @click="run" :disabled="!current.id" title="立即按当前配置触发一次运行">
+        <button class="btn" @click="run" :disabled="running || !current.id" title="立即按当前配置触发一次运行">
           <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-          运行
+          {{ running ? "运行中…" : "运行" }}
         </button>
-        <button class="btn btn-accent" @click="save">
+        <button class="btn btn-accent" @click="save" :disabled="saving">
           <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2zM17 21v-8H7v8M7 3v5h8"/></svg>
-          保存流水线
+          {{ saving ? "保存中…" : "保存流水线" }}
         </button>
       </div>
     </header>

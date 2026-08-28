@@ -14,6 +14,7 @@ const selected = ref(new Set());
 
 const confirm = ref({ open: false, message: "", detail: "", mode: "single", ids: [] });
 const deleting = ref(false);
+const runningId = ref(null);
 
 const nodeCount = (p) => p.spec_json?.nodes?.length ?? 0;
 const fmtDate = (iso) =>
@@ -52,8 +53,10 @@ const goEdit = (p) => router.push(`/pipelines/${p.id}`);
 const edit = (p) => goEdit(p);
 
 const run = async (p) => {
+  runningId.value = p.id;
   try { await runPipeline(p.id); notify({ type: "success", message: `已触发运行「${p.name}」，可去执行页查看` }); }
   catch { /* 全局拦截器提示 */ }
+  finally { runningId.value = null; }
 };
 
 const askDelete = (p) => {
@@ -162,9 +165,9 @@ const doDelete = async () => {
               <td class="cell-time">{{ fmtDate(p.updated_at) }}</td>
               <td class="col-actions">
                 <div class="cell-actions">
-                  <button class="act-btn accent" title="立即运行" @click="run(p)">
+                  <button class="act-btn accent" title="立即运行" :disabled="runningId === p.id" @click="run(p)">
                     <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-                    运行
+                    {{ runningId === p.id ? "运行中…" : "运行" }}
                   </button>
                   <button class="act-btn" @click="edit(p)">
                     <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg>

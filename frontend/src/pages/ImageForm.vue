@@ -60,16 +60,6 @@ const doDelete = async () => {
   } catch { /* 全局拦截器提示 */ }
   finally { deleting.value = false; }
 };
-
-onMounted(async () => {
-  loading.value = true;
-  try {
-    if (route.params.id) {
-      const im = (await fetchImages().catch(() => []))?.find((x) => x.id === +route.params.id);
-      if (im) form.value = { name: im.name, image: im.image, category: im.category || "通用", builtin: !!im.builtin };
-    }
-  } finally { loading.value = false; }
-});
 </script>
 
 <template>
