@@ -13,10 +13,23 @@ export function createAdvancer({ stepRun, snapshot, record, recordRegistry = asy
 
     if (waiting) {
       // 有正在等待的节点：由 stepRun 的 resume 分支处理（回调场景），这里仅返回现状
+      console.log(`[advance] exec=${execId} BLOCKED-BY-WAIT node=${waiting} done=${done.size}`);
       return { spec, snap: { done, waiting }, waiting };
     }
 
     const ready = nextReady(graph, done);
+    console.log(
+      `[advance] exec=${execId} done=${done.size} waiting=${waiting ?? "-"} ` +
+      `ready=[${ready.join(",")}] total_nodes=${graph.nodes.size}`
+    );
+    if (!ready.length) {
+      // 无就绪节点但 done 也未满 → 说明被上游未完成节点挡住（多为 shell/ECI 占位未实现导致）
+      console.log(
+        `[advance] exec=${execId} NO-READY-NODE nodes=[${[...graph.nodes.keys()].join(",")}] ` +
+        `parents=${JSON.stringify(graph.parents)} done_ids=[${[...done].join(",")}]`
+      );
+    }
+
     for (const nodeId of ready) {
       const node = graph.nodes.get(nodeId);
       const ctx = { done: [...done], spec, execId, recordRegistry };

@@ -223,6 +223,23 @@ async function buildApp() {
         return await steps[node.type](node, ctx);
       } catch (err) {
         console.error(`[step] ERROR exec=${ctx.execId} node=${node.id} type=${node.type} err=${err?.message ?? err}`);
+        // 步骤报错：把执行与当前节点标失败，避免执行卡死在 running、以及节点状态悬空
+        try {
+          await pool.query(
+            `UPDATE execution SET status='failed', finished_at=now()
+              WHERE id=$1 AND status IN ('queued','running')`,
+            [ctx.execId]
+          );
+          await pool.query(
+            `INSERT INTO execution_node(exec_id, node_id, step, type, status, output)
+             VALUES($1,$2,$3,$4,'failed',$5::jsonb)
+             ON CONFLICT (exec_id, node_id)
+             DO UPDATE SET status='failed', output=EXCLUDED.output, finished_at=now()`,
+            [ctx.execId, node.id, node.type, node.type, JSON.stringify({ error: err?.message ?? String(err) })]
+          );
+        } catch (e) {
+          console.error(`[step] fail-record error: ${e?.message ?? e}`);
+        }
         throw err;
       }
     },
