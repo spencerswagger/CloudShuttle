@@ -130,8 +130,6 @@ export function checkVars(spec, { ancestors: _ancestors } = {}) {
     const deps = collectNodeDeps(node);
     if (deps.size === 0) continue;
     const scope = resolveScope(graph, spec, _ancestors ?? ancestors, node.id);
-    // 节点自身声明的 outputs 也视为本节点可用（可在本节点内引用先前输出）。
-    for (const o of node.params?.outputs ?? []) if (o?.key) scope.add(o.key);
     for (const dep of deps) {
       if (!scope.has(dep)) return `节点 ${node.id} 引用了未定义变量 ${dep}`;
     }

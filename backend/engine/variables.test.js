@@ -63,8 +63,16 @@ test("checkVars 引用未知key 报错", () => {
 
 test("checkVars 引用合法前驱输出 不报错", () => {
   const spec = { nodes: [
-    { id: "n1", type: "shell", params: { outputs: [{ key: "branch" }], command: "x=${branch}" } },
+    { id: "n1", type: "shell", params: { outputs: [{ key: "branch" }] } },
     { id: "n2", type: "shell", params: { command: "echo ${branch}" } },
   ], edges: [{ from: "n1", to: "n2" }] };
   assert.equal(checkVars(spec, { ancestors }), null);
+});
+
+test("checkVars 引用自身声明的输出 报错", () => {
+  const spec = { nodes: [
+    { id: "n1", type: "shell", params: { outputs: [{ key: "branch" }], command: "echo ${branch}" } },
+  ], edges: [] };
+  const err = checkVars(spec, { ancestors });
+  assert.ok(err && err.includes("branch"));
 });
