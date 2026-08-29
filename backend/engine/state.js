@@ -54,7 +54,7 @@ export function createAdvancer({ stepRun, snapshot, record, recordRegistry = asy
       // 预渲染：把当前 environment 的 ${name} 替换进节点字符串参数（及 env[].v），传给 stepRun 的为渲染后副本
       const renderedNode = { ...node, params: renderParams(node.params, env) };
       console.log(`[advance] exec=${execId} ⟶ 开始执行就绪节点 node=${nodeId} type=${node.type}`);
-      const ctx = { done: [...done], spec, execId, recordRegistry };
+      const ctx = { done: [...done], spec, execId, environment: env, recordRegistry };
       const res = await stepRun(renderedNode, ctx);
       if (res.kind === "done") {
         done.add(nodeId);

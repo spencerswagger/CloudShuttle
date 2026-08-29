@@ -125,6 +125,20 @@ test("env 数组每个元素的 v 字段被预渲染", async () => {
   assert.equal(stepNode.params.env[0].v, "val-3");
 });
 
+test("stepRun 收到 ctx.environment（扁平变量地图 Map）", async () => {
+  const env = new Map();
+  env.set("pipeline_name", "demo");
+  let ctxArg = null;
+  const adv = createAdvancer({
+    stepRun: (node, ctx) => { ctxArg = ctx; return { kind: "dispatch", ref: "j1" }; },
+    snapshot: async () => {}, record: async () => {},
+  });
+  const specE = { nodes: [{ id: "s1", step: "shell", type: "shell", params: {} }], edges: [] };
+  await adv.advanceOnce({ spec: specE, snap: { done: new Set(), waiting: null }, environment: env });
+  assert.ok(ctxArg.environment instanceof Map);
+  assert.equal(ctxArg.environment.get("pipeline_name"), "demo");
+});
+
 // ---------- 深 walk 渲染作用域一致（与 collectNodeDeps 对齐）----------
 
 test("嵌套对象字符串字段(如 params.script.body)被深渲染且原始 spec 不被污染", async () => {
