@@ -1,7 +1,7 @@
 // backend/test/dag.test.js
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildGraph, nextReady } from "../engine/dag.js";
+import { buildGraph, nextReady, ancestors } from "../engine/dag.js";
 
 // spec_json: { nodes:[{id,step,type,params}], edges:[{from,to}] }
 const spec = {
@@ -32,4 +32,19 @@ test("nextReady 返回入边已全部完成的节点", () => {
 test("nextReady 空入边（起点）总是就绪", () => {
   const g = buildGraph(spec);
   assert.deepEqual(nextReady(g, new Set()), ["n1"]);
+});
+
+test("ancestors 返回节点的前驱闭包（不含自身）", () => {
+  const g = buildGraph({
+    nodes: [
+      { id: "n1", type: "shell" }, { id: "n2", type: "shell" }, { id: "n3", type: "shell" },
+      { id: "n4", type: "shell" },
+    ],
+    edges: [ { from: "n1", to: "n3" }, { from: "n2", to: "n3" }, { from: "n3", to: "n4" } ],
+  });
+  assert.deepEqual([...ancestors(g, "n4")].sort(), ["n1", "n2", "n3"]);
+});
+test("ancestors 起点为空集", () => {
+  const g = buildGraph({ nodes: [{ id: "n1", type: "shell" }], edges: [] });
+  assert.deepEqual([...ancestors(g, "n1")], []);
 });
