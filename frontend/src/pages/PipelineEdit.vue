@@ -18,7 +18,6 @@ const creds = ref([]);
 const imagesLoading = ref(false);
 const credsLoading = ref(false);
 const saving = ref(false);
-const running = ref(false);
 
 // 下拉数据按需懒加载：仅在需要时请求，并提供刷新
 async function loadImages() {
@@ -57,6 +56,7 @@ async function hydrate() {
     if (!p) p = (await fetchPipelines().catch(() => []))?.find((x) => Number(x.id) === editingId.value);
     if (p) {
       current.value = JSON.parse(JSON.stringify(p));
+      hookSecret.value = ""; // 切换流水线时清空已缓存的 webhook 密钥，避免跨 /pipelines/:id 残留拼进 URL
       // 下拉数据懒加载：仅当节点实际用到镜像/凭证才请求，避免挂载即连拉 3 个接口
       const ns = current.value.spec_json?.nodes ?? [];
       if (ns.some((n) => n.type === "shell")) loadImages();
@@ -331,9 +331,9 @@ function addMapping() { webhookMappings.value.push({ name: "", jsonPath: "" }); 
         </div>
       </div>
       <div class="head-actions">
-        <button class="btn" @click="run" :disabled="running || !current.id" title="立即按当前配置触发一次运行">
+        <button class="btn" @click="run" :disabled="!current.id" title="配置触发参数并运行">
           <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-          {{ running ? "运行中…" : "运行" }}
+          运行
         </button>
         <button class="btn btn-accent" @click="save" :disabled="saving">
           <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2zM17 21v-8H7v8M7 3v5h8"/></svg>

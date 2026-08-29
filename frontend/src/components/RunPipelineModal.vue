@@ -70,8 +70,6 @@ async function submit() {
     let v = form[k];
     if (p.type === "boolean") {
       out[k] = !!v;
-    } else if (p.type === "number") {
-      out[k] = isEmpty(v) ? (isEmpty(p.default) ? "" : String(p.default)) : String(v);
     } else {
       out[k] = isEmpty(v) ? (isEmpty(p.default) ? "" : String(p.default)) : String(v);
     }
@@ -85,7 +83,7 @@ async function submit() {
   finally { submitting.value = false; }
 }
 
-defineExpose({ open: openFor, state: submitting });
+defineExpose({ open: openFor });
 </script>
 
 <template>
