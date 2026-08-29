@@ -4,7 +4,8 @@ import { ref, computed, onMounted } from "vue";
 import { useRouter, useRoute } from "vue-router";
 import { notify } from "../lib/notify.js";
 import ConfirmDialog from "../components/ConfirmDialog.vue";
-import { fetchPipelines, deletePipeline, runPipeline } from "../api/pipeline.js";
+import { fetchPipelines, deletePipeline } from "../api/pipeline.js";
+import RunPipelineModal from "../components/RunPipelineModal.vue";
 
 const router = useRouter();
 const route = useRoute();
@@ -15,6 +16,7 @@ const selected = ref(new Set());
 const confirm = ref({ open: false, message: "", detail: "", mode: "single", ids: [] });
 const deleting = ref(false);
 const runningId = ref(null);
+const runModal = ref(null);
 
 const nodeCount = (p) => p.spec_json?.nodes?.length ?? 0;
 const fmtDate = (iso) =>
@@ -52,12 +54,7 @@ const goNew = () => router.push("/pipelines/new");
 const goEdit = (p) => router.push(`/pipelines/${p.id}`);
 const edit = (p) => goEdit(p);
 
-const run = async (p) => {
-  runningId.value = p.id;
-  try { await runPipeline(p.id); notify({ type: "success", message: `已触发运行「${p.name}」，可去执行页查看` }); }
-  catch { /* 全局拦截器提示 */ }
-  finally { runningId.value = null; }
-};
+const run = (p) => runModal.value.open(p);
 
 const askDelete = (p) => {
   confirm.value = {
@@ -195,6 +192,8 @@ const doDelete = async () => {
       @close="confirm.open = false"
       @confirm="doDelete"
     />
+
+    <RunPipelineModal ref="runModal" />
   </div>
 </template>
 
