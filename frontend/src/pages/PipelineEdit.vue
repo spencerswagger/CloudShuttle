@@ -5,7 +5,7 @@ import { useRoute, useRouter } from "vue-router";
 import draggable from "vuedraggable";
 import MarkdownIt from "markdown-it";
 import { notify } from "../lib/notify.js";
-import { fetchPipelines, getPipeline, createPipeline, updatePipeline, getPipelineHook } from "../api/pipeline.js";
+import { fetchPipelines, getPipeline, createPipeline, updatePipeline, getPipelineHook, fetchScope } from "../api/pipeline.js";
 import { fetchImages } from "../api/image.js";
 import { fetchCredentials, listDepartments, listDepartmentUsers } from "../api/credential.js";
 import RunPipelineModal from "../components/RunPipelineModal.vue";
@@ -44,6 +44,7 @@ const isNew = computed(() => !editingId.value);
 const pageTitle = computed(() => (isNew.value ? "新建流水线" : `编辑流水线${current.value.name ? " · " + current.value.name : ""}`));
 
 async function hydrate() {
+  scopes.clear();
   if (!editingId.value) { current.value = newPipeline(); return; }
   /* 详情接口优先；后端尚未发布详情接口(404)时回退列表查找，保证返显可用 */
   try {
@@ -61,6 +62,8 @@ async function hydrate() {
       const ns = current.value.spec_json?.nodes ?? [];
       if (ns.some((n) => n.type === "shell")) loadImages();
       if (ns.some((n) => n.type === "approval")) loadCreds();
+      // 可用变量懒加载：进入编辑页为每个节点拉取一次作用域（scopes 缓存，避免重复请求）
+      for (const n of ns) ensureScope(n);
     } else {
       notify({ type: "error", message: "未找到该流水线，可能已被删除" });
     }
@@ -68,6 +71,43 @@ async function hydrate() {
 }
 watch(() => route.params.id, hydrate);
 onMounted(hydrate);
+
+// ---------- T15 可用变量提示 ----------
+// 节点可用变量懒加载缓存：nodeId -> { state: idle|loading|done, keys: [] }，缓存避免跨重渲染重复请求
+const scopes = reactive(new Map());
+const scopeOf = (n) => scopes.get(n?.id) ?? { state: "idle", keys: [] };
+const scopeKeys = (n) => scopeOf(n).keys ?? [];
+async function ensureScope(n) {
+  if (!n?.id) return;
+  const cur = scopes.get(n.id);
+  if (cur && (cur.state === "loading" || cur.state === "done")) return; // 已在途/已就绪 -> 跳过
+  // 新建未保存（无 id 无法调接口）：不请求，仅提示保存后可用
+  if (!editingId.value) { scopes.set(n.id, { state: "idle", keys: [] }); return; }
+  scopes.set(n.id, { state: "loading", keys: [] });
+  try {
+    const r = await fetchScope(editingId.value, n.id);
+    scopes.set(n.id, { state: "done", keys: r?.keys ?? [] });
+  } catch {
+    scopes.set(n.id, { state: "done", keys: [] });
+  }
+}
+// 追踪当前聚焦的输入框，点击 chip 时把 ${name} 插入其光标处
+const activeEl = ref(null);
+function onFieldFocus(ev, n) {
+  activeEl.value = ev?.target;
+  ensureScope(n);
+}
+function insertVar(name) {
+  const el = activeEl.value;
+  if (!el || typeof el.value !== "string") return;
+  const v = `\${${name}}`;
+  const s = el.selectionStart ?? el.value.length;
+  const e = el.selectionEnd ?? el.value.length;
+  el.value = el.value.slice(0, s) + v + el.value.slice(e);
+  el.selectionStart = el.selectionEnd = s + v.length;
+  el.focus();
+  el.dispatchEvent(new Event("input", { bubbles: true })); // 触发 v-model 感知 DOM 变更
+}
 
 const NODE_KINDS = {
   shell:    { label: "Shell 执行",   accent: "var(--accent)",  icon: "M4 5l6 7-6 7m8 0h8" },
@@ -544,7 +584,16 @@ function addMapping() { webhookMappings.value.push({ name: "", jsonPath: "" }); 
                   </div>
                   <div class="field">
                     <label class="field-label">Shell 命令</label>
-                    <textarea class="textarea" v-model="n.params.command" rows="2" placeholder="echo 'hello cloudshuttle'"></textarea>
+                    <textarea class="textarea mono" v-model="n.params.command" rows="2" placeholder="echo 'hello cloudshuttle'" @focus="onFieldFocus($event, n)"></textarea>
+                    <div class="var-hint">
+                      <span class="var-hint-label">可用变量</span>
+                      <template v-if="isNew"><span class="muted var-hint-text">保存流水线后可在此引用节点变量</span></template>
+                      <template v-else-if="scopeOf(n).state === 'loading'"><span class="muted var-hint-text">加载中…</span></template>
+                      <template v-else-if="!scopeKeys(n).length"><span class="muted var-hint-text">当前节点无可引用变量（可引用触发源参数与前驱节点声明的 ${outputs}）</span></template>
+                      <template v-else>
+                        <button v-for="k in scopeKeys(n)" :key="k" type="button" class="ph-chip var-chip" @click="insertVar(k)">${`${k}`}</button>
+                      </template>
+                    </div>
                   </div>
                 </template>
                 <template v-else>
@@ -606,9 +655,19 @@ function addMapping() { webhookMappings.value.push({ name: "", jsonPath: "" }); 
                           v-model="n.params.message"
                           rows="4"
                           placeholder="编写审批卡片正文（支持 Markdown），或在下方点击占位符标签插入。"
+                          @focus="onFieldFocus($event, n)"
                         ></textarea>
                         <div class="ph-chips">
                           <code v-for="ph in ['${pipeline_name}','${run_no}','${trigger}','${started_at}','${node}','${pipeline_id}','${exec_id}']" :key="ph" class="ph-chip">{{ ph }}</code>
+                        </div>
+                        <div class="var-hint">
+                          <span class="var-hint-label">可用变量</span>
+                          <template v-if="isNew"><span class="muted var-hint-text">保存流水线后可在此引用节点变量</span></template>
+                          <template v-else-if="scopeOf(n).state === 'loading'"><span class="muted var-hint-text">加载中…</span></template>
+                          <template v-else-if="!scopeKeys(n).length"><span class="muted var-hint-text">当前节点无可引用变量（可引用触发源参数与前驱节点声明的 ${outputs}）</span></template>
+                          <template v-else>
+                            <button v-for="k in scopeKeys(n)" :key="k" type="button" class="ph-chip var-chip" @click="insertVar(k)">${`${k}`}</button>
+                          </template>
                         </div>
                         <p class="field-hint">占位符说明：{{ APPROVAL_PLACEHOLDERS }}。默认已内置模板，点击「恢复默认」可还原。</p>
                       </template>
@@ -812,6 +871,17 @@ function addMapping() { webhookMappings.value.push({ name: "", jsonPath: "" }); 
   font-family: var(--font-mono); font-size: 11.5px; color: var(--accent);
   background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
   padding: 2px 7px; border-radius: 6px;
+}
+/* T15 可用变量提示：label + 可点击 chip（与静态占位符区分的中性风格） */
+.var-hint { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0 2px; }
+.var-hint-label { font-size: 11.5px; color: var(--text-3); font-weight: 600; letter-spacing: .03em; }
+.var-hint-text { font-size: 11.5px; color: var(--text-2); line-height: 1.5; }
+.ph-chip.var-chip {
+  cursor: pointer; color: var(--text-2); background: var(--bg-3);
+  border-color: var(--line-strong);
+}
+.ph-chip.var-chip:hover {
+  color: var(--accent); border-color: var(--accent); background: var(--accent-soft);
 }
 .card-tabs { display: flex; align-items: center; gap: 6px; }
 .card-tab {
