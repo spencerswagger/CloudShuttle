@@ -16,7 +16,7 @@ backend/
   index.js            # FC handler 入口（event → routeToHandler）
   local-server.js     # HTTP 入口（监听 :9000，含 /healthz），供本地容器 / FC 自定义容器
   config.js           # 环境变量读取（PG/Redis/SM4_KEY/CONTROL_BASE/ALIYUN_*）
-  db/                 # schema.sql / migrate.js / seed.sql、pg.js、redis.js
+  db/                 # migrations/*.sql（版本化迁移）+ migrate.js（迁移器）、pg.js、redis.js
   engine/             # dag.js 拓扑、state.js、snapshot.js、mutex.js、orchestrator.js
   steps/              # shell.js（→ECI 派发）、approval.js（钉钉卡点）
   providers/          # eci.js、dingtalk-corp.js（企业机器人）、dingtalk-token.js

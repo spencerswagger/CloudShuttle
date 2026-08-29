@@ -1,3 +1,6 @@
+-- 001_init.sql —— 初始表结构
+-- 全部使用 IF NOT EXISTS / ADD COLUMN IF NOT EXISTS，对存量库同样安全（首次应用为幂等即装成功）
+
 CREATE TABLE IF NOT EXISTS pipeline (
   id BIGSERIAL PRIMARY KEY,
   name TEXT NOT NULL UNIQUE,

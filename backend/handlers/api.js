@@ -1,5 +1,5 @@
 // backend/handlers/api.js —— /api/* 管道/凭证/镜像/执行 CRUD
-// 全程使用 db/pg.js 的 pool 直接执行 SQL（列名对齐 db/schema.sql）；
+// 全程使用 db/pg.js 的 pool 直接执行 SQL（列名对齐 db/migrations/*.sql）；
 // 凭证写入时用 crypto/sm4.js 的 SM4 加密后再入库。
 import { pool } from "../db/pg.js";
 import { config } from "../config.js";
