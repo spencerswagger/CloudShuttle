@@ -40,9 +40,21 @@ export function createDingtalkCorpProvider({
         `**审批人**：${approver ?? "-"}\n\n` +
         `${text ?? "请审批该流水线卡点"}`;
       const outTrackId = `cloudshuttle_${token}`;
+      console.log(
+        `[sendApprovalCard] token=${token} openIds=[${t.openIds.join(",")}] ` +
+        `robotCode=${robot?.robotCode} cardTemplateId=${robot?.cardTemplateId} routeKey=${robot?.cardCallbackRouteKey}`
+      );
+      const results = [];
       for (const uid of t.openIds) {
-        await this._createAndDeliver(accessToken, robot, outTrackId, mdText, "IM_ROBOT", uid);
+        try {
+          const r = await this._createAndDeliver(accessToken, robot, outTrackId, mdText, "IM_ROBOT", uid);
+          results.push({ uid, ...r });
+        } catch (err) {
+          console.error(`[sendApprovalCard] FAILED uid=${uid} err=${err?.message ?? err}`);
+          throw err;
+        }
       }
+      console.log(`[sendApprovalCard] done token=${token} results=${JSON.stringify(results)}`);
     },
 
     // 投递一张卡片实例：spaceType ∈ IM_GROUP(群) / IM_ROBOT(机器人单聊)
@@ -73,13 +85,31 @@ export function createDingtalkCorpProvider({
         body,
         { headers: { "x-acs-dingtalk-access-token": accessToken, "content-type": "application/json" } }
       );
-      // createAndDeliver：success=true 或 result.deliverResults[] 全部 success=true
-      const b = resp?.data ?? {};
-      if (b?.success === true) return;
-      const dRes = b?.result?.deliverResults ?? [];
-      if (dRes.length && dRes.every((r) => r?.success === true)) return;
-      const detail = JSON.stringify(dRes[0] ?? b).slice(0, 300);
-      corpError(502, "DINGTALK_SEND_FAILED", "审批卡片发送失败，请检查卡片模板/回调routeKey配置", detail);
+      // createAndDeliver：顶层 success 仅代表请求受理，真正的逐人投递结果在
+      // result.deliverResults[] 中，必须逐条判定，否则会吞掉「接口成功但卡没送达」的失败。
+      const raw = resp?.data ?? {};
+      const dRes = Array.isArray(raw?.result?.deliverResults) ? raw.result.deliverResults : [];
+      const myRes = {};
+      if (dRes.length) {
+        // 只关心本场域（本空间 id）的投递项，其余场域项忽略
+        const mine = dRes.filter((r) => r?.success === false || String(r?.spaceId ?? r?.openSpaceId).includes(spaceId));
+        const fail = dRes.find((r) => r?.success === false);
+        myRes.deliverResults = dRes.map((r) => ({
+          success: r?.success, errorCode: r?.errorCode, errorMessage: r?.errorMessage,
+        }));
+        if (mine.length && (fail || !mine.every((r) => r?.success === true))) {
+          const f = fail ?? mine[0];
+          console.error(`[createAndDeliver] FAILED spaceType=${spaceType} spaceId=${spaceId} raw=${JSON.stringify(raw).slice(0, 500)}`);
+          corpError(502, "DINGTALK_SEND_FAILED", "审批卡片投递失败，请检查模板/回调routeKey与接收人是否已和机器人建会话", JSON.stringify(f ?? raw).slice(0, 300));
+        }
+      }
+      // 无 deliverResults 时以顶层 success 为准，但打印原始响应便于诊断
+      if (raw?.success !== true) {
+        console.error(`[createAndDeliver] FAILED(no-success) spaceType=${spaceType} spaceId=${spaceId} raw=${JSON.stringify(raw).slice(0, 500)}`);
+        const detail = JSON.stringify(dRes[0] ?? raw).slice(0, 300);
+        corpError(502, "DINGTALK_SEND_FAILED", "审批卡片发送失败，请检查卡片模板/回调routeKey配置", detail);
+      }
+      return myRes;
     },
 
     normalizeDecision(d) {

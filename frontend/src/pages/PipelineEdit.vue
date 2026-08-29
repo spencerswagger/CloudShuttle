@@ -164,7 +164,7 @@ const addNode = (type) => {
     params:
       type === "shell"
         ? { image: images.value[0]?.image ?? "alpine", command: "", env: [] }
-        : { approverUid: "", robot: "", target: { type: "user", openConversationId: "", openIds: "", members: [] } },
+        : { robot: "", target: { type: "user", openIds: "", members: [] } },
   };
   current.value.spec_json.nodes.push(node);
 };
@@ -330,26 +330,21 @@ const back = () => router.push("/pipelines");
                       </div>
                       <p v-if="!creds.length" class="field-hint">{{ credsLoading ? "加载中…" : "暂无机器人，点击右侧刷新图标加载" }}</p>
                     </div>
-                    <div class="field">
-                      <label class="field-label">审批人 openId（可选）</label>
-                      <input class="input" v-model="n.params.approverUid" placeholder="用户 openId" />
-                    </div>
                   </div>
 
                   <div v-if="isCorpRobot(n.params.robot)" class="approval-grid" style="margin-top:14px">
                     <div class="field" style="grid-column:1/-1">
-                      <label class="field-label">发送成员</label>
+                      <div class="field-head">
+                        <label class="field-label">发送成员</label>
+                        <button type="button" class="btn btn-sm" @click="openOrg(n)">＋ 从通讯录选择</button>
+                      </div>
                       <div class="member-list">
                         <div v-for="(m, i) in displayMembers(n)" :key="i" class="member-row">
                           <span v-if="m.dept" class="member-dept">{{ m.dept }}</span>
                           <span class="member-name">{{ m.name }}</span>
-                          <span v-if="m.userId" class="member-id muted">{{ m.userId }}</span>
                           <button v-if="m.userId" type="button" class="member-del" title="移除该成员" @click="removeMember(n, i)">×</button>
                         </div>
-                        <div v-if="!displayMembers(n).length" class="empty-tip muted">未选择审批人，点「从通讯录选择」按部门树勾选成员。</div>
-                      </div>
-                      <div class="group-row" style="margin-top:8px">
-                        <button type="button" class="btn" style="white-space:nowrap" @click="openOrg(n)">从通讯录选择</button>
+                        <div v-if="!displayMembers(n).length" class="empty-tip muted">未选择审批人，点右上「从通讯录选择」按部门树勾选。</div>
                       </div>
                     </div>
                   </div>
@@ -485,21 +480,23 @@ const back = () => router.push("/pipelines");
 .group-row .input { flex: 1; min-width: 0; }
 .group-row .select { flex: 1; min-width: 0; }
 
-.member-list { display: flex; flex-direction: column; gap: 6px; }
+.field-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.field-head .field-label { margin-bottom: 0; }
+
+.member-list { border-top: 1px solid rgba(255,255,255,.06); }
 .member-row {
-  display: flex; align-items: center; gap: 8px;
-  padding: 7px 10px; border: 1px solid rgba(255,255,255,.08); border-radius: 8px; background: var(--bg-2);
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 2px; border-bottom: 1px solid rgba(255,255,255,.06);
 }
-.member-dept { color: var(--muted, var(--fg-3)); font-size: 12px; }
-.member-dept::after { content: "/"; margin: 0 6px; color: var(--fg-4, rgba(255,255,255,.3)); }
+.member-dept { color: var(--fg-3, rgba(255,255,255,.5)); font-size: 12px; }
+.member-dept::after { content: "/"; margin: 0 7px; color: var(--fg-4, rgba(255,255,255,.3)); }
 .member-name { font-weight: 600; }
-.member-id { font-size: 12px; margin-left: auto; }
 .member-del {
-  border: 0; background: transparent; color: var(--fg-4, rgba(255,255,255,.45));
-  font-size: 18px; line-height: 1; cursor: pointer; padding: 2px 4px; border-radius: 6px;
+  margin-left: auto; border: 0; background: transparent; color: var(--fg-4, rgba(255,255,255,.45));
+  font-size: 18px; line-height: 1; cursor: pointer; padding: 2px 6px; border-radius: 6px;
 }
 .member-del:hover { color: #ff6b6b; background: var(--bg-3); }
-.empty-tip { font-size: 12.5px; padding: 2px 0; }
+.empty-tip { font-size: 12.5px; padding: 6px 2px; }
 .refresh-btn { flex: 0 0 auto; white-space: nowrap; }
 .field-hint { margin-top: 6px; font-size: 12px; color: var(--text-2); line-height: 1.5; }
 

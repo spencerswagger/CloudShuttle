@@ -20,6 +20,12 @@ export function makeApprovalStep({
     const base = typeof controlPlaneBase === "function" ? controlPlaneBase(ctx) : controlPlaneBase;
     const callbackUrl = `${base}/hook/dingtalk/card/${token}?secret=${secret}`;
     const corp = await getCredentialSecrets(p.robot);
+    const openIds = Array.isArray(p?.target?.openIds) ? p.target.openIds
+      : String(p?.target?.openIds ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+    console.log(
+      `[approval] pipeline=${ctx.execId} node=${node.id} robot=${p.robot} kind=${kind} ` +
+      `target.openIds=[${openIds.join(",")}] callback=${callbackUrl}`
+    );
     await dingtalkCorpProvider.sendApprovalCard({
       robot: corp, target: p.target,
       approver: p.approverUid, text: p.message ?? "请审批该流水线卡点",
