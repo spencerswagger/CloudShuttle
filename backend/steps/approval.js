@@ -19,12 +19,16 @@ export function makeApprovalStep({
     const secret = genToken(); // 每个回调独立密钥，落库并在回拨时校验
     const base = typeof controlPlaneBase === "function" ? controlPlaneBase(ctx) : controlPlaneBase;
     const callbackUrl = `${base}/hook/dingtalk/card/${token}?secret=${secret}`;
-    const corp = await getCredentialSecrets(p.robot);
     const openIds = Array.isArray(p?.target?.openIds) ? p.target.openIds
       : String(p?.target?.openIds ?? "").split(",").map((s) => s.trim()).filter(Boolean);
     console.log(
       `[approval] pipeline=${ctx.execId} node=${node.id} robot=${p.robot} kind=${kind} ` +
       `target.openIds=[${openIds.join(",")}] callback=${callbackUrl}`
+    );
+    const corp = await getCredentialSecrets(p.robot);
+    console.log(
+      `[approval] pipeline=${ctx.execId} node=${node.id} robot=${p.robot} ` +
+      `corp.robotCode=${corp?.robotCode} corp.cardTemplateId=${corp?.cardTemplateId} corp.routeKey=${corp?.cardCallbackRouteKey}`
     );
     await dingtalkCorpProvider.sendApprovalCard({
       robot: corp, target: p.target,

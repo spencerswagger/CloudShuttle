@@ -217,7 +217,15 @@ async function buildApp() {
     }),
   };
   const advancer = createAdvancer({
-    stepRun: async (node, ctx) => steps[node.type](node, ctx),
+    stepRun: async (node, ctx) => {
+      console.log(`[step] exec=${ctx.execId} node=${node.id} type=${node.type}`);
+      try {
+        return await steps[node.type](node, ctx);
+      } catch (err) {
+        console.error(`[step] ERROR exec=${ctx.execId} node=${node.id} type=${node.type} err=${err?.message ?? err}`);
+        throw err;
+      }
+    },
     snapshot: snapshotStore.save,
     record: writeNodeRecord,
     recordRegistry,
