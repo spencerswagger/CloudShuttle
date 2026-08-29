@@ -15,13 +15,14 @@
 
 ### 1. 扁平变量环境（数据总线）
 
-一次执行维护一个**扁平 `Map<name, value>`**，叫 `environment`，与流水线定义解耦。
+一次执行维护一个**扁平** **`Map<name, value>`**，叫 `environment`，与流水线定义解耦。
 不区分变量出自触发源还是节点输出——消费者只按名字查 map，写入方只往 map 塞键值。**同名后写覆盖**。
 
 变量来源分两类写入方：
 
-- **全局变量（触发源 + 执行元信息）**：触发时写入，对**所有节点**可见。
-- **节点输出**：节点执行完成写回，仅对其**后继节点**可见。
+* **全局变量（触发源 + 执行元信息）**：触发时写入，对**所有节点**可见。
+
+* **节点输出**：节点执行完成写回，仅对其**后继节点**可见。
 
 **持久化关键**：`environment` 必须并入快照（`snap:<execId>`），随 DAG 保存/续跑。审批节点 `wait` 会让
 执行被多次 `advance` 断开，若扁平 map 不进快照，恢复后上游输出即丢失。
@@ -37,12 +38,13 @@
 
 把节点定义成「读 environment → 执行 → 写回 outputs」的通用单元，框架在 `advance` 层统一处理：
 
-1. `stepRun(node, ctx)` **执行前**，对节点 `params` 中的字符串字段做 `${{ name }}` 模板替换（查扁平 map）。
+1. `stepRun(node, ctx)` **执行前**，对节点 `params` 中的字符串字段做 `${name}` 模板替换（查扁平 map）。
 2. 节点执行后，把命名输出写回 `environment[name]`（同名即覆盖），随快照落库。
 3. 每个节点提供**默认输出 key**（供快速使用）；用户可自行改名（规避覆盖）或保留同名（主动覆盖）。
 
-- shell 节点：脚本运行时把 environment 注入为环境变量（脚本内可用 `$VAR`）；K=V 输出解析写回扁平 map。
-- 审批节点：本期仅消费不产输出；契约保留，未来新节点类型只需实现读写即可接入总线。
+* shell 节点：脚本运行时把 environment 注入为环境变量（脚本内可用 `$VAR`）；K=V 输出解析写回扁平 map。
+
+* 审批节点：本期仅消费不产输出；契约保留，未来新节点类型只需实现读写即可接入总线。
 
 ### 4. 触发源（收敛为两类）
 
@@ -84,9 +86,9 @@ git 平台事件并无统一协议——因此 git 就是 webhook 的一种，�
 
 ### 6. 渲染与消费
 
-- 统一语法 **`${{ name }}`**（name 即扁平 key）。不做 `{{ }}` 临时兼容——清库，仅保留新语法。
+- 统一语法 **`${name}`**（name 即扁平 key）。不做 `{{ }}` 临时兼容——清库，仅保留新语法。
 - 渲染点：触发入口解析（manual 清单赋值 / webhook 映射项取值）写入 map；节点 `stepRun` 前替换；审批卡片正文渲染。
-- 现有审批卡片 `loadExecMeta` 与 `{{pipeline}}/{{runNo}}` 占位符逻辑删除，改用变量地图与 `${{ <var> }}`。
+- 现有审批卡片 `loadExecMeta` 与 `{{pipeline}}/{{runNo}}` 占位符逻辑删除，改用变量地图与 `${<var>}`。
 
 ### 7. 静态校验（保存时）
 
@@ -96,43 +98,52 @@ git 平台事件并无统一协议——因此 git 就是 webhook 的一种，�
 ### 8. 前端 UI
 
 **触发源区**（流水线编辑页，节点画布上方）：
-- **manual**：参数 schema 编辑器——增删改 `{key,title,type,enum,default,required,description,placeholder}`，
+
+* **manual**：参数 schema 编辑器——增删改 `{key,title,type,enum,default,required,description,placeholder}`，
   type 映射到项目现有控件（string/text/enum/number/boolean），不引入 @formily 运行时。
-- **webhook**：展示/复制该流水线的 webhook URL（沿用 `git_hook_secret` 鉴权机制）；平台模板下拉
+
+* **webhook**：展示/复制该流水线的 webhook URL（沿用 `git_hook_secret` 鉴权机制）；平台模板下拉
   （GitHub / GitLab 一键套 JSONPath）+ 映射项列表 `(name, jsonPath)`。
 
 **运行弹窗**：按 manual schema 用现有控件渲染表单，填值后注入并触发执行；webhook 触发走 URL。
 
 **节点间传输辅助**：shell 节点每个输出 key 提供默认值；编辑 `command`/`env`/审批正文时右侧提示
-「可用变量」（触发源已声明 + 该节点前驱输出），点选插入 `${{ }}`。可用变量列表与保存校验共用同一份
+「可用变量」（触发源已声明 + 该节点前驱输出），点选插入 `${}`。可用变量列表与保存校验共用同一份
 静态作用域计算结果，保证提示与校验一致。
 
 ## 兼容清理清单（顺带删除）
 
 由于清库不兼容，以下旧版 shim 一并清除：
 
-- `dingtalk-corp.js`：数组/逗号字符串两种存储形态归一；删 `callbackUrl` 兼容旧签名。
-- `hook.js`：回调决策归一为单一标准，删 `action`/`decision` 双命名兼容。
-- `api.js`：删 `resolveMobiles` 的"保留签名兼容引用"注释/死代码。
-- 前端列表「详情 404 回退列表查找」逻辑：详情接口已具备，删除回退（`PipelineEdit.vue`/`CredentialForm.vue`/`ImageForm.vue`）。
-- `migrations/001_init.sql` 中"存量库兼容"注释与幂等补充项：清库后按干净结构重写。
-- 遗留：`approval.js` 旧 `extractDecision` 兼容分支、`loadExecMeta` 字符串/对象双形态 trigger —— 一并归一。
+* `dingtalk-corp.js`：数组/逗号字符串两种存储形态归一；删 `callbackUrl` 兼容旧签名。
+
+* `hook.js`：回调决策归一为单一标准，删 `action`/`decision` 双命名兼容。
+
+* `api.js`：删 `resolveMobiles` 的"保留签名兼容引用"注释/死代码。
+
+* 前端列表「详情 404 回退列表查找」逻辑：详情接口已具备，删除回退（`PipelineEdit.vue`/`CredentialForm.vue`/`ImageForm.vue`）。
+
+* `migrations/001_init.sql` 中"存量库兼容"注释与幂等补充项：清库后按干净结构重写。
+
+* 遗留：`approval.js` 旧 `extractDecision` 兼容分支、`loadExecMeta` 字符串/对象双形态 trigger —— 一并归一。
 
 ## 依赖
 
-- `jsonpath-plus`（前端/后端触发解析用，随构建打包，无外部 CDN）。
+* `jsonpath-plus`（前端/后端触发解析用，随构建打包，无外部 CDN）。
 
 ## 范围边界
 
-- 不做：定时触发（FC 无请求不触发，schedule 已删除）、触发源变量跨执行持久化复用（仅本次执行）、
+* 不做：定时触发（FC 无请求不触发，schedule 已删除）、触发源变量跨执行持久化复用（仅本次执行）、
   全局 secrets / 自定义 vars（当前档位仅"触发源 + 上游输出"）。
-- 节点类型：本期 shell（执行 + 输出）、审批（消费）接入总线。
+
+* 节点类型：本期 shell（执行 + 输出）、审批（消费）接入总线。
 
 ## 验收标准
 
 1. 流水线定义新增 trigger（manual schema / webhook 映射项）与每个节点的默认输出 key。
 2. 手动运行弹窗按 manual schema 渲染表单，填值作为全局变量注入；节点能引用。
 3. webhook（含 git）请求 body 经 JSONPath 映射产出变量，节点可引用。
-4. 节点输出的 K=V 写回扁平 map，后继节点可用 `${{ name }}` 引用。
+4. 节点输出的 K=V 写回扁平 map，后继节点可用 `${name}` 引用。
 5. 保存时引用未知/非前驱 key 被拦截并提示。
 6. 审批卡片消费同一变量地图渲染正文。
+
