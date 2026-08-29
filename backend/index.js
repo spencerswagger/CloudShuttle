@@ -294,11 +294,13 @@ async function buildApp() {
   // 触发前装配：读取该 pipeline 最新 rev 的 spec 并开新执行（写入 execution.trigger 留痕），
   // 构造执行元信息 Map，再按组件 origin 叠写 manual/webhook 变量，返回可直接交给
   // orchestrator.run(spec, environment) 的产物。
-  async function hydrateForRun({ pipelineId, kind, formValue, webhookBody, authority }) {
+  async function hydrateForRun({ pipelineId, kind, formValue, webhookBody, authority, rerunOf }) {
     const trigger = kind === "manual"
       ? { trigger: "manual", params: formValue ?? {} }
       : kind === "webhook" ? { trigger: "webhook", body: webhookBody ?? {} }
       : {};
+    // rerun 场景：把被重跑的原执行 id 一并留痕进新执行的 trigger，标识其 provenance
+    if (rerunOf != null) trigger.rerunOf = rerunOf;
     const spec = await loadPipelineRev(pipelineId, trigger, authority ? { authority } : undefined);
     const initEnv = await buildInitialEnvironment({ execId: spec.execId, pipelineId });
     const environment = assembleTriggerEnv({ spec, formValue, webhookBody, initEnv });
@@ -382,8 +384,24 @@ const DISPATCH = {
   },
   "api.rerunExecution": async ({ app, path }) => {
     const id = Number(m(path, RE.executionRerun));
-    const pipelineId = await api.executionPipelineId(id);
-    return ok(app.orchestrator.onGitWebhook({ pipelineId, trigger: { rerunOf: id } }));
+    // 读取原执行留痕的 trigger，恢复其触发源输入后走统一 hydrateForRun 重新装配
+    const orig = await api.getExecution(id);
+    const origTrigger = orig?.trigger ?? {};
+    const kind = origTrigger.trigger === "webhook" ? "webhook" : "manual";
+    const formValue = kind === "manual" ? origTrigger.params : undefined;
+    const webhookBody = kind === "webhook" ? origTrigger.body : undefined;
+    const { spec, environment } = await app.hydrateForRun({
+      pipelineId: orig.pipeline_id, kind, formValue, webhookBody, rerunOf: id,
+    });
+    const out = await app.orchestrator.run(spec, environment);
+    return {
+      status: 200,
+      body: {
+        execId: spec.execId,
+        status: out?.status ?? (out?.waiting ? "running" : "completed"),
+        waiting: out?.waiting ?? null,
+      },
+    };
   },
   "api.getGitHookSecret": async ({ path }) => {
     const out = await api.getGitHookSecret(Number(m(path, RE.gitHookSecret)));
