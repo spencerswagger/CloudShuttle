@@ -33,12 +33,11 @@ export function createDingtalkCorpProvider({
     // callbackUrl 保留以兼容旧签名，回调统一走 callbackRouteKey，此处忽略。
     async sendApprovalCard({ robot, target, approver, text, callbackUrl, token }) {
       void callbackUrl;
+      void approver;
       const accessToken = await getToken(robot);
       const t = resolveTarget(target, approver);
-      const mdText =
-        `### 流水线审批卡点 · #${token}\n\n` +
-        `**审批人**：${approver ?? "-"}\n\n` +
-        `${text ?? "请审批该流水线卡点"}`;
+      // 卡片正文由 approval 步骤组装（默认模板 + 用户自定义 + 占位符填充），不再硬拼 uuid
+      const mdText = text ?? "请审批该流水线卡点";
       const outTrackId = `cloudshuttle_${token}`;
       console.log(
         `[sendApprovalCard] token=${token} openIds=[${t.openIds.join(",")}] ` +
@@ -61,6 +60,8 @@ export function createDingtalkCorpProvider({
     async _createAndDeliver(accessToken, robot, outTrackId, markdownText, spaceType, spaceId) {
       const cardTemplateId = robot.cardTemplateId;
       const routeKey = robot.cardCallbackRouteKey;
+      // 企业内部应用机器人 RobotCode 即应用 AppKey；未单独配置时兜底为 AppKey
+      const robotCode = robot.robotCode || robot.appKey;
       if (!cardTemplateId || !routeKey) {
         corpError(400, "BAD_CREDENTIAL",
           "审批需在机器人凭证中配置 cardTemplateId（卡片平台模板ID）与 cardCallbackRouteKey（注册的回调routeKey）",
@@ -78,10 +79,10 @@ export function createDingtalkCorpProvider({
       // imRobotOpenSpaceModel（场域信息，至少 supportForward）与 imRobotOpenDeliverModel，
       // 只给 deliverModel 会导致钉钉「spaces of card is empty」解析不到接收人空间。
       if (spaceType === "IM_ROBOT") {
-        body.imRobotOpenDeliverModel = { spaceType: "IM_ROBOT", robotCode: robot.robotCode };
+        body.imRobotOpenDeliverModel = { spaceType: "IM_ROBOT", robotCode };
         body.imRobotOpenSpaceModel = { supportForward: false };
       } else {
-        body.imGroupOpenDeliverModel = { robotCode: robot.robotCode };
+        body.imGroupOpenDeliverModel = { robotCode };
         body.imGroupOpenSpaceModel = { supportForward: true };
       }
       let resp;

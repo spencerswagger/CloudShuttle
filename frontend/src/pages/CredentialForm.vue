@@ -21,6 +21,7 @@ const pageTitle = computed(() => (isNew.value ? "新建凭证" : `编辑凭证${
 
 const kindMeta = computed(() => credKind(form.value.kind));
 const kindFields = computed(() => kindMeta.value?.fields ?? []);
+const isDingtalk = computed(() => form.value.kind === "dingtalk-corp");
 
 // 详情接口优先；后端尚未发布详情接口(404)时回退列表查找，保证返显可用
 async function loadForm() {
@@ -101,6 +102,32 @@ const doDelete = async () => {
 
         <p class="kind-hint">{{ kindMeta?.hint }}</p>
 
+        <!-- 钉钉：后台需手动完成的配置步骤 + 跳转链接 -->
+        <section v-if="kindMeta?.guide?.length" class="enroll-card">
+          <div class="enroll-title">钉钉后台需完成的配置</div>
+          <ol class="enroll-steps">
+            <li v-for="(g, i) in kindMeta.guide" :key="i" class="enroll-step">
+              <div class="enroll-step-head">
+                <span class="enroll-step-no">{{ i + 1 }}</span>
+                <a :href="g.url" target="_blank" rel="noreferrer" class="enroll-link">
+                  <span class="enroll-link-name">{{ g.title }}</span>
+                  <span class="enroll-go">去配置 ↗</span>
+                </a>
+              </div>
+              <p class="enroll-step-text">{{ g.text }}</p>
+            </li>
+          </ol>
+        </section>
+
+        <!-- 钉钉：后台自动生成/推导的参数说明 -->
+        <section v-if="kindMeta?.auto?.length" class="enroll-auto">
+          <div class="enroll-title">自动生成（无需填写）</div>
+          <div v-for="(a, i) in kindMeta.auto" :key="i" class="enroll-auto-row">
+            <span class="enroll-auto-label">{{ a.label }}</span>
+            <span class="enroll-auto-value">{{ a.value }}</span>
+          </div>
+        </section>
+
         <div class="field" v-for="f in kindFields" :key="f.k">
           <label class="field-label">{{ f.label }}</label>
           <input
@@ -116,8 +143,8 @@ const doDelete = async () => {
           <span class="flex-spacer"></span>
           <button type="button" class="btn" @click="router.push('/credentials')">取消</button>
           <button type="submit" class="btn btn-accent" :disabled="saving">
-            {{ saving ? "保存中…" : "保存凭证" }}
-          </button>
+  {{ saving ? (isDingtalk ? "正在校验钉钉配置…" : "保存中…") : (isDingtalk ? "校验并保存" : "保存凭证") }}
+</button>
         </div>
       </form>
     </section>
@@ -143,4 +170,17 @@ const doDelete = async () => {
 }
 .form-footer { display: flex; align-items: center; gap: 10px; }
 .flex-spacer { flex: 1; }
+.enroll-card { margin: 0 0 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg-1); padding: 14px 16px; }
+.enroll-title { font-size: 12.5px; font-weight: 600; letter-spacing: .3px; margin-bottom: 10px; color: var(--text-1); }
+.enroll-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
+.enroll-step-head { display: flex; align-items: center; gap: 10px; }
+.enroll-step-no { width: 18px; height: 18px; border-radius: 50%; background: var(--accent); color: #04121a; font-size: 11px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; flex: none; }
+.enroll-link { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; color: var(--text-1); font-weight: 600; font-size: 13px; }
+.enroll-link:hover { color: var(--accent); }
+.enroll-go { margin-left: auto; font-size: 11.5px; color: var(--accent); flex: none; }
+.enroll-step-text { margin: 4px 0 0 28px; font-size: 12px; line-height: 1.6; color: var(--text-2); }
+.enroll-auto { border: 1px dashed var(--line); border-radius: 12px; padding: 10px 14px; margin: 0 0 18px; background: var(--bg-1); }
+.enroll-auto-row { display: flex; gap: 10px; align-items: baseline; padding: 5px 0; }
+.enroll-auto-label { width: 120px; flex: none; font-size: 12px; color: var(--text-2); }
+.enroll-auto-value { font-size: 12.5px; color: var(--text-1); }
 </style>

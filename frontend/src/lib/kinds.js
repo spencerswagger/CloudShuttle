@@ -4,14 +4,23 @@ export const CRED_KINDS = [
     value: "dingtalk-corp",
     label: "钉钉企业机器人",
     icon: "M6 3h12v18H6zM9.5 8h5M9.5 12h5M9.5 16h3",
-    hint: "走钉钉企业应用 OpenAPI，审批仅发人（机器人单聊互动卡片），需配置下方卡片模板 ID 与回调 routeKey",
+    hint: "走钉钉企业应用 OpenAPI，审批以单聊互动卡片发送。保存时将自动校验配置并在后端注册回调，无需手动填写 RouteKey。",
+    // 用户在钉钉后台需完成的配置步骤与跳转入口
+    guide: [
+      { title: "创建企业内部应用 · 取 AppKey/AppSecret", text: "登录开发者后台，应用详情 → 基础信息 → 凭证与基础信息（AppKey 即 Client ID，AppSecret 即 Client Secret）", url: "https://open-dev.dingtalk.com" },
+      { title: "开启应用内机器人", text: "应用能力 → 机器人，发布后在企业企业内部应用场景中 RobotCode 即 AppKey，可留空由系统自动带入", url: "https://open-dev.dingtalk.com" },
+      { title: "搭建并发布审批卡片模板", text: "在卡片平台搭建含「同意/拒绝」按钮的模板，发布后复制 templateId 填入下方「卡片模板 ID」", url: "https://open-dev.dingtalk.com/fe/card" },
+      { title: "申请『互动卡片实例写权限』", text: "开发配置 → 权限管理，搜索并申请 Card.Instance.Write，否则保存校验会失败", url: "https://open-dev.dingtalk.com" },
+    ],
+    // 由后端自动推导/生成的参数，仅展示说明
+    auto: [
+      { label: "RobotCode", value: "= 应用 AppKey，无需填写" },
+      { label: "回调 RouteKey", value: "保存凭证时由后端自动注册，无需填写" },
+    ],
     fields: [
-      { k: "appKey", label: "AppKey", ph: "应用 AppKey" },
-      { k: "appSecret", label: "AppSecret", ph: "应用 AppSecret", secret: true },
-      { k: "agentId", label: "AgentId", ph: "应用 AgentId" },
-      { k: "robotCode", label: "RobotCode", ph: "机器人编码" },
-      { k: "cardTemplateId", label: "卡片模板 ID", ph: "卡片平台中模板的 templateId", hint: "发群审查的「卡片平台」模板 ID" },
-      { k: "cardCallbackRouteKey", label: "回调 routeKey", ph: "开发者后台注册卡片回调地址后的 routeKey", hint: "模板按钮「回传请求」回调路由标识" },
+      { k: "appKey", label: "AppKey", ph: "应用 AppKey（即 Client ID）" },
+      { k: "appSecret", label: "AppSecret", ph: "应用 AppSecret（即 Client Secret）", secret: true },
+      { k: "cardTemplateId", label: "卡片模板 ID", ph: "卡片平台中审批模板的 templateId", hint: "在卡片平台搭建发布后复制" },
     ],
   },
   {

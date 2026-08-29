@@ -1,6 +1,6 @@
 <!-- 流水线编辑页：路由驱动，新建(/pipelines/new) 或 编辑(/pipelines/:id) -->
 <script setup>
-import { ref, reactive, computed, onMounted, watch } from "vue";
+import { ref, reactive, computed, onMounted, onBeforeUnmount, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import draggable from "vuedraggable";
 import { notify } from "../lib/notify.js";
@@ -79,6 +79,37 @@ const convKinds = ["dingtalk-corp"];
 const isCorpRobot = (name) => {
   const c = creds.value.find((x) => x.name === name);
   return convKinds.includes(c?.kind);
+};
+
+// 高级机器人下拉：主标题取自凭证名，副标题拼接企业/应用元信息（display_meta），并展示应用图标
+const robotOpenId = ref(""); // 当前展开下拉的节点 id；空串表示全部收起
+const kindName = (k) => ({ "dingtalk-corp": "钉钉企业机器人", git: "Git 令牌" }[k] || k || "凭证");
+const credTitle = (c) => c?.name || "未命名凭证";
+const credSub = (c) => {
+  const parts = [];
+  if (c?.display_meta?.corpName) parts.push(c.display_meta.corpName);
+  if (c?.display_meta?.appName) parts.push(c.display_meta.appName);
+  if (!parts.length) parts.push(kindName(c?.kind));
+  return parts.join(" · ");
+};
+const KIND_BADGE = { "dingtalk-corp": "钉", git: "G" };
+const selectedCred = (n) => creds.value.find((x) => x.name === n.params.robot);
+function toggleRobotDrop(id) { robotOpenId.value = robotOpenId.value === id ? "" : id; }
+function pickRobot(n, name) { n.params.robot = name; robotOpenId.value = ""; }
+function onDocClick() { if (robotOpenId.value) robotOpenId.value = ""; }
+onMounted(() => document.addEventListener("click", onDocClick));
+
+// 审批卡片正文定制：内置占位符按流水线/执行运行时填充，留空 used 默认模板
+const APPROVAL_PLACEHOLDERS = "{{pipeline}} 流水线名 · {{runNo}} 执行编号 · {{trigger}} 触发方式 · {{startedAt}} 发起时间 · {{node}} 节点 · {{pipelineId}} / {{execId}}";
+const DEFAULT_APPROVAL_BODY = "请审批该流水线卡点";
+function resetApprovalMsg(n) { n.params.message = ""; }
+const approvalPreview = (n) => {
+  const vars = {
+    pipeline: "release-构建-发布", runNo: "12", trigger: "手动触发",
+    startedAt: "2026-08-29 10:00:00", execId: "34", pipelineId: "5", node: n.id,
+  };
+  const body = n.params.message || DEFAULT_APPROVAL_BODY;
+  return String(body).replace(/\{\{\s*([a-zA-Z][\w]*)\s*\}\}/g, (m, k) => (k in vars ? vars[k] : m));
 };
 
 // 通讯录选择器：按部门树逐层加载，勾选成员填回 target.members（含部门层级），并同步 openIds 供后端使用
@@ -164,7 +195,7 @@ const addNode = (type) => {
     params:
       type === "shell"
         ? { image: images.value[0]?.image ?? "alpine", command: "", env: [] }
-        : { robot: "", target: { type: "user", openIds: "", members: [] } },
+        : { robot: "", message: "", target: { type: "user", openIds: "", members: [] } },
   };
   current.value.spec_json.nodes.push(node);
 };
@@ -321,11 +352,38 @@ const back = () => router.push("/pipelines");
                     <div class="field">
                       <label class="field-label">钉钉机器人</label>
                       <div class="group-row">
-                        <select class="select" v-model="n.params.robot">
-                          <option :value="''">请选择机器人</option>
-                          <option v-if="!creds.length && !credsLoading" :value="n.params.robot" hidden></option>
-                          <option v-for="c in creds" :key="c.id" :value="c.name">{{ c.name }}</option>
-                        </select>
+                        <div class="cs-select" @click.stop>
+                          <button type="button" class="cs-trigger" :class="{ open: robotOpenId === n.id }" @click.stop="toggleRobotDrop(n.id)" :disabled="credsLoading">
+                            <template v-if="selectedCred(n)">
+                              <img v-if="selectedCred(n)?.display_meta?.appIcon" :src="selectedCred(n).display_meta.appIcon" class="cs-ico" alt="" />
+                              <span v-else class="cs-badge" :style="{ color: isCorpRobot(n.params.robot) ? 'var(--ember)' : '' }">{{ KIND_BADGE[selectedCred(n).kind] }}</span>
+                              <span class="cs-trigger-text">
+                                <span class="cs-title">{{ credTitle(selectedCred(n)) }}</span>
+                                <span class="cs-sub">{{ credSub(selectedCred(n)) }}</span>
+                              </span>
+                            </template>
+                            <span v-else class="cs-placeholder">{{ credsLoading ? "加载中…" : "请选择机器人" }}</span>
+                            <svg class="cs-caret" :class="{ flip: robotOpenId === n.id }" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+                          </button>
+                          <div v-if="robotOpenId === n.id" class="cs-drop">
+                            <div
+                              v-for="c in creds"
+                              :key="c.id"
+                              class="cs-opt"
+                              :class="{ active: n.params.robot === c.name }"
+                              @click="pickRobot(n, c.name)"
+                            >
+                              <img v-if="c.display_meta?.appIcon" :src="c.display_meta.appIcon" class="cs-opt-ico" alt="" />
+                              <span v-else class="cs-opt-badge">{{ KIND_BADGE[c.kind] || "凭证" }}</span>
+                              <span class="cs-opt-text">
+                                <span class="cs-opt-title">{{ credTitle(c) }}</span>
+                                <span class="cs-opt-sub">{{ credSub(c) }}</span>
+                              </span>
+                              <svg v-if="n.params.robot === c.name" class="cs-check" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+                            </div>
+                            <div v-if="!creds.length && !credsLoading" class="cs-empty">暂无机器人，点右侧刷新图标加载</div>
+                          </div>
+                        </div>
                         <button type="button" class="btn btn-sm btn-ghost refresh-btn" title="加载/刷新机器人" @click="loadCreds" :disabled="credsLoading">⟳</button>
                       </div>
                       <p v-if="!creds.length" class="field-hint">{{ credsLoading ? "加载中…" : "暂无机器人，点击右侧刷新图标加载" }}</p>
@@ -333,6 +391,27 @@ const back = () => router.push("/pipelines");
                   </div>
 
                   <div v-if="isCorpRobot(n.params.robot)" class="approval-grid" style="margin-top:14px">
+                    <div class="field" style="grid-column:1/-1">
+                      <div class="field-head">
+                        <label class="field-label">审批卡片正文（Markdown）</label>
+                        <button type="button" class="btn btn-sm" title="清空自定义内容，恢复内置默认模板" @click="resetApprovalMsg(n)">恢复默认</button>
+                      </div>
+                      <textarea
+                        class="textarea mono card-body"
+                        v-model="n.params.message"
+                        rows="4"
+                        placeholder="编写审批卡片正文（支持 Markdown），或在下面点击占位符标签插入。留空使用内置默认模板。"
+                      ></textarea>
+                      <div class="ph-chips">
+                        <code v-for="ph in ['{{pipeline}}','{{runNo}}','{{trigger}}','{{startedAt}}','{{node}}','{{pipelineId}}','{{execId}}']" :key="ph" class="ph-chip">{{ ph }}</code>
+                      </div>
+                      <p class="field-hint">占位符说明：{{ APPROVAL_PLACEHOLDERS }}。留空或恢复默认时，卡片使用内置模板展示流水线审批卡点。</p>
+                      <div class="md-preview">
+                        <span class="preview-label">发送预览</span>
+                        <pre class="preview-body">{{ approvalPreview(n) }}</pre>
+                      </div>
+                    </div>
+
                     <div class="field" style="grid-column:1/-1">
                       <div class="field-head">
                         <label class="field-label">发送成员</label>
@@ -479,6 +558,61 @@ const back = () => router.push("/pipelines");
 .group-row { display: flex; gap: 8px; }
 .group-row .input { flex: 1; min-width: 0; }
 .group-row .select { flex: 1; min-width: 0; }
+
+/* 高级机器人下拉：logo + 主副标题 */
+.cs-select { position: relative; flex: 1; min-width: 0; }
+.cs-trigger {
+  width: 100%; display: flex; align-items: center; gap: 10px;
+  padding: 9px 12px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--bg-1); color: var(--text-1); cursor: pointer;
+  font-family: inherit; text-align: left; transition: border-color .16s var(--ease), box-shadow .16s var(--ease);
+}
+.cs-trigger:hover { border-color: var(--line-strong); }
+.cs-trigger.open { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 15%, transparent); }
+.cs-trigger:disabled { opacity: .6; cursor: progress; }
+.cs-ico { width: 30px; height: 30px; flex: 0 0 30px; border-radius: 8px; object-fit: cover; background: var(--bg-3); }
+.cs-opt-ico { width: 30px; height: 30px; flex: 0 0 30px; border-radius: 8px; object-fit: cover; background: var(--bg-3); }
+.cs-badge, .cs-opt-badge {
+  width: 30px; height: 30px; flex: 0 0 30px; border-radius: 8px; display: grid; place-items: center;
+  font-family: var(--font-display); font-size: 14px; font-weight: 600;
+  color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); border: 1px solid var(--line);
+}
+.cs-trigger-text, .cs-opt-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.cs-title, .cs-opt-title { font-size: 13.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cs-sub, .cs-opt-sub { font-size: 11.5px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cs-placeholder { color: var(--text-3); flex: 1; }
+.cs-caret { margin-left: auto; flex: 0 0 auto; color: var(--text-3); transition: transform .18s var(--ease); }
+.cs-caret.flip { transform: rotate(180deg); }
+.cs-drop {
+  position: absolute; top: calc(100% + 6px); left: 0; right: 0; z-index: 40;
+  max-height: 260px; overflow: auto; padding: 5px;
+  background: var(--bg-2); border: 1px solid var(--line-strong); border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0,0,0,.35);
+}
+.cs-opt {
+  display: flex; align-items: center; gap: 10px; padding: 8px 9px; border-radius: 8px; cursor: pointer;
+}
+.cs-opt:hover { background: var(--bg-3); }
+.cs-opt.active { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.cs-opt-title { color: var(--text-1); }
+.cs-opt.active .cs-opt-title { color: var(--accent); }
+.cs-check { margin-left: auto; flex: 0 0 auto; color: var(--accent); }
+.cs-empty { padding: 12px; text-align: center; color: var(--text-3); font-size: 12.5px; }
+
+/* 审批卡片正文定制 */
+.card-body { resize: vertical; min-height: 70px; }
+.ph-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 2px; }
+.ph-chip {
+  font-family: var(--font-mono); font-size: 11.5px; color: var(--accent);
+  background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  padding: 2px 7px; border-radius: 6px;
+}
+.md-preview { margin-top: 8px; border: 1px dashed var(--line); border-radius: 10px; background: var(--bg-1); }
+.preview-label { display: block; font-size: 11px; letter-spacing: .06em; color: var(--text-3); padding: 8px 12px 0; }
+.preview-body {
+  margin: 0; padding: 8px 12px 12px; white-space: pre-wrap; word-break: break-word;
+  font-size: 12.5px; line-height: 1.7; color: var(--text-1);
+}
 
 .field-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
 .field-head .field-label { margin-bottom: 0; }

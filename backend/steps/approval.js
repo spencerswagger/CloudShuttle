@@ -1,12 +1,57 @@
 // approval 节点：只走钉钉企业机器人（dingtalk-corp）的最新版互动卡片（卡片实例 createAndDeliver）。
 // 发送 → dingtalkCorpProvider.sendApprovalCard（发人 IM_ROBOT / 发群 IM_GROUP）。
 // 生成 token + 独立 secret 落库，回调统一走 /hook/dingtalk/card/:token。
+//
+// 卡片正文组装：提供默认模板，并内置一批占位符（{{pipeline}}/{{runNo}}/{{trigger}}/{{startedAt}}/
+// {{execId}}/{{pipelineId}}/{{node}} 与 {{body}}）供节点自定义。正文不显示回调 uuid/token。
+
+// 审批卡片默认模板。{{body}} 为用户自定义正文（可再含占位符）；其余占位符运行时填充。
+export const APPROVAL_CARD_TEMPLATE =
+  `### ✦ 流水线审批卡点\n\n` +
+  `| 项 | 内容 |\n|---|---|\n` +
+  `| **流水线** | \`{{ pipeline }}\`（执行 #{{ runNo }}） |\n` +
+  `| **触发方式** | {{ trigger }} |\n` +
+  `| **发起时间** | {{ startedAt }} |\n\n` +
+  `{{ body }}\n\n` +
+  `---\n请审核后点击下方按钮完成审批。`;
+
+export const APPROVAL_CARD_DEFAULT_BODY = "请审批该流水线卡点";
+
+// 替换 {{ name }} 占位符；未命中的占位符原样保留，方便发现拼写错误
+function fillVars(text, vars) {
+  return String(text ?? "").replace(/\{\{\s*([a-zA-Z][\w]*)\s*\}\}/g, (m, k) => (k in vars ? vars[k] : m));
+}
+
+// 组装最终卡片正文：默认模板里的占位符与用户自定义正文(含占位符)一并填充
+export function renderApprovalCard({ body, meta, nodeId }) {
+  const vars = {
+    pipeline: meta?.pipeline ?? "",
+    runNo: meta?.runNo ?? "-",
+    trigger: meta?.trigger ?? "manual",
+    startedAt: meta?.startedAt ?? "-",
+    execId: meta?.execId ?? "",
+    pipelineId: meta?.pipelineId ?? "",
+    node: meta?.node ?? nodeId ?? "",
+    body: fillVars(body || APPROVAL_CARD_DEFAULT_BODY, {
+      pipeline: meta?.pipeline ?? "",
+      runNo: meta?.runNo ?? "-",
+      trigger: meta?.trigger ?? "manual",
+      startedAt: meta?.startedAt ?? "-",
+      execId: meta?.execId ?? "",
+      pipelineId: meta?.pipelineId ?? "",
+      node: meta?.node ?? nodeId ?? "",
+    }),
+  };
+  return fillVars(APPROVAL_CARD_TEMPLATE, vars);
+}
+
 export function makeApprovalStep({
   dingtalkCorpProvider,
   getCredentialKind,
   getCredentialSecrets,
   genToken,
   controlPlaneBase,
+  loadExecMeta,
 }) {
   return async function approvalStep(node, ctx) {
     const p = node.params;
@@ -25,6 +70,12 @@ export function makeApprovalStep({
       `[approval] pipeline=${ctx.execId} node=${node.id} robot=${p.robot} kind=${kind} ` +
       `target.openIds=[${openIds.join(",")}] callback=${callbackUrl}`
     );
+    // 组装卡片正文：默认模板 + 节点自定义正文 + 流水线/执行元信息填充（不暴露 uuid）
+    const meta = (await loadExecMeta?.({
+      execId: ctx.execId, pipelineId: ctx.spec?.pipelineId, nodeId: node.id,
+    })) ?? { execId: ctx.execId, pipelineId: ctx.spec?.pipelineId, node: node.id };
+    const md = renderApprovalCard({ body: p.message, meta, nodeId: node.id });
+    console.log(`[approval] exec=${ctx.execId} node=${node.id} 卡片正文已组装：\n${md}`);
     const corp = await getCredentialSecrets(p.robot);
     console.log(
       `[approval] pipeline=${ctx.execId} node=${node.id} robot=${p.robot} ` +
@@ -32,7 +83,7 @@ export function makeApprovalStep({
     );
     await dingtalkCorpProvider.sendApprovalCard({
       robot: corp, target: p.target,
-      approver: p.approverUid, text: p.message ?? "请审批该流水线卡点",
+      approver: p.approverUid, text: md,
       callbackUrl, token,
     });
     console.log(`[approval] ✔ 审批卡片已成功投递：token=${token} exec=${ctx.execId} node=${node.id}，开始登记回调凭证等待回拨`);

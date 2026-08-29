@@ -3,7 +3,7 @@
 // 凭证写入时用 crypto/sm4.js 的 SM4 加密后再入库。
 import { pool } from "../db/pg.js";
 import { config } from "../config.js";
-import { sm4Encrypt } from "../crypto/sm4.js";
+import { sm4Encrypt, sm4Decrypt } from "../crypto/sm4.js";
 import { HttpError } from "../errors.js";
 import { randomUUID } from "node:crypto";
 
@@ -175,20 +175,36 @@ export async function deleteCredential(id) {
 // ---------- 凭证（不回显 secret_enc 明文） ----------
 export async function listCredentials() {
   return rows(
-    await pool.query(`SELECT id, name, kind, created_at FROM credential ORDER BY id`)
+    await pool.query(`SELECT id, name, kind, display_meta, created_at FROM credential ORDER BY id`)
   );
 }
 
 // 详情（编辑返显用）：不回显 secret_enc 明文
 export async function getCredential(id) {
   const { rows } = await pool.query(
-    `SELECT id, name, kind, created_at FROM credential WHERE id=$1`, [id]
+    `SELECT id, name, kind, display_meta, created_at FROM credential WHERE id=$1`, [id]
   );
   if (!rows[0]) throw new HttpError(404, "CREDENTIAL_NOT_FOUND", "凭证不存在");
   return rows[0];
 }
 
-export async function createCredential(body) {
+// 钉钉企业机器人：保存前校验 aksk、自动注册回调，并尽力拉取展示辅助信息（企业/应用名与图标）
+async function enrollDingtalk(secret, existingRouteKey, deps) {
+  const { routeKey } = await deps.enroll.verifyAndRegister({
+    appKey: secret?.appKey,
+    appSecret: secret?.appSecret,
+    existingRouteKey,
+    base: deps.base,
+  });
+  const meta = await deps.enroll.fetchProfile({ appKey: secret?.appKey, appSecret: secret?.appSecret })
+    .catch(() => ({}));
+  return {
+    secret: { ...(secret ?? {}), cardCallbackRouteKey: routeKey },
+    meta: meta ?? {},
+  };
+}
+
+export async function createCredential(body, deps) {
   if (!config.sm4Key) {
     throw new HttpError(
       500,
@@ -197,16 +213,46 @@ export async function createCredential(body) {
       "SM4_KEY not configured in control plane env; secret cannot be stored",
     );
   }
-  const enc = sm4Encrypt(config.sm4Key, body?.secret ?? {});
+  const kind = body?.kind;
+  let secret;
+  let meta = {};
+  // 钉钉：先调通(校验 aksk + 权限 + 注册回调 + 拉取企业/应用信息)再落库，失败则保存失败
+  if (kind === "dingtalk-corp") {
+    const r = await enrollDingtalk(body?.secret ?? {}, null, deps);
+    secret = r.secret;
+    meta = r.meta;
+  } else {
+    secret = { ...(body?.secret ?? {}) };
+  }
+  const enc = sm4Encrypt(config.sm4Key, secret);
   const { rows: r } = await pool.query(
-    `INSERT INTO credential(name, kind, secret_enc) VALUES($1,$2,$3) RETURNING id,name,kind`,
-    [body?.name, body?.kind, enc]
+    `INSERT INTO credential(name, kind, secret_enc, display_meta) VALUES($1,$2,$3,$4::jsonb) RETURNING id,name,kind`,
+    [body?.name, kind, enc, meta]
   );
   return r[0];
 }
 
 // 编辑凭证：可改 name；当 secret 请求体非空时一并重加密落库（留空则保持原 secret）
-export async function updateCredential(id, body) {
+export async function updateCredential(id, body, deps) {
+  const kind = body?.kind;
+  if (kind === "dingtalk-corp") {
+    if (!config.sm4Key) {
+      throw new HttpError(500, "SERVICE_MISCONFIG", "系统加解密配置缺失，请联系管理员处理",
+        "SM4_KEY not configured; cannot update credential secret");
+    }
+    const { rows: cur } = await pool.query(`SELECT secret_enc FROM credential WHERE id=$1`, [id]);
+    const orig = cur[0] ? sm4Decrypt(config.sm4Key, cur[0].secret_enc) : {};
+    // 敏感项留空则沿用原值；校验并复用原 routeKey 重新注册（forceUpdate 覆盖），并刷新展示信息
+    const merged = { ...orig, ...(body?.secret && typeof body.secret === "object" ? body.secret : {}) };
+    const r = await enrollDingtalk(merged, merged.cardCallbackRouteKey, deps);
+    const enc = sm4Encrypt(config.sm4Key, r.secret);
+    const { rows: rr } = await pool.query(
+      `UPDATE credential SET name=$2, secret_enc=$3, display_meta=$4::jsonb, updated_at=now() WHERE id=$1 RETURNING id,name,kind`,
+      [id, body?.name, enc, r.meta]
+    );
+    if (!rr[0]) throw new HttpError(404, "CREDENTIAL_NOT_FOUND", "凭证不存在");
+    return rr[0];
+  }
   let enc;
   const secret = body?.secret;
   if (secret && typeof secret === "object" && Object.keys(secret).length) {

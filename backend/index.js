@@ -7,6 +7,7 @@ import { config } from "./config.js";
 import { createEciProvider } from "./providers/eci.js";
 import { createDingtalkCorpProvider } from "./providers/dingtalk-corp.js";
 import { createDingtalkTokenCache } from "./providers/dingtalk-token.js";
+import { createDingtalkEnroll } from "./providers/dingtalk-enroll.js";
 import { createSnapshotStore } from "./engine/snapshot.js";
 import { createMutex } from "./engine/mutex.js";
 import { createAdvancer } from "./engine/state.js";
@@ -169,6 +170,25 @@ async function writeNodeRecord({ execId, nodeId, status, output, ref }) {
   );
 }
 
+// 组装审批卡片所需的流水线/执行元信息（模板占位符填充用）
+async function loadExecMeta({ execId, pipelineId, nodeId }) {
+  const [p, e] = await Promise.all([
+    pool.query(`SELECT name FROM pipeline WHERE id=$1`, [pipelineId]),
+    pool.query(`SELECT run_no, trigger, started_at FROM execution WHERE id=$1`, [execId]),
+  ]);
+  const t = e.rows[0]?.trigger ?? {};
+  const trig = typeof t === "string" ? t
+    : t?.trigger ? `手动触发` : t?.rerunOf ? `重跑 #${t.rerunOf}` : `自动触发`;
+  return {
+    execId, pipelineId, node: nodeId,
+    pipeline: p.rows[0]?.name ?? String(pipelineId ?? ""),
+    runNo: e.rows[0]?.run_no ?? "-",
+    trigger: trig,
+    startedAt: e.rows[0]?.started_at
+      ? new Date(e.rows[0].started_at).toLocaleString("zh-CN", { hour12: false }) : "-",
+  };
+}
+
 // 真实 ECI OpenAPI（CreateContainerGroup）封装见 deploy/README；联调阶段用真实实现
 async function createEciGroup() {
   throw new Error("ECI dispatch not implemented until integration (see deploy/README)");
@@ -194,6 +214,11 @@ async function buildApp() {
     httpClient: axios,
     getToken: async (corp) => dingtalkTokenCache(corp),
   });
+  // 凭证保存时的钉钉校验 + 自动注册审批回调（routeKey 后端生成，无需用户创建）
+  const dingtalkEnroll = createDingtalkEnroll({
+    httpClient: axios,
+    getToken: async (corp) => dingtalkTokenCache(corp),
+  });
   // 回调 base：显式 CONTROL_BASE 优先，否则用触发请求的 Host 推导
   const resolveControlBase = (ctx) =>
     config.controlPlaneBase ||
@@ -213,7 +238,7 @@ async function buildApp() {
     shell: makeShellStep({ eciProvider, genToken: randomUUID, controlPlaneBase: resolveControlBase }),
     approval: makeApprovalStep({
       dingtalkCorpProvider, getCredentialKind, getCredentialSecrets,
-      genToken: randomUUID, controlPlaneBase: resolveControlBase,
+      genToken: randomUUID, controlPlaneBase: resolveControlBase, loadExecMeta,
     }),
   };
   const advancer = createAdvancer({
@@ -266,7 +291,7 @@ async function buildApp() {
     advance: advancer.advanceOnce,
     record: writeNodeRecord,
   });
-  return { orchestrator, snapshotStore, mutex, getCredentialSecrets, dingtalkTokenCache };
+  return { orchestrator, snapshotStore, mutex, getCredentialSecrets, dingtalkTokenCache, enroll: dingtalkEnroll };
 }
 
 // ---------- 分发辅助 ----------
@@ -282,6 +307,12 @@ function qs(path, key) {
 function parseHost(event) {
   const h = event?.headers ?? {};
   return h["x-forwarded-host"] || h["X-Forwarded-Host"] || h.host || h.Host || null;
+}
+// 回拨基地址：显式 CONTROL_BASE 优先，否则由请求 Host 推导（保存钉钉凭证时注册回调用）
+function resolveCallbackBase(event) {
+  if (config.controlPlaneBase) return config.controlPlaneBase;
+  const host = parseHost(event);
+  return host ? `http://${host}` : "";
 }
 async function ok(promise) {
   return { status: 200, body: await promise };
@@ -305,9 +336,11 @@ const DISPATCH = {
   "api.deletePipeline": async ({ path }) => ok(api.deletePipeline(Number(m(path, RE.pipelineOne)))),
   "api.getPipeline": async ({ path }) => ok(api.getPipeline(Number(m(path, RE.pipelineOne)))),
   "api.listCredentials": async () => ok(api.listCredentials()),
-  "api.createCredential": async ({ body }) => ok(api.createCredential(body)),
+  "api.createCredential": async ({ app, body, event }) =>
+    ok(api.createCredential(body, { enroll: app.enroll, base: resolveCallbackBase(event) })),
   "api.deleteCredential": async ({ path }) => ok(api.deleteCredential(Number(m(path, RE.credentialOne)))),
-  "api.updateCredential": async ({ path, body }) => ok(api.updateCredential(Number(m(path, RE.credentialOne)), body)),
+  "api.updateCredential": async ({ app, path, body, event }) =>
+    ok(api.updateCredential(Number(m(path, RE.credentialOne)), body, { enroll: app.enroll, base: resolveCallbackBase(event) })),
   "api.getCredential": async ({ path }) => ok(api.getCredential(Number(m(path, RE.credentialOne)))),
   "api.updateImage": async ({ path, body }) => ok(api.updateImage(Number(m(path, RE.imageOne)), body)),
   "api.deleteImage": async ({ path }) => ok(api.deleteImage(Number(m(path, RE.imageOne)))),
