@@ -5,9 +5,10 @@ import { useRoute, useRouter } from "vue-router";
 import draggable from "vuedraggable";
 import MarkdownIt from "markdown-it";
 import { notify } from "../lib/notify.js";
-import { fetchPipelines, getPipeline, createPipeline, updatePipeline, runPipeline } from "../api/pipeline.js";
+import { fetchPipelines, getPipeline, createPipeline, updatePipeline, getPipelineHook } from "../api/pipeline.js";
 import { fetchImages } from "../api/image.js";
 import { fetchCredentials, listDepartments, listDepartmentUsers } from "../api/credential.js";
+import RunPipelineModal from "../components/RunPipelineModal.vue";
 
 const route = useRoute();
 const router = useRouter();
@@ -31,7 +32,10 @@ async function loadCreds() {
   finally { credsLoading.value = false; }
 }
 
-const newPipeline = () => ({ id: null, name: "", description: "", spec_json: { nodes: [], edges: [] } });
+const newPipeline = () => ({
+  id: null, name: "", description: "",
+  spec_json: { nodes: [], edges: [], trigger: { manual: { params: [] }, webhook: { mappings: [] } } },
+});
 const current = ref(newPipeline());
 const nodes = computed({ get: () => current.value.spec_json.nodes, set: (v) => (current.value.spec_json.nodes = v) });
 
@@ -101,23 +105,23 @@ function onDocClick() { if (robotOpenId.value) robotOpenId.value = ""; }
 onMounted(() => document.addEventListener("click", onDocClick));
 
 // 审批卡片正文定制：内置占位符按流水线/执行运行时填充，前端默认给出带占位符的完整模板，避免空正文
-const APPROVAL_PLACEHOLDERS = "{{pipeline}} 流水线名 · {{runNo}} 执行编号 · {{trigger}} 触发方式 · {{startedAt}} 发起时间 · {{node}} 节点 · {{pipelineId}} / {{execId}}";
+const APPROVAL_PLACEHOLDERS = "${pipeline_name} 流水线名 · ${run_no} 执行编号 · ${trigger} 触发方式 · ${started_at} 发起时间 · ${node} 节点 · ${pipeline_id} / ${exec_id}";
 const DEFAULT_APPROVAL_BODY =
   `### 人工审批请求\n\n` +
   `| 项 | 内容 |\n|---|---|\n` +
-  `| 流水线 | {{pipeline}} |\n` +
-  `| 执行编号 | #{{runNo}} |\n` +
-  `| 触发方式 | {{trigger}} |\n` +
-  `| 发起时间 | {{startedAt}} |\n\n` +
+  `| 流水线 | ${pipeline_name} |\n` +
+  `| 执行编号 | #${run_no} |\n` +
+  `| 触发方式 | ${trigger} |\n` +
+  `| 发起时间 | ${started_at} |\n\n` +
   `请审核该审批请求，确认无误后点击下方按钮通过。`;
 function resetApprovalMsg(n) { n.params.message = DEFAULT_APPROVAL_BODY; }
 const approvalPreview = (n) => {
   const vars = {
-    pipeline: "release-构建-发布", runNo: "12", trigger: "手动触发",
-    startedAt: "2026-08-29 10:00:00", execId: "34", pipelineId: "5", node: n.id,
+    pipeline_name: "release-构建-发布", run_no: "12", trigger: "手动触发",
+    started_at: "2026-08-29 10:00:00", exec_id: "34", pipeline_id: "5", node: n.id,
   };
   const body = n.params.message || DEFAULT_APPROVAL_BODY;
-  return String(body).replace(/\{\{\s*([a-zA-Z][\w]*)\s*\}\}/g, (m, k) => (k in vars ? vars[k] : m));
+  return String(body).replace(/\$\{([A-Za-z][\w]*)\}/g, (m, k) => (k in vars ? vars[k] : m));
 };
 // 卡片正文以占位符填充后的样例 Markdown 渲染预览，与输入框切换显示
 const md = new MarkdownIt({ html: false, linkify: true, breaks: true });
@@ -232,17 +236,85 @@ const save = async () => {
   finally { saving.value = false; }
 };
 
-const run = async () => {
+const runModal = ref(null);
+const run = () => {
   if (!current.value.id) { notify({ type: "error", message: "请先保存流水线再运行" }); return; }
-  running.value = true;
-  try {
-    await runPipeline(current.value.id);
-    notify({ type: "success", message: "已触发运行，可去执行页查看进度" });
-  } catch { /* 全局拦截器提示 */ }
-  finally { running.value = false; }
+  runModal.value.open(current.value);
 };
 
 const back = () => router.push("/pipelines");
+
+// ---------- T13 触发源配置 ----------
+// 收敛为两类：manual（运行时按表单填值注入）与 webhook（按 JSONPath 从请求体抽变量）。
+// 编辑流水线 spec_json.trigger；老数据未存 trigger 时按需补齐默认结构。
+const triggerCfg = computed(() => {
+  const t = current.value.spec_json.trigger ?? (current.value.spec_json.trigger = {});
+  t.manual ??= { params: [] };
+  t.webhook ??= { mappings: [] };
+  return t;
+});
+const manualParams = computed({
+  get: () => triggerCfg.value.manual.params,
+  set: (v) => (triggerCfg.value.manual.params = v),
+});
+const webhookMappings = computed({
+  get: () => triggerCfg.value.webhook.mappings,
+  set: (v) => (triggerCfg.value.webhook.mappings = v),
+});
+const triggerTab = ref("manual");
+const TYPES = ["string", "text", "number", "boolean", "enum"];
+
+function addManualParam() {
+  manualParams.value.push({ key: "", title: "", type: "string", default: "", required: false, description: "", options: [] });
+}
+function removeManualParam(i) { manualParams.value.splice(i, 1); }
+// enum 选项以逗号分隔的字符串在编辑器里编辑，实时拆分为数组落库
+const optionsText = (p) => (p.options ?? []).join(", ");
+function setOptions(p, ev) {
+  p.options = String(ev.target.value).split(/[,，]/).map((s) => s.trim()).filter(Boolean);
+}
+
+// webhook 触发 URL；密钥经 getPipelineHook 显式获取后拼入 query
+const hookSecret = ref("");
+const hookLoading = ref(false);
+const webhookUrl = computed(() => {
+  const base = `${location.origin}/hook/git/${encodeURIComponent(current.value?.name ?? "")}`;
+  return hookSecret.value ? `${base}?secret=${encodeURIComponent(hookSecret.value)}` : base;
+});
+async function loadHook() {
+  if (!current.value.id) { notify({ type: "error", message: "请先保存流水线再获取密钥" }); return; }
+  hookLoading.value = true;
+  try {
+    const r = await getPipelineHook(current.value.id);
+    hookSecret.value = r?.gitHookSecret ?? "";
+    if (hookSecret.value) notify({ type: "success", message: "已获取 Webhook 密钥，URL 已更新" });
+  } catch { /* 全局拦截器提示 */ }
+  finally { hookLoading.value = false; }
+}
+async function copyHook() {
+  try { await navigator.clipboard.writeText(webhookUrl.value); notify({ type: "success", message: "已复制 Webhook URL" }); }
+  catch { notify({ type: "error", message: "复制失败，请手动复制" }); }
+}
+const WEBHOOK_TEMPLATES = {
+  github: [
+    { name: "git_ref", jsonPath: "$.ref" },
+    { name: "repo_name", jsonPath: "$.repository.name" },
+    { name: "pusher", jsonPath: "$.pusher.name" },
+    { name: "commit_message", jsonPath: "$.head_commit.message" },
+  ],
+  gitlab: [
+    { name: "git_ref", jsonPath: "$.ref" },
+    { name: "project", jsonPath: "$.project.path_with_namespace" },
+    { name: "user_name", jsonPath: "$.user_name" },
+    { name: "commit_message", jsonPath: "$.commits[0].message" },
+  ],
+};
+function applyTemplate(kind) {
+  const tpl = WEBHOOK_TEMPLATES[kind] ?? [];
+  webhookMappings.value = tpl.map((x) => ({ name: x.name, jsonPath: x.jsonPath }));
+  notify({ type: "success", message: kind === "github" ? "已填入 GitHub 模板映射" : "已填入 GitLab 模板映射" });
+}
+function addMapping() { webhookMappings.value.push({ name: "", jsonPath: "" }); }
 </script>
 
 <template>
@@ -293,6 +365,119 @@ const back = () => router.push("/pipelines");
         <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6z"/><path d="M8.5 12l2.5 2.5 4.5-4.5"/></svg>
         人工审批
       </button>
+    </section>
+
+    <!-- 触发源配置 -->
+    <section class="trigger-card card rise" style="animation-delay:.09s">
+      <div class="trig-head">
+        <span class="mono-tag">触发源</span>
+        <div class="seg-tabs">
+          <button type="button" class="seg-tab" :class="{ active: triggerTab === 'manual' }" @click="triggerTab = 'manual'">Manual 参数</button>
+          <button type="button" class="seg-tab" :class="{ active: triggerTab === 'webhook' }" @click="triggerTab = 'webhook'">Webhook</button>
+        </div>
+      </div>
+
+      <!-- manual schema 编辑器 -->
+      <template v-if="triggerTab === 'manual'">
+        <p class="field-hint trig-desc">运行弹窗将按此 schema 渲染表单；填写的值作为执行期变量注入，可用 <code class="mono ph-code">${key}</code> 引用。</p>
+        <div v-if="!manualParams.length" class="trig-empty">
+          <span class="muted">尚未配置 manual 参数，手动运行时将直接触发。</span>
+          <button type="button" class="btn btn-sm btn-ghost" @click="addManualParam">＋ 添加参数</button>
+        </div>
+        <div v-else class="param-list">
+          <div class="param-row param-head">
+            <span class="param-cell key">key</span>
+            <span class="param-cell title">标题</span>
+            <span class="param-cell type">类型</span>
+            <span class="param-cell default">默认值</span>
+            <span class="param-cell options">选项</span>
+            <span class="param-cell req">必填</span>
+            <span class="param-cell desc">说明</span>
+            <span class="param-cell del"> </span>
+          </div>
+          <div v-for="(p, i) in manualParams" :key="p.key + i" class="param-row">
+            <div class="param-cell key">
+              <input class="input mono" v-model="p.key" placeholder="branch" />
+            </div>
+            <div class="param-cell title">
+              <input class="input" v-model="p.title" placeholder="分支" />
+            </div>
+            <div class="param-cell type">
+              <select class="select" v-model="p.type">
+                <option v-for="t in TYPES" :key="t" :value="t">{{ t }}</option>
+              </select>
+            </div>
+            <div class="param-cell default">
+              <select v-if="p.type === 'boolean'" class="select" v-model="p.default">
+                <option value="">默认</option>
+                <option value="true">true</option>
+                <option value="false">false</option>
+              </select>
+              <input v-else class="input" v-model="p.default" placeholder="main" />
+            </div>
+            <div class="param-cell options">
+              <input v-if="p.type === 'enum'" class="input mono" :value="optionsText(p)" @input="setOptions(p, $event)" placeholder="a, b, c（逗号分隔）" />
+              <span v-else class="muted">—</span>
+            </div>
+            <div class="param-cell req">
+              <input class="row-check" type="checkbox" v-model="p.required" title="必填" />
+            </div>
+            <div class="param-cell desc">
+              <input class="input" v-model="p.description" placeholder="要发布的 Git 分支" />
+            </div>
+            <div class="param-cell del">
+              <button type="button" class="btn btn-sm btn-danger" title="删除该参数" @click="removeManualParam(i)">×</button>
+            </div>
+          </div>
+          <div class="trig-acts">
+            <button type="button" class="btn btn-sm btn-ghost" @click="addManualParam">＋ 添加参数</button>
+          </div>
+        </div>
+      </template>
+
+      <!-- webhook 映射编辑器 -->
+      <template v-else>
+        <div class="field">
+          <label class="field-label">Webhook URL</label>
+          <div class="group-row">
+            <input class="input mono" :value="webhookUrl" readonly />
+            <button type="button" class="btn btn-sm btn-ghost" @click="copyHook">复制</button>
+            <button type="button" class="btn btn-sm" @click="loadHook" :disabled="hookLoading || !current.id">{{ hookLoading ? "获取中…" : "获取密钥" }}</button>
+          </div>
+          <p class="field-hint">在 GitHub / GitLab 仓库配置该 Webhook，POST 到此地址即触发运行；访问密钥在 URL 末尾 <code class="mono ph-code">?secret=</code> 中。</p>
+        </div>
+
+        <div class="wh-templates">
+          <button type="button" class="btn btn-sm" @click="applyTemplate('github')">GitHub 模板</button>
+          <button type="button" class="btn btn-sm" @click="applyTemplate('gitlab')">GitLab 模板</button>
+        </div>
+
+        <div v-if="!webhookMappings.length" class="trig-empty">
+          <span class="muted">尚未配置 JSONPath 映射，Webhook 触发不会注入变量。</span>
+          <button type="button" class="btn btn-sm btn-ghost" @click="addMapping">＋ 添加映射</button>
+        </div>
+        <div v-else class="param-list">
+          <div class="param-row param-head">
+            <span class="param-cell key">name</span>
+            <span class="param-cell json">JSONPath</span>
+            <span class="param-cell del"> </span>
+          </div>
+          <div v-for="(m, i) in webhookMappings" :key="i" class="param-row">
+            <div class="param-cell key">
+              <input class="input mono" v-model="m.name" placeholder="git_ref" />
+            </div>
+            <div class="param-cell json">
+              <input class="input mono" v-model="m.jsonPath" placeholder="$.ref" />
+            </div>
+            <div class="param-cell del">
+              <button type="button" class="btn btn-sm btn-danger" title="删除该映射" @click="webhookMappings.splice(i, 1)">×</button>
+            </div>
+          </div>
+          <div class="trig-acts">
+            <button type="button" class="btn btn-sm btn-ghost" @click="addMapping">＋ 添加映射</button>
+          </div>
+        </div>
+      </template>
     </section>
 
     <!-- 画布 -->
@@ -423,7 +608,7 @@ const back = () => router.push("/pipelines");
                           placeholder="编写审批卡片正文（支持 Markdown），或在下方点击占位符标签插入。"
                         ></textarea>
                         <div class="ph-chips">
-                          <code v-for="ph in ['{{pipeline}}','{{runNo}}','{{trigger}}','{{startedAt}}','{{node}}','{{pipelineId}}','{{execId}}']" :key="ph" class="ph-chip">{{ ph }}</code>
+                          <code v-for="ph in ['${pipeline_name}','${run_no}','${trigger}','${started_at}','${node}','${pipeline_id}','${exec_id}']" :key="ph" class="ph-chip">{{ ph }}</code>
                         </div>
                         <p class="field-hint">占位符说明：{{ APPROVAL_PLACEHOLDERS }}。默认已内置模板，点击「恢复默认」可还原。</p>
                       </template>
@@ -491,6 +676,9 @@ const back = () => router.push("/pipelines");
           </div>
         </div>
       </div>
+
+    <!-- 运行弹窗（manual 表单） -->
+    <RunPipelineModal ref="runModal" />
   </div>
 </template>
 
@@ -687,6 +875,50 @@ const back = () => router.push("/pipelines");
 .org-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-top: 1px solid var(--line); }
 .org-foot > div { display: flex; gap: 8px; }
 .org-sel { font-size: 12.5px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 触发源配置区 */
+.trigger-card { padding: 16px 20px; }
+.trig-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+.seg-tabs { display: flex; gap: 6px; background: var(--bg-1); border: 1px solid var(--line); border-radius: 9px; padding: 3px; }
+.seg-tab {
+  font-family: var(--font-display); font-size: 12px; font-weight: 600;
+  color: var(--text-2); background: transparent; border: 0; border-radius: 6px;
+  padding: 6px 14px; cursor: pointer; transition: all .16s var(--ease);
+}
+.seg-tab:hover { color: var(--text-1); }
+.seg-tab.active { color: var(--accent); background: var(--accent-soft); }
+.trig-desc { margin: -4px 0 12px; }
+.ph-code { font-size: 11px; color: var(--accent); background: var(--accent-soft); padding: 1px 5px; border-radius: 5px; }
+.trig-empty {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  padding: 14px 16px; border: 1px dashed var(--line-strong); border-radius: 9px; font-size: 12.5px;
+}
+.param-list { display: flex; flex-direction: column; gap: 8px; }
+.param-row { display: grid; gap: 10px; align-items: center; }
+.param-row.param-head {
+  display: flex; gap: 10px;
+  font-family: var(--font-mono); font-size: 10.5px; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--text-3); padding: 0 2px;
+}
+.param-cell.key { grid-column: 1; }
+.param-cell.title { grid-column: 2; }
+.param-cell.type { grid-column: 3; }
+.param-cell.default { grid-column: 4; }
+.param-cell.options { grid-column: 5; }
+.param-cell.req { grid-column: 6; text-align: center; display: flex; justify-content: center; }
+.param-cell.desc { grid-column: 7; }
+.param-cell.json { grid-column: 2 / 7; }
+.param-cell.del { grid-column: 8; }
+.param-row:not(.param-head) { grid-template-columns: .9fr 1fr 1fr 1fr 1.3fr 44px 1.6fr 30px; }
+.param-row:not(.param-head) .param-cell { min-width: 0; }
+.trig-acts { display: flex; justify-content: flex-end; margin-top: 4px; }
+.wh-templates { display: flex; gap: 8px; margin-bottom: 12px; }
+@media (max-width: 1080px) {
+  .param-row:not(.param-head) { grid-template-columns: 1fr 1fr; }
+  .param-cell.json { grid-column: 1 / 3; }
+  .param-row:not(.param-head) .param-cell { width: 100%; }
+  .param-row.param-head { display: none; }
+}
 
 .node-ghost { opacity: .35; }
 </style>
