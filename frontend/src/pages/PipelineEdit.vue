@@ -145,20 +145,19 @@ function onDocClick() { if (robotOpenId.value) robotOpenId.value = ""; }
 onMounted(() => document.addEventListener("click", onDocClick));
 
 // 审批卡片正文定制：内置占位符按流水线/执行运行时填充，前端默认给出带占位符的完整模板，避免空正文
-const APPROVAL_PLACEHOLDERS = "${pipeline_name} 流水线名 · ${run_no} 执行编号 · ${trigger} 触发方式 · ${started_at} 发起时间 · ${node} 节点 · ${pipeline_id} / ${exec_id}";
+const APPROVAL_PLACEHOLDERS = "${pipeline_name} 流水线名 · ${run_no} 执行编号 · ${started_at} 发起时间 · ${pipeline_id} / ${exec_id}";
 const DEFAULT_APPROVAL_BODY =
   `### 人工审批请求\n\n` +
   `| 项 | 内容 |\n|---|---|\n` +
   `| 流水线 | ${pipeline_name} |\n` +
   `| 执行编号 | #${run_no} |\n` +
-  `| 触发方式 | ${trigger} |\n` +
   `| 发起时间 | ${started_at} |\n\n` +
   `请审核该审批请求，确认无误后点击下方按钮通过。`;
 function resetApprovalMsg(n) { n.params.message = DEFAULT_APPROVAL_BODY; }
 const approvalPreview = (n) => {
   const vars = {
-    pipeline_name: "release-构建-发布", run_no: "12", trigger: "手动触发",
-    started_at: "2026-08-29 10:00:00", exec_id: "34", pipeline_id: "5", node: n.id,
+    pipeline_name: "release-构建-发布", run_no: "12",
+    started_at: "2026-08-29 10:00:00", exec_id: "34", pipeline_id: "5",
   };
   const body = n.params.message || DEFAULT_APPROVAL_BODY;
   return String(body).replace(/\$\{([A-Za-z][\w]*)\}/g, (m, k) => (k in vars ? vars[k] : m));
@@ -658,7 +657,7 @@ function addMapping() { webhookMappings.value.push({ name: "", jsonPath: "" }); 
                           @focus="onFieldFocus($event, n)"
                         ></textarea>
                         <div class="ph-chips">
-                          <code v-for="ph in ['${pipeline_name}','${run_no}','${trigger}','${started_at}','${node}','${pipeline_id}','${exec_id}']" :key="ph" class="ph-chip">{{ ph }}</code>
+                          <code v-for="ph in ['${pipeline_name}','${run_no}','${started_at}','${pipeline_id}','${exec_id}']" :key="ph" class="ph-chip">{{ ph }}</code>
                         </div>
                         <div class="var-hint">
                           <span class="var-hint-label">可用变量</span>

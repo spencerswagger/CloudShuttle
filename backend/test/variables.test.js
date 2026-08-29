@@ -16,6 +16,25 @@ test("checkVars 引用未定义变量返回错误消息", () => {
   assert.match(err, /nope/);
 });
 
+// 含审批节点的 spec，其 message 仅引用内置全局变量（pipeline_name/run_no/started_at）时不应误报
+test("checkVars 审批节点 message 引用内置变量返回 null", () => {
+  const spec = {
+    trigger: { manual: { params: [] }, webhook: { mappings: [] } },
+    nodes: [
+      {
+        id: "n1",
+        type: "approval",
+        params: {
+          message:
+            "### 人工审批请求\n\n| 流水线 | ${pipeline_name} |\n| 执行编号 | #${run_no} |\n| 发起时间 | ${started_at} |",
+        },
+      },
+    ],
+    edges: [],
+  };
+  assert.equal(checkVars(spec, { ancestors }), null);
+});
+
 // 引用合法前驱节点声明的 outputs key：checkVars 返回 null
 test("checkVars 引用合法前驱输出返回 null", () => {
   const spec = {
