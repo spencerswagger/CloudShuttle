@@ -14,19 +14,33 @@ const DING_BASE = "https://api.dingtalk.com";
 // exec_id/node_id 一律以库内登记为准，防篡改。
 export async function dingtalkCardCb(orchestrator, { token, secret, decision, body, lookup, updateCard }) {
   const token_ = token || extractTokenFromOutTrack(body?.outTrackId);
+  console.log(
+    `[dingtalk-card] cb tokenFromPath=${token ?? "-"} tokenUsed=${token_ ?? "-"} ` +
+    `secret=${secret ? "present" : "none"} decision=${decision ?? "-"} ` +
+    `outTrackId=${body?.outTrackId ?? "-"} body=${JSON.stringify(body ?? {}).slice(0, 600)}`
+  );
   const row = await lookup({ token: token_, kind: "dingtalk" });
-  if (!row) return { status: 403, body: { ok: false, code: "FORBIDDEN", message: "审批回调凭证无效" } };
+  if (!row) {
+    console.warn(`[dingtalk-card] LOOKUP-FAIL token=${token_ ?? "-"} kind=dingtalk`);
+    return { status: 403, body: { ok: false, code: "FORBIDDEN", message: "审批回调凭证无效" } };
+  }
   // 旧版 path+query 携带 secret 时校验；新版 routeKey 回传体无 secret，以随机 outTrackId 中的 token 为凭据
   if (secret && !safeEqual(row.secret, secret)) {
+    console.warn(`[dingtalk-card] SECRET-MISMATCH token=${token_} (expected secret present but differs)`);
     return { status: 403, body: { ok: false, code: "FORBIDDEN", message: "审批回调凭证无效" } };
   }
   const decision_ = extractDecision(body, decision);
+  console.log(
+    `[dingtalk-card] OK exec=${row.exec_id} node=${row.node_id} ` +
+    `decision=${decision_ ?? "(none)"} -> ${decision_ === "reject" ? "REJECT" : "APPROVE"}`
+  );
   const agreed = decision_ === "reject" ? false : true;
   const out = await orchestrator.onApproval({
     execId: Number(row.exec_id),
     nodeId: row.node_id,
     decision: agreed ? "approve" : "reject",
   });
+  console.log(`[dingtalk-card] advance done exec=${row.exec_id} node=${row.node_id} out=${JSON.stringify(out ?? {})}`);
   // 审批已推进，异步把卡片状态更新为已同意/已拒绝（失败不影响审批结果）
   if (typeof updateCard === "function") {
     updateCard({ credential: row.credential, token: token_, status: agreed ? "agree" : "reject" }).catch((e) => {

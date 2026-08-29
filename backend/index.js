@@ -332,7 +332,11 @@ const DISPATCH = {
     })),
   "hook.dingtalkCardCb": async ({ app, path, body }) =>
     hook.dingtalkCardCb(app.orchestrator, {
-      token: m(path, RE.dingtalkCard) || m(path, RE.dingtalk),
+      // 固定路由 /hook/dingtalk/card 不含 token：不能回退到 RE.dingtalk，
+      // 否则会把 "card" 误当 token，导致永远 403；token 必须取自 body.outTrackId。
+      token:
+        m(path, RE.dingtalkCard) ||
+        (RE.dingtalkCardFixed.test(path) ? null : m(path, RE.dingtalk)),
       secret: qs(path, "secret"),
       decision: qs(path, "decision"),
       body,
