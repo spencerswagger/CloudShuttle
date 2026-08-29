@@ -19,6 +19,7 @@ function fakeDeps(over = {}) {
     snapshotStore: {
       save: async (id, s) => calls.push(["save", id, s]),
       load: async () => calls.push(["load"]) && ({ done: [], waiting: null }),
+      clear: async (id) => calls.push(["clear", id]),
     },
     advance: over.advance,
     record: over.record ?? (async () => {}),
