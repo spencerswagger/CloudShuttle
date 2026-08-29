@@ -38,7 +38,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build backend image
-        run: docker build -f backend/Dockerfile -t cloudshuttle-backend:${GITHUB_REF_NAME} .
+        run: docker build -f backend/Dockerfile --build-arg GIT_COMMIT=${GITHUB_SHA::8} -t cloudshuttle-backend:${GITHUB_REF_NAME} .
 
       - name: Login & push image to registry (tags only)
         if: github.ref_type == 'tag' && env.REGISTRY != '' && env.IMAGE != ''

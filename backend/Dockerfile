@@ -4,6 +4,9 @@
 #     探活 9000 超时被回收），migrate/seed 改由部署时/CI 手动执行一次
 #   - FC 函数代码模式：用 backend/index.js 的 handler，不打包镜像
 # 端口：健康检查用 /healthz；应用入口由后端 routeToHandler 按 path 分发
+# 构建指纹：docker build --build-arg GIT_COMMIT=$(git rev-parse --short HEAD)
+ARG GIT_COMMIT=unknown
+
 FROM node:20-alpine
 RUN apk add --no-cache postgresql-client
 
@@ -12,6 +15,7 @@ COPY backend/package.json backend/package-lock.json ./
 RUN npm ci --omit=dev
 
 COPY backend/ ./
+RUN printf "%s" "$GIT_COMMIT" > /app/VERSION
 COPY deploy/seed.sql ./deploy/seed.sql
 COPY backend/docker-entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh

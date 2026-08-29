@@ -3,8 +3,12 @@
 // 把 req 组装成 FC 事件对象 { path, httpMethod, body } 后调用 index.js 的 handler。
 import { createServer } from "node:http";
 import { handler } from "./index.js";
+import { getBuild } from "./version.js";
 
 const PORT = Number(process.env.PORT ?? 9000);
+const BUILD = getBuild();
+
+console.log(`cloudshuttle-backend build=${BUILD} starting on :${PORT}`);
 
 const server = createServer(async (req, res) => {
   // 健康检查探针（SAE liveness/readiness 用）
