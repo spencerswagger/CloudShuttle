@@ -40,3 +40,87 @@ test("空入边起点在无等待节点的图上同步完成", async () => {
   assert.ok(out.snap.done.has("a"));
   assert.equal(out.waiting, null);
 });
+
+// ---------- environment 维度 ----------
+
+test("预填 environment 时 shell 节点 command 预渲染 ${x}", async () => {
+  const env = new Map();
+  env.set("x", "1");
+  let stepNode = null;
+  const adv = createAdvancer({
+    stepRun: (node) => { stepNode = node; return { kind: "dispatch", ref: "j1" }; },
+    snapshot: async () => {}, record: async () => {},
+  });
+  const specX = {
+    nodes: [{ id: "s1", step: "shell", type: "shell", params: { image: "alpine", command: "echo ${x}" } }],
+    edges: [],
+  };
+  await adv.advanceOnce({ spec: specX, snap: { done: new Set(), waiting: null }, environment: env });
+  // stepRun 收到的是渲染后的节点副本：command 已替换为 1，且保留原 id/type
+  assert.equal(stepNode.params.command, "echo 1");
+  assert.equal(stepNode.id, "s1");
+  assert.equal(stepNode.type, "shell");
+  // 原始 spec 不被污染
+  assert.equal(specX.nodes[0].params.command, "echo ${x}");
+});
+
+test("节点 done 的 output 写入快照 environment", async () => {
+  let snapArg = null;
+  const adv = createAdvancer({
+    stepRun: () => ({ kind: "done", output: { out1: "v" } }),
+    snapshot: async (_execId, s) => { snapArg = s; },
+    record: async () => {},
+  });
+  const specO = { nodes: [{ id: "o1", step: "x", type: "shell", params: {} }], edges: [] };
+  await adv.advanceOnce({ spec: specO, snap: { done: new Set(), waiting: null } });
+  // 同步 done → 进入 completed 分支，仍携带 environment
+  assert.equal(snapArg.status, "completed");
+  assert.equal(snapArg.environment.out1, "v");
+});
+
+test("从 snap.environment 恢复供节点渲染 ${prev}", async () => {
+  let stepNode = null;
+  const adv = createAdvancer({
+    stepRun: (node) => { stepNode = node; return { kind: "dispatch", ref: "j1" }; },
+    snapshot: async () => {}, record: async () => {},
+  });
+  const specP = { nodes: [{ id: "p1", step: "shell", type: "shell", params: { command: "echo ${prev}" } }], edges: [] };
+  await adv.advanceOnce({
+    spec: specP,
+    snap: { done: new Set(), waiting: null, environment: { prev: "2" } },
+  });
+  assert.equal(stepNode.params.command, "echo 2");
+});
+
+test("外部 environment 与 snap.environment 同名冲突时外部优先", async () => {
+  const env = new Map();
+  env.set("k", "EXT");
+  let stepNode = null;
+  const adv = createAdvancer({
+    stepRun: (node) => { stepNode = node; return { kind: "dispatch", ref: "j1" }; },
+    snapshot: async () => {}, record: async () => {},
+  });
+  const specK = { nodes: [{ id: "k1", step: "shell", type: "shell", params: { command: "echo ${k}" } }], edges: [] };
+  await adv.advanceOnce({
+    spec: specK,
+    snap: { done: new Set(), waiting: null, environment: { k: "SNAP" } },
+    environment: env,
+  });
+  assert.equal(stepNode.params.command, "echo EXT"); // 外部传入覆盖快照中的同名
+});
+
+test("env 数组每个元素的 v 字段被预渲染", async () => {
+  const env = new Map();
+  env.set("p", "3");
+  let stepNode = null;
+  const adv = createAdvancer({
+    stepRun: (node) => { stepNode = node; return { kind: "dispatch", ref: "j1" }; },
+    snapshot: async () => {}, record: async () => {},
+  });
+  const specE = {
+    nodes: [{ id: "e1", step: "shell", type: "shell", params: { command: "x", env: [{ k: "A", v: "val-${p}" }] } }],
+    edges: [],
+  };
+  await adv.advanceOnce({ spec: specE, snap: { done: new Set(), waiting: null }, environment: env });
+  assert.equal(stepNode.params.env[0].v, "val-3");
+});
