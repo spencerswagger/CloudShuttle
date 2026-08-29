@@ -4,7 +4,7 @@ import { ref, computed, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { notify } from "../lib/notify.js";
 import ConfirmDialog from "../components/ConfirmDialog.vue";
-import { fetchCredentials, getCredential, createCredential, updateCredential, deleteCredential } from "../api/credential.js";
+import { getCredential, createCredential, updateCredential, deleteCredential } from "../api/credential.js";
 import { CRED_KINDS, credKind, credKindLabel } from "../lib/kinds.js";
 
 const route = useRoute();
@@ -23,18 +23,15 @@ const kindMeta = computed(() => credKind(form.value.kind));
 const kindFields = computed(() => kindMeta.value?.fields ?? []);
 const isDingtalk = computed(() => form.value.kind === "dingtalk-corp");
 
-// 详情接口优先；后端尚未发布详情接口(404)时回退列表查找，保证返显可用
+// 详情接口加载返显；失败（含 404/已被删除）统一提示
 async function loadForm() {
   const id = +route.params.id;
-  let c = null;
-  try { c = await getCredential(id); }
-  catch (e) {
-    if (e?.status !== 404) { notify({ type: "error", message: e?.message || "加载凭证失败" }); return; }
-    c = null;
+  try {
+    const c = await getCredential(id);
+    form.value = { name: c.name, kind: c.kind, secret: {} };
+  } catch (e) {
+    notify({ type: "error", message: e?.status === 404 ? "未找到该凭证，可能已被删除" : (e?.message || "加载凭证失败") });
   }
-  if (!c) c = (await fetchCredentials().catch(() => []))?.find((x) => Number(x.id) === id);
-  if (c) form.value = { name: c.name, kind: c.kind, secret: {} };
-  else notify({ type: "error", message: "未找到该凭证，可能已被删除" });
 }
 
 onMounted(async () => {

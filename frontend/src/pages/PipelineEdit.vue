@@ -5,7 +5,7 @@ import { useRoute, useRouter } from "vue-router";
 import draggable from "vuedraggable";
 import MarkdownIt from "markdown-it";
 import { notify } from "../lib/notify.js";
-import { fetchPipelines, getPipeline, createPipeline, updatePipeline, getPipelineHook, fetchScope } from "../api/pipeline.js";
+import { getPipeline, createPipeline, updatePipeline, getPipelineHook, fetchScope } from "../api/pipeline.js";
 import { fetchImages } from "../api/image.js";
 import { fetchCredentials, listDepartments, listDepartmentUsers } from "../api/credential.js";
 import RunPipelineModal from "../components/RunPipelineModal.vue";
@@ -46,28 +46,20 @@ const pageTitle = computed(() => (isNew.value ? "新建流水线" : `编辑流�
 async function hydrate() {
   scopes.clear();
   if (!editingId.value) { current.value = newPipeline(); return; }
-  /* 详情接口优先；后端尚未发布详情接口(404)时回退列表查找，保证返显可用 */
   try {
-    let p = null;
-    try { p = await getPipeline(editingId.value); }
-    catch (e) {
-      if (e?.status !== 404) { notify({ type: "error", message: e?.message || "加载流水线失败" }); return; }
-      p = null;
-    }
-    if (!p) p = (await fetchPipelines().catch(() => []))?.find((x) => Number(x.id) === editingId.value);
-    if (p) {
-      current.value = JSON.parse(JSON.stringify(p));
-      hookSecret.value = ""; // 切换流水线时清空已缓存的 webhook 密钥，避免跨 /pipelines/:id 残留拼进 URL
-      // 下拉数据懒加载：仅当节点实际用到镜像/凭证才请求，避免挂载即连拉 3 个接口
-      const ns = current.value.spec_json?.nodes ?? [];
-      if (ns.some((n) => n.type === "shell")) loadImages();
-      if (ns.some((n) => n.type === "approval")) loadCreds();
-      // 可用变量懒加载：进入编辑页为每个节点拉取一次作用域（scopes 缓存，避免重复请求）
-      for (const n of ns) ensureScope(n);
-    } else {
-      notify({ type: "error", message: "未找到该流水线，可能已被删除" });
-    }
-  } catch { /* 全局拦截器提示 */ }
+    const p = await getPipeline(editingId.value);
+    current.value = JSON.parse(JSON.stringify(p));
+    hookSecret.value = ""; // 切换流水线时清空已缓存的 webhook 密钥，避免跨 /pipelines/:id 残留拼进 URL
+    // 下拉数据懒加载：仅当节点实际用到镜像/凭证才请求，避免挂载即连拉 3 个接口
+    const ns = current.value.spec_json?.nodes ?? [];
+    if (ns.some((n) => n.type === "shell")) loadImages();
+    if (ns.some((n) => n.type === "approval")) loadCreds();
+    // 可用变量懒加载：进入编辑页为每个节点拉取一次作用域（scopes 缓存，避免重复请求）
+    for (const n of ns) ensureScope(n);
+  } catch (e) {
+    if (e?.status === 404) notify({ type: "error", message: "未找到该流水线，可能已被删除" });
+    else notify({ type: "error", message: e?.message || "加载流水线失败" });
+  }
 }
 watch(() => route.params.id, hydrate);
 onMounted(hydrate);
