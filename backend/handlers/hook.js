@@ -130,8 +130,10 @@ export async function resolvePipelineByName(name) {
   return { pipelineId: r[0].id, gitHookSecret: r[0].git_hook_secret ?? "" };
 }
 
-// git webhook：校验该仓库独立的访问密钥（创建时生成、落库），未配置则拒绝
-export async function gitWebhook(orchestrator, { pipelineName, payload, authority, secret }) {
+// git webhook：校验该仓库独立的访问密钥（创建时生成、落库），未配置则拒绝；
+// 鉴权通过后转交 run（由控制面注入，内部完成 spec 读取、webhook 变量装配与编排执行）。
+// run 入参 { pipelineId, payload, authority }，返回 orchestrator.run 的结果（含 waiting）。
+export async function gitWebhook(run, { pipelineName, payload, authority, secret }) {
   const { pipelineId, gitHookSecret } = await resolvePipelineByName(pipelineName);
   if (!gitHookSecret) {
     return { status: 503, body: { ok: false, code: "HOOK_NOT_CONFIGURED", message: "该管道的 git hook 密钥未配置" } };
@@ -139,7 +141,7 @@ export async function gitWebhook(orchestrator, { pipelineName, payload, authorit
   if (!safeEqual(gitHookSecret, secret)) {
     return { status: 401, body: { ok: false, code: "UNAUTHORIZED", message: "git webhook 密钥错误" } };
   }
-  const out = await orchestrator.onGitWebhook({ pipelineId, trigger: payload ?? {}, authority });
+  const out = await run({ pipelineId, payload: payload ?? {}, authority });
   return { status: 200, body: { ok: true, waiting: out?.waiting ?? null } };
 }
 

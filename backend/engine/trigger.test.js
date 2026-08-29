@@ -1,7 +1,7 @@
 // backend/engine/trigger.test.js
 import test from "node:test";
 import assert from "node:assert/strict";
-import { extractWebhookVars, extractManualVars } from "./trigger.js";
+import { extractWebhookVars, extractManualVars, assembleTriggerEnv } from "./trigger.js";
 
 test("webhook JSONPath 从 body 多路径取多个变量（含嵌套）", () => {
   const body = {
@@ -118,4 +118,54 @@ test("manual 空/未命中的 key 不写（无 default）", () => {
     env,
   );
   assert.equal(env.size, 0);
+});
+
+// ---------- assembleTriggerEnv：触发源「spec.trigger 配置 → environment Map」装配 ----------
+
+test("assembleTriggerEnv：manual 表单值叠写到 initEnv 之上", () => {
+  const env = assembleTriggerEnv({
+    spec: { trigger: { manual: { params: [{ key: "name", default: "D" }] } }, nodes: [], edges: [] },
+    formValue: { name: "ship" },
+    initEnv: new Map([["pipeline_id", "1"], ["pipeline_name", "p"]]),
+  });
+  // 元信息保留，manual 有效值写入；无值/缺省不覆盖元信息
+  assert.deepEqual(Object.fromEntries(env), { pipeline_id: "1", pipeline_name: "p", name: "ship" });
+});
+
+test("assembleTriggerEnv：manual 缺失 key 用 default，多余 initEnv key 保留", () => {
+  const env = assembleTriggerEnv({
+    spec: { trigger: { manual: { params: [{ key: "a", default: "A" }, { key: "b", default: null }] } } },
+    formValue: {},
+    initEnv: new Map([["run_no", "7"]]),
+  });
+  assert.deepEqual(Object.fromEntries(env), { run_no: "7", a: "A" });
+});
+
+test("assembleTriggerEnv：webhook mappings 从 body 抽取并保留元信息", () => {
+  const env = assembleTriggerEnv({
+    spec: { trigger: { webhook: { mappings: [{ name: "branch", jsonPath: "$.ref" }] } } },
+    webhookBody: { ref: "refs/heads/main" },
+    initEnv: new Map([["exec_id", "9"]]),
+  });
+  assert.deepEqual(Object.fromEntries(env), { exec_id: "9", branch: "refs/heads/main" });
+});
+
+test("assembleTriggerEnv：manual 与 webhook 同时配置时各自抽取并存", () => {
+  const env = assembleTriggerEnv({
+    spec: {
+      trigger: {
+        manual: { params: [{ key: "env", default: "prod" }] },
+        webhook: { mappings: [{ name: "branch", jsonPath: "$.ref" }] },
+      },
+    },
+    formValue: { env: "staging" },
+    webhookBody: { ref: "main" },
+    initEnv: new Map(),
+  });
+  assert.deepEqual(Object.fromEntries(env), { env: "staging", branch: "main" });
+});
+
+test("assembleTriggerEnv：无 trigger 配置时仅返回 initEnv，且不抛错", () => {
+  const env = assembleTriggerEnv({ spec: { nodes: [] }, initEnv: new Map([["exec_id", "3"]]) });
+  assert.deepEqual(Object.fromEntries(env), { exec_id: "3" });
 });

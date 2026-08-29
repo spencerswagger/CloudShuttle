@@ -47,3 +47,22 @@ export function extractManualVars(params, formValue, env) {
     }
   }
 }
+
+/**
+ * 把触发源「spec.trigger 配置 → environment Map」的装配提为纯函数（可单测）：
+ * 以 initEnv（执行元信息 Map）为基础，再按 spec.trigger 配置把 manual formValue 与
+ * webhook body 提取的变量叠写上去。manual 与 webhook 两者的配置/取值均可选；
+ * 哪个触发器提供配置就抽取哪个，缺省/无值一律静默跳过（沿用 extract* 的不抛语义）。
+ * @param {object} args
+ * @param {object} args.spec 流水线 spec（取 spec.trigger.manual / spec.trigger.webhook）
+ * @param {Record<string,unknown>|undefined} [args.formValue] manual 表单提交值
+ * @param {unknown} [args.webhookBody] webhook 请求体（已解析对象）
+ * @param {Map<string,string>|undefined} [args.initEnv] 基础环境（执行元信息等）
+ * @returns {Map<string,string>}
+ */
+export function assembleTriggerEnv({ spec, formValue, webhookBody, initEnv }) {
+  const env = new Map(initEnv ?? []);
+  extractWebhookVars(spec?.trigger?.webhook?.mappings, webhookBody, env);
+  extractManualVars(spec?.trigger?.manual?.params, formValue, env);
+  return env;
+}

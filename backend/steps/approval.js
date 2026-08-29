@@ -22,8 +22,6 @@ export const APPROVAL_CARD_TEMPLATE =
   `| **发起时间** | \${started_at} |\n\n` +
   `---\n请审核后点击下方按钮完成审批。`;
 
-export const APPROVAL_CARD_DEFAULT_BODY = "请审批该流水线卡点";
-
 // 把扁平环境源（Map 或对象）规整为 values 用的 Map；值统一转字符串，与 variables.render 契合。
 function ensureEnvMap(env) {
   if (env instanceof Map) return env;

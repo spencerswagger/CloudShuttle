@@ -14,6 +14,7 @@ import { createAdvancer } from "./engine/state.js";
 import { makeShellStep } from "./steps/shell.js";
 import { makeApprovalStep } from "./steps/approval.js";
 import { createOrchestrator } from "./engine/orchestrator.js";
+import { assembleTriggerEnv } from "./engine/trigger.js";
 import { randomUUID } from "node:crypto";
 import axios from "axios";
 import { sm4Decrypt } from "./crypto/sm4.js";
@@ -170,23 +171,22 @@ async function writeNodeRecord({ execId, nodeId, status, output, ref }) {
   );
 }
 
-// 组装审批卡片所需的流水线/执行元信息（模板占位符填充用）
-async function loadExecMeta({ execId, pipelineId, nodeId }) {
+// 由 execId + pipelineId 构造执行元信息变量 Map（globalKeysOf 的执行元信息部分：
+// pipeline_id/pipeline_name/run_no/exec_id/started_at）。值统一转字符串，便于 variables.render。
+async function buildInitialEnvironment({ execId, pipelineId }) {
   const [p, e] = await Promise.all([
     pool.query(`SELECT name FROM pipeline WHERE id=$1`, [pipelineId]),
-    pool.query(`SELECT run_no, trigger, started_at FROM execution WHERE id=$1`, [execId]),
+    pool.query(`SELECT run_no, started_at FROM execution WHERE id=$1`, [execId]),
   ]);
-  const t = e.rows[0]?.trigger ?? {};
-  const trig = typeof t === "string" ? t
-    : t?.trigger ? `手动触发` : t?.rerunOf ? `重跑 #${t.rerunOf}` : `自动触发`;
-  return {
-    execId, pipelineId, node: nodeId,
-    pipeline: p.rows[0]?.name ?? String(pipelineId ?? ""),
-    runNo: e.rows[0]?.run_no ?? "-",
-    trigger: trig,
-    startedAt: e.rows[0]?.started_at
-      ? new Date(e.rows[0].started_at).toLocaleString("zh-CN", { hour12: false }) : "-",
-  };
+  return new Map([
+    ["pipeline_id", String(pipelineId ?? "")],
+    ["pipeline_name", p.rows[0]?.name ?? String(pipelineId ?? "")],
+    ["run_no", String(e.rows[0]?.run_no ?? "")],
+    ["exec_id", String(execId ?? "")],
+    ["started_at", e.rows[0]?.started_at
+      ? new Date(e.rows[0].started_at).toLocaleString("zh-CN", { hour12: false })
+      : ""],
+  ]);
 }
 
 // 真实 ECI OpenAPI（CreateContainerGroup）封装见 deploy/README；联调阶段用真实实现
@@ -238,7 +238,7 @@ async function buildApp() {
     shell: makeShellStep({ eciProvider, genToken: randomUUID, controlPlaneBase: resolveControlBase }),
     approval: makeApprovalStep({
       dingtalkCorpProvider, getCredentialKind, getCredentialSecrets,
-      genToken: randomUUID, controlPlaneBase: resolveControlBase, loadExecMeta,
+      genToken: randomUUID, controlPlaneBase: resolveControlBase,
     }),
   };
   const advancer = createAdvancer({
@@ -291,7 +291,23 @@ async function buildApp() {
     advance: advancer.advanceOnce,
     record: writeNodeRecord,
   });
-  return { orchestrator, snapshotStore, mutex, getCredentialSecrets, dingtalkTokenCache, enroll: dingtalkEnroll };
+  // 触发前装配：读取该 pipeline 最新 rev 的 spec 并开新执行（写入 execution.trigger 留痕），
+  // 构造执行元信息 Map，再按组件 origin 叠写 manual/webhook 变量，返回可直接交给
+  // orchestrator.run(spec, environment) 的产物。
+  async function hydrateForRun({ pipelineId, kind, formValue, webhookBody, authority }) {
+    const trigger = kind === "manual"
+      ? { trigger: "manual", params: formValue ?? {} }
+      : kind === "webhook" ? { trigger: "webhook", body: webhookBody ?? {} }
+      : {};
+    const spec = await loadPipelineRev(pipelineId, trigger, authority ? { authority } : undefined);
+    const initEnv = await buildInitialEnvironment({ execId: spec.execId, pipelineId });
+    const environment = assembleTriggerEnv({ spec, formValue, webhookBody, initEnv });
+    return { spec, environment };
+  }
+  return {
+    orchestrator, snapshotStore, mutex, getCredentialSecrets,
+    dingtalkTokenCache, enroll: dingtalkEnroll, hydrateForRun,
+  };
 }
 
 // ---------- 分发辅助 ----------
@@ -351,9 +367,18 @@ const DISPATCH = {
   "api.createExecution": async ({ body }) => ok(api.createExecution(body)),
   "api.getExecution": async ({ path }) => ok(api.getExecution(Number(m(path, RE.executionOne)))),
   "api.cancelExecution": async ({ path }) => ok(api.cancelExecution(Number(m(path, RE.executionCancel)))),
-  "api.runPipeline": async ({ app, path }) => {
+  "api.runPipeline": async ({ app, path, body }) => {
     const id = Number(RE.pipelineRun.exec(path)?.[1]);
-    return ok(app.orchestrator.onGitWebhook({ pipelineId: id, trigger: { trigger: "manual" } }));
+    const { spec, environment } = await app.hydrateForRun({ pipelineId: id, kind: "manual", formValue: body?.params });
+    const out = await app.orchestrator.run(spec, environment);
+    return {
+      status: 200,
+      body: {
+        execId: spec.execId,
+        status: out?.status ?? (out?.waiting ? "running" : "completed"),
+        waiting: out?.waiting ?? null,
+      },
+    };
   },
   "api.rerunExecution": async ({ app, path }) => {
     const id = Number(m(path, RE.executionRerun));
@@ -371,10 +396,18 @@ const DISPATCH = {
     return ok(out);
   },
   "hook.gitWebhook": async ({ app, path, body, event }) =>
-    ok(hook.gitWebhook(app.orchestrator, {
-      pipelineName: m(path, RE.git), payload: body, authority: parseHost(event),
-      secret: qs(path, "secret"),
-    })),
+    ok(hook.gitWebhook(
+      async ({ pipelineId, payload, authority }) => {
+        const { spec, environment } = await app.hydrateForRun({
+          pipelineId, kind: "webhook", webhookBody: payload, authority,
+        });
+        return app.orchestrator.run(spec, environment);
+      },
+      {
+        pipelineName: m(path, RE.git), payload: body, authority: parseHost(event),
+        secret: qs(path, "secret"),
+      },
+    )),
   "hook.dingtalkCardCb": async ({ app, path, body }) =>
     hook.dingtalkCardCb(app.orchestrator, {
       // 固定路由 /hook/dingtalk/card 不含 token：不能回退到 RE.dingtalk，
