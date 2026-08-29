@@ -3,6 +3,7 @@
 import { ref, reactive, computed, onMounted, onBeforeUnmount, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import draggable from "vuedraggable";
+import MarkdownIt from "markdown-it";
 import { notify } from "../lib/notify.js";
 import { fetchPipelines, getPipeline, createPipeline, updatePipeline, runPipeline } from "../api/pipeline.js";
 import { fetchImages } from "../api/image.js";
@@ -99,10 +100,17 @@ function pickRobot(n, name) { n.params.robot = name; robotOpenId.value = ""; }
 function onDocClick() { if (robotOpenId.value) robotOpenId.value = ""; }
 onMounted(() => document.addEventListener("click", onDocClick));
 
-// 审批卡片正文定制：内置占位符按流水线/执行运行时填充，留空 used 默认模板
+// 审批卡片正文定制：内置占位符按流水线/执行运行时填充，前端默认给出带占位符的完整模板，避免空正文
 const APPROVAL_PLACEHOLDERS = "{{pipeline}} 流水线名 · {{runNo}} 执行编号 · {{trigger}} 触发方式 · {{startedAt}} 发起时间 · {{node}} 节点 · {{pipelineId}} / {{execId}}";
-const DEFAULT_APPROVAL_BODY = "请审批该流水线卡点";
-function resetApprovalMsg(n) { n.params.message = ""; }
+const DEFAULT_APPROVAL_BODY =
+  `### 人工审批请求\n\n` +
+  `| 项 | 内容 |\n|---|---|\n` +
+  `| 流水线 | {{pipeline}} |\n` +
+  `| 执行编号 | #{{runNo}} |\n` +
+  `| 触发方式 | {{trigger}} |\n` +
+  `| 发起时间 | {{startedAt}} |\n\n` +
+  `请审核该审批请求，确认无误后点击下方按钮通过。`;
+function resetApprovalMsg(n) { n.params.message = DEFAULT_APPROVAL_BODY; }
 const approvalPreview = (n) => {
   const vars = {
     pipeline: "release-构建-发布", runNo: "12", trigger: "手动触发",
@@ -110,6 +118,13 @@ const approvalPreview = (n) => {
   };
   const body = n.params.message || DEFAULT_APPROVAL_BODY;
   return String(body).replace(/\{\{\s*([a-zA-Z][\w]*)\s*\}\}/g, (m, k) => (k in vars ? vars[k] : m));
+};
+// 卡片正文以占位符填充后的样例 Markdown 渲染预览，与输入框切换显示
+const md = new MarkdownIt({ html: false, linkify: true, breaks: true });
+const cardModes = reactive({}); // nodeId -> "edit" | "preview"，仅前端 UI 态，不入库
+const cardModeOf = (n) => cardModes[n.id] ?? "edit";
+const approvalHtml = (n) => {
+  try { return md.render(approvalPreview(n)); } catch { return approvalPreview(n); }
 };
 
 // 通讯录选择器：按部门树逐层加载，勾选成员填回 target.members（含部门层级），并同步 openIds 供后端使用
@@ -195,7 +210,7 @@ const addNode = (type) => {
     params:
       type === "shell"
         ? { image: images.value[0]?.image ?? "alpine", command: "", env: [] }
-        : { robot: "", message: "", target: { type: "user", openIds: "", members: [] } },
+        : { robot: "", message: DEFAULT_APPROVAL_BODY, target: { type: "user", openIds: "", members: [] } },
   };
   current.value.spec_json.nodes.push(node);
 };
@@ -394,22 +409,25 @@ const back = () => router.push("/pipelines");
                     <div class="field" style="grid-column:1/-1">
                       <div class="field-head">
                         <label class="field-label">审批卡片正文（Markdown）</label>
-                        <button type="button" class="btn btn-sm" title="清空自定义内容，恢复内置默认模板" @click="resetApprovalMsg(n)">恢复默认</button>
+                        <div class="card-tabs">
+                          <button type="button" class="card-tab" :class="{ active: cardModeOf(n) === 'edit' }" @click="cardModes[n.id] = 'edit'">编辑</button>
+                          <button type="button" class="card-tab" :class="{ active: cardModeOf(n) === 'preview' }" @click="cardModes[n.id] = 'preview'">预览</button>
+                          <button type="button" class="btn btn-sm" title="还原为内置默认模板" @click="resetApprovalMsg(n)">恢复默认</button>
+                        </div>
                       </div>
-                      <textarea
-                        class="textarea mono card-body"
-                        v-model="n.params.message"
-                        rows="4"
-                        placeholder="编写审批卡片正文（支持 Markdown），或在下面点击占位符标签插入。留空使用内置默认模板。"
-                      ></textarea>
-                      <div class="ph-chips">
-                        <code v-for="ph in ['{{pipeline}}','{{runNo}}','{{trigger}}','{{startedAt}}','{{node}}','{{pipelineId}}','{{execId}}']" :key="ph" class="ph-chip">{{ ph }}</code>
-                      </div>
-                      <p class="field-hint">占位符说明：{{ APPROVAL_PLACEHOLDERS }}。留空或恢复默认时，卡片使用内置模板展示流水线审批卡点。</p>
-                      <div class="md-preview">
-                        <span class="preview-label">发送预览</span>
-                        <pre class="preview-body">{{ approvalPreview(n) }}</pre>
-                      </div>
+                      <template v-if="cardModeOf(n) === 'edit'">
+                        <textarea
+                          class="textarea mono card-body"
+                          v-model="n.params.message"
+                          rows="4"
+                          placeholder="编写审批卡片正文（支持 Markdown），或在下方点击占位符标签插入。"
+                        ></textarea>
+                        <div class="ph-chips">
+                          <code v-for="ph in ['{{pipeline}}','{{runNo}}','{{trigger}}','{{startedAt}}','{{node}}','{{pipelineId}}','{{execId}}']" :key="ph" class="ph-chip">{{ ph }}</code>
+                        </div>
+                        <p class="field-hint">占位符说明：{{ APPROVAL_PLACEHOLDERS }}。默认已内置模板，点击「恢复默认」可还原。</p>
+                      </template>
+                      <div v-else class="md-render" v-html="approvalHtml(n)"></div>
                     </div>
 
                     <div class="field" style="grid-column:1/-1">
@@ -607,12 +625,29 @@ const back = () => router.push("/pipelines");
   background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
   padding: 2px 7px; border-radius: 6px;
 }
-.md-preview { margin-top: 8px; border: 1px dashed var(--line); border-radius: 10px; background: var(--bg-1); }
-.preview-label { display: block; font-size: 11px; letter-spacing: .06em; color: var(--text-3); padding: 8px 12px 0; }
-.preview-body {
-  margin: 0; padding: 8px 12px 12px; white-space: pre-wrap; word-break: break-word;
-  font-size: 12.5px; line-height: 1.7; color: var(--text-1);
+.card-tabs { display: flex; align-items: center; gap: 6px; }
+.card-tab {
+  font-size: 12px; font-weight: 600; color: var(--text-2);
+  padding: 5px 12px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--bg-1); cursor: pointer; transition: all .16s var(--ease);
 }
+.card-tab:hover { border-color: var(--line-strong); }
+.card-tab.active { color: var(--accent); background: var(--accent-soft); border-color: var(--accent); }
+.md-render {
+  margin-top: 8px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--bg-1); font-size: 13px; line-height: 1.7; color: var(--text-1);
+}
+.md-render :deep(h1), .md-render :deep(h2), .md-render :deep(h3) { margin: 0 0 8px; font-size: 15px; font-weight: 700; }
+.md-render :deep(h3:first-child), .md-render :deep(p:first-child) { margin-top: 0; }
+.md-render :deep(p) { margin: 4px 0; }
+.md-render :deep(table) { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 12.5px; }
+.md-render :deep(th), .md-render :deep(td) { border: 1px solid var(--line-strong); padding: 5px 9px; text-align: left; }
+.md-render :deep(th) { background: var(--bg-3); font-weight: 600; }
+.md-render :deep(code) { font-family: var(--font-mono); font-size: 12px; background: var(--bg-3); padding: 1px 5px; border-radius: 5px; }
+.md-render :deep(a) { color: var(--accent); }
+.md-render :deep(ul), .md-render :deep(ol) { margin: 4px 0; padding-left: 20px; }
+.md-render :deep(hr) { border: 0; border-top: 1px solid var(--line); margin: 10px 0; }
+.md-render :deep(blockquote) { margin: 6px 0; padding-left: 10px; border-left: 3px solid var(--accent); color: var(--text-2); }
 
 .field-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
 .field-head .field-label { margin-bottom: 0; }

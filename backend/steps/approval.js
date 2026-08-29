@@ -22,7 +22,9 @@ function fillVars(text, vars) {
   return String(text ?? "").replace(/\{\{\s*([a-zA-Z][\w]*)\s*\}\}/g, (m, k) => (k in vars ? vars[k] : m));
 }
 
-// 组装最终卡片正文：默认模板里的占位符与用户自定义正文(含占位符)一并填充
+// 组装最终卡片正文：
+//  - 用户节点自定义正文非空 → 直接作为唯一卡片正文（占位符填充），不再套外层模板，所见即所得
+//  - 空 → 使用内置默认模板（含流水线/执行编号/触发方式等元信息）
 export function renderApprovalCard({ body, meta, nodeId }) {
   const vars = {
     pipeline: meta?.pipeline ?? "",
@@ -32,17 +34,9 @@ export function renderApprovalCard({ body, meta, nodeId }) {
     execId: meta?.execId ?? "",
     pipelineId: meta?.pipelineId ?? "",
     node: meta?.node ?? nodeId ?? "",
-    body: fillVars(body || APPROVAL_CARD_DEFAULT_BODY, {
-      pipeline: meta?.pipeline ?? "",
-      runNo: meta?.runNo ?? "-",
-      trigger: meta?.trigger ?? "manual",
-      startedAt: meta?.startedAt ?? "-",
-      execId: meta?.execId ?? "",
-      pipelineId: meta?.pipelineId ?? "",
-      node: meta?.node ?? nodeId ?? "",
-    }),
   };
-  return fillVars(APPROVAL_CARD_TEMPLATE, vars);
+  if (body && String(body).trim()) return fillVars(body, vars);
+  return fillVars(APPROVAL_CARD_TEMPLATE, { ...vars, body: fillVars(APPROVAL_CARD_DEFAULT_BODY, vars) });
 }
 
 export function makeApprovalStep({
