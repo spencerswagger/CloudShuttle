@@ -9,7 +9,10 @@ export function createOrchestrator({
   record,
 }) {
   async function run(spec) {
-    // spec 由 loadSpec 注入并携带 execId；advance 内部会保存快照
+    // 新执行必须从空快照启动：openExecution 新造的自增 id 可能因 bootstrap 重跑
+    // 序列而被复用，redis 里同 id 残留的 snap 快照（7 天 TTL 不清）会被误读成旧 waiting，
+    // 导致全新运行 BLOCKED-BY-WAIT。故每次新运行先清一次，保证各执行完全独立。
+    await snapshotStore.clear(spec.execId);
     const snap = (await snapshotStore.load(spec.execId)) ?? {};
     return advance({ spec, snap, execId: spec.execId });
   }
