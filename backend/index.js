@@ -246,6 +246,18 @@ async function buildApp() {
     snapshot: snapshotStore.save,
     record: writeNodeRecord,
     recordRegistry,
+    // 所有节点完成时：把 execution 状态从 queued/running 更新为 completed，标记结束时间
+    complete: async ({ execId, status }) => {
+      const { rowCount } = await pool.query(
+        `UPDATE execution SET status=$2, finished_at = CASE WHEN finished_at IS NULL THEN now() ELSE finished_at END
+          WHERE id=$1 AND status IN ('queued','running')`,
+        [execId, status]
+      );
+      console.log(
+        `[complete] exec=${execId} 已把流水线运行状态更新为 ${status} ` +
+        `${rowCount ? "" : "(跳过：执行不在 queued/running，可能已被置为其他终态)"}`
+      );
+    },
   });
   const orchestrator = createOrchestrator({
     loadSpec: loadPipelineRev,

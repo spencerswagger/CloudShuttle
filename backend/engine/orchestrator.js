@@ -13,6 +13,7 @@ export function createOrchestrator({
     // 序列而被复用，redis 里同 id 残留的 snap 快照（7 天 TTL 不清）会被误读成旧 waiting，
     // 导致全新运行 BLOCKED-BY-WAIT。故每次新运行先清一次，保证各执行完全独立。
     await snapshotStore.clear(spec.execId);
+    console.log(`[run] exec=${spec.execId} 启动/续跑执行：已清除同 id 旧快照，开始推进节点`);
     const snap = (await snapshotStore.load(spec.execId)) ?? {};
     return advance({ spec, snap, execId: spec.execId });
   }
@@ -25,6 +26,10 @@ export function createOrchestrator({
     const next = { done: [...done], waiting: null };
     if (failed) next.status = "failed";
     await snapshotStore.save(execId, next);
+    console.log(
+      `[markDone] exec=${execId} 节点 ${nodeId} 标记为${failed ? "失败" : "成功"}终态，` +
+      `已结束 ${done.size} 节点，执行状态=${failed ? "failed" : snap.status ?? "running"}`
+    );
     return next;
   }
 
@@ -37,6 +42,7 @@ export function createOrchestrator({
     },
     // ECI 结束回调：节点成功 → 载入 spec 续跑到下一节点
     async onEciDone({ execId, nodeId }) {
+      console.log(`[orchestrator] exec=${execId} 收到 ECI 节点 ${nodeId} 成功回调，标记完成并继续推进`);
       const next = await markDone(nodeId, execId, false);
       await record({ execId, nodeId, status: "succeeded", output: { kind: "eci" } });
       const spec = await loadSpecForExec(execId);
@@ -44,6 +50,7 @@ export function createOrchestrator({
     },
     // ECI 失败回调 → 该节点终态失败，整个执行结束
     async onEciFail({ execId, nodeId }) {
+      console.log(`[orchestrator] exec=${execId} 收到 ECI 节点 ${nodeId} 失败回调 → 执行标记为 failed`);
       const next = await markDone(nodeId, execId, true);
       await record({ execId, nodeId, status: "failed", output: { kind: "eci", status: "failed" } });
       return { status: "failed", done: next.done };
@@ -51,10 +58,12 @@ export function createOrchestrator({
     // 钉钉审批回调：approve 续跑；reject 终止该执行
     async onApproval({ execId, nodeId, decision }) {
       if (decision === "reject") {
+        console.log(`[orchestrator] exec=${execId} 审批节点 ${nodeId} 被拒绝 → 执行标记为 failed（拒绝即失败）`);
         const next = await markDone(nodeId, execId, true);
         await record({ execId, nodeId, status: "rejected", output: { decision: "reject" } });
         return { status: "failed", done: next.done };
       }
+      console.log(`[orchestrator] exec=${execId} 审批节点 ${nodeId} 已通过 → 标记完成并继续推进下一个节点`);
       const next = await markDone(nodeId, execId, false);
       await record({ execId, nodeId, status: "succeeded", output: { decision: "approve" } });
       const spec = await loadSpecForExec(execId);

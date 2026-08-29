@@ -103,9 +103,13 @@ function extractFromCardPrivateData(str) {
 
 // 更新已投递卡片的模板状态变量（status=agree/reject），让卡片从「待审批」变为「已同意/已拒绝」
 export async function updateDeliveredCard({ credential, token, status, getCredentialSecrets, getAccessToken, httpClient }) {
-  if (!credential) return; // 老库记录无 credential，无从刷新 accessToken，直接跳过
+  if (!credential) {
+    console.warn(`[dingtalk] 更新审批卡片状态已跳过：该回调记录无 credential，无法刷新 accessToken token=${token ?? "-"}`);
+    return; // 老库记录无 credential，无从刷新 accessToken，直接跳过
+  }
   const robot = await getCredentialSecrets(credential);
   const accessToken = await getAccessToken(robot);
+  console.log(`[dingtalk] 正在更新审批卡片状态：token=${token} status=${status} → 卡片将变为「${status === "agree" ? "已同意" : "已拒绝"}」`);
   await httpClient.put(
     `${DING_BASE}/v1.0/card/instances`,
     {
@@ -116,6 +120,7 @@ export async function updateDeliveredCard({ credential, token, status, getCreden
     },
     { headers: { "x-acs-dingtalk-access-token": accessToken, "content-type": "application/json" } }
   );
+  console.log(`[dingtalk] ✔ 审批卡片状态更新成功：token=${token} status=${status}`);
 }
 
 // 按管道名解析 pipeline，返回 { pipelineId, gitHookSecret }（轻量查询 webhook 触发定位）

@@ -35,7 +35,9 @@ export function makeApprovalStep({
       approver: p.approverUid, text: p.message ?? "请审批该流水线卡点",
       callbackUrl, token,
     });
+    console.log(`[approval] ✔ 审批卡片已成功投递：token=${token} exec=${ctx.execId} node=${node.id}，开始登记回调凭证等待回拨`);
     await ctx.recordRegistry({ kind: "dingtalk", token, secret, credential: p.robot, execId: ctx.execId, nodeId: node.id });
+    console.log(`[approval] ✔ 回调凭证已登记：token=${token} secret 已独立生成，回调统一走 /hook/dingtalk/card`);
     return { kind: "wait", ref: token };
   };
 }
