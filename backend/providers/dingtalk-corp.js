@@ -74,17 +74,29 @@ export function createDingtalkCorpProvider({
         cardData: { cardParamMap: { markdown: markdownText } },
         openSpaceId: `dtv1.card//${spaceType}.${spaceId}`,
       };
-      // 各场域的投递模型：IM_ROBOT 需显式 spaceType
+      // 各场域的投递模型与场域信息：IM_ROBOT 必须同时提供
+      // imRobotOpenSpaceModel（场域信息，至少 supportForward）与 imRobotOpenDeliverModel，
+      // 只给 deliverModel 会导致钉钉「spaces of card is empty」解析不到接收人空间。
       if (spaceType === "IM_ROBOT") {
         body.imRobotOpenDeliverModel = { spaceType: "IM_ROBOT", robotCode: robot.robotCode };
+        body.imRobotOpenSpaceModel = { supportForward: false };
       } else {
         body.imGroupOpenDeliverModel = { robotCode: robot.robotCode };
+        body.imGroupOpenSpaceModel = { supportForward: true };
       }
-      const resp = await httpClient.post(
-        `${BASE}/v1.0/card/instances/createAndDeliver`,
-        body,
-        { headers: { "x-acs-dingtalk-access-token": accessToken, "content-type": "application/json" } }
-      );
+      let resp;
+      try {
+        resp = await httpClient.post(
+          `${BASE}/v1.0/card/instances/createAndDeliver`,
+          body,
+          { headers: { "x-acs-dingtalk-access-token": accessToken, "content-type": "application/json" } }
+        );
+      } catch (e) {
+        const rb = e?.response?.data;
+        const detail = rb ? JSON.stringify(rb).slice(0, 500) : String(e?.message ?? e);
+        console.error(`[createAndDeliver] HTTP_ERROR spaceType=${spaceType} spaceId=${spaceId} detail=${detail}`);
+        corpError(502, "DINGTALK_SEND_FAILED", "审批卡片发送失败（钉钉接口报错），请检查模板/回调routeKey配置", detail);
+      }
       // createAndDeliver：顶层 success 仅代表请求受理，真正的逐人投递结果在
       // result.deliverResults[] 中，必须逐条判定，否则会吞掉「接口成功但卡没送达」的失败。
       const raw = resp?.data ?? {};
@@ -95,7 +107,7 @@ export function createDingtalkCorpProvider({
         const mine = dRes.filter((r) => r?.success === false || String(r?.spaceId ?? r?.openSpaceId).includes(spaceId));
         const fail = dRes.find((r) => r?.success === false);
         myRes.deliverResults = dRes.map((r) => ({
-          success: r?.success, errorCode: r?.errorCode, errorMessage: r?.errorMessage,
+          success: r?.success, errorCode: r?.errorCode, errorMessage: r?.errorMessage ?? r?.errorMsg,
         }));
         if (mine.length && (fail || !mine.every((r) => r?.success === true))) {
           const f = fail ?? mine[0];
