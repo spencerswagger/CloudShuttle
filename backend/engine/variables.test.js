@@ -1,7 +1,7 @@
 // backend/engine/variables.test.js
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { render, parseDeps, parseOutput, globalKeysOf, resolveScope, collectNodeDeps, checkVars } from "./variables.js";
+import { render, parseDeps, parseOutput, globalKeysOf, resolveScope, collectNodeDeps, renderParams, checkVars } from "./variables.js";
 import { buildGraph, ancestors } from "./dag.js";
 
 // ---------- 任务一：渲染器 render + 依赖提取 parseDeps ----------
@@ -53,6 +53,43 @@ test("resolveScope 返回全局key 与 前驱输出key 的并集", () => {
 test("collectNodeDeps 汇总节点所有字符串参数的依赖", () => {
   const nd = { id: "n1", params: { command: "echo ${a}", env: [{ k: "X", v: "${b}" }] } };
   assert.deepEqual([...collectNodeDeps(nd)].sort(), ["a", "b"]);
+});
+
+// ---------- appendVariables：深 walk 预渲染 renderParams ----------
+test("renderParams 深 walk 渲染嵌套对象字符串字段(如 params.script.body)", () => {
+  const env = new Map([["x", "1"]]);
+  const src = { script: { body: "echo ${x}" }, command: "run ${x}", top: "${x}" };
+  const out = renderParams(src, env);
+  assert.equal(out.script.body, "echo 1");
+  assert.equal(out.command, "run 1");
+  assert.equal(out.top, "1");
+  // 返回全新副本，原始对象不被污染（含嵌套层）
+  assert.equal(src.script.body, "echo ${x}");
+  assert.notEqual(out.script, src.script);
+});
+
+test("renderParams 渲染 env 数组元素的 v 与 value 字段", () => {
+  const env = new Map([["k", "9"]]);
+  const src = { env: [{ k: "A", v: "val-${k}" }, { k: "B", value: "pool-${k}" }] };
+  const out = renderParams(src, env);
+  assert.equal(out.env[0].v, "val-9");
+  assert.equal(out.env[1].value, "pool-9");
+});
+
+test("renderParams 跳过 outputs 子树不渲染", () => {
+  const env = new Map([["k", "7"]]);
+  const src = { command: "echo ${k}", outputs: [{ key: "o", value: "${k}" }], nested: { outputs: [{ key: "n" }] } };
+  const out = renderParams(src, env);
+  assert.equal(out.command, "echo 7");
+  // outputs 子树原样保留，数据不被渲染也不被破坏
+  assert.deepEqual(out.outputs, [{ key: "o", value: "${k}" }]);
+  assert.deepEqual(src.outputs, [{ key: "o", value: "${k}" }]);
+});
+
+test("renderParams 未命中的 key 原样保留且不抛错", () => {
+  const out = renderParams({ command: "echo ${missing}", body: "${also}" }, new Map());
+  assert.equal(out.command, "echo ${missing}");
+  assert.equal(out.body, "${also}");
 });
 
 test("checkVars 引用未知key 报错", () => {

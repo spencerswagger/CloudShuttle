@@ -118,6 +118,32 @@ export function collectNodeDeps(node) {
 }
 
 /**
+ * 深 walk 预渲染节点 params：把所有层级字符串字段中的 ${name} 替换为 env 值（未命中原样保留）。
+ * - 跳过键名为 outputs 的子树（outputs 是声明而非待渲染正文，与 collectNodeDeps 一致）。
+ * - env 数组元素中的 v/value 字符串字段同样被渲染。
+ * - 返回全新副本，绝不就地修改原始 params 的任意层级。
+ * @param {object} params
+ * @param {Map<string,string>} env
+ * @returns {object}
+ */
+export function renderParams(params, env) {
+  const walk = (value, skipKeys) => {
+    if (typeof value === "string") return render(value, env);
+    if (Array.isArray(value)) return value.map((item) => walk(item, new Set()));
+    if (value && typeof value === "object") {
+      const out = {};
+      for (const [k, v] of Object.entries(value)) {
+        if (skipKeys.has(k)) { out[k] = v; continue; }
+        out[k] = walk(v, skipKeys);
+      }
+      return out;
+    }
+    return value;
+  };
+  return walk(params ?? {}, new Set(["outputs"]));
+}
+
+/**
  * 保存校验：每个节点引用的依赖必须落在自身静态作用域内。
  * 对每个节点用 collectNodeDeps 求依赖、resolveScope 求可用集；未命中返回错误消息，全部通过返回 null。
  * @param {object} spec

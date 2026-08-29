@@ -124,3 +124,58 @@ test("env 数组每个元素的 v 字段被预渲染", async () => {
   await adv.advanceOnce({ spec: specE, snap: { done: new Set(), waiting: null }, environment: env });
   assert.equal(stepNode.params.env[0].v, "val-3");
 });
+
+// ---------- 深 walk 渲染作用域一致（与 collectNodeDeps 对齐）----------
+
+test("嵌套对象字符串字段(如 params.script.body)被深渲染且原始 spec 不被污染", async () => {
+  const env = new Map();
+  env.set("x", "1");
+  let stepNode = null;
+  const adv = createAdvancer({
+    stepRun: (node) => { stepNode = node; return { kind: "dispatch", ref: "j1" }; },
+    snapshot: async () => {}, record: async () => {},
+  });
+  const specN = {
+    nodes: [{ id: "n1", step: "shell", type: "shell", params: { script: { body: "echo ${x}" }, command: "run ${x}" } }],
+    edges: [],
+  };
+  await adv.advanceOnce({ spec: specN, snap: { done: new Set(), waiting: null }, environment: env });
+  assert.equal(stepNode.params.script.body, "echo 1");
+  assert.equal(stepNode.params.command, "run 1");
+  // 原始 spec 嵌套层不被污染
+  assert.equal(specN.nodes[0].params.script.body, "echo ${x}");
+});
+
+test("env 数组元素用 value 字段也被深渲染", async () => {
+  const env = new Map();
+  env.set("k", "9");
+  let stepNode = null;
+  const adv = createAdvancer({
+    stepRun: (node) => { stepNode = node; return { kind: "dispatch", ref: "j1" }; },
+    snapshot: async () => {}, record: async () => {},
+  });
+  const specV = {
+    nodes: [{ id: "v1", step: "shell", type: "shell", params: { command: "x", env: [{ k: "A", value: "pool-${k}" }] } }],
+    edges: [],
+  };
+  await adv.advanceOnce({ spec: specV, snap: { done: new Set(), waiting: null }, environment: env });
+  assert.equal(stepNode.params.env[0].value, "pool-9");
+});
+
+test("outputs 子树不被渲染传递", async () => {
+  const env = new Map();
+  env.set("k", "7");
+  let stepNode = null;
+  const adv = createAdvancer({
+    stepRun: (node) => { stepNode = node; return { kind: "dispatch", ref: "j1" }; },
+    snapshot: async () => {}, record: async () => {},
+  });
+  const specOut = {
+    nodes: [{ id: "o1", step: "shell", type: "shell", params: { command: "echo ${k}", outputs: [{ key: "ok", value: "${k}" }] } }],
+    edges: [],
+  };
+  await adv.advanceOnce({ spec: specOut, snap: { done: new Set(), waiting: null }, environment: env });
+  assert.equal(stepNode.params.command, "echo 7");
+  // outputs 声明原样保留，值不被替换（不作为待渲染正文）
+  assert.deepEqual(stepNode.params.outputs, [{ key: "ok", value: "${k}" }]);
+});

@@ -1,5 +1,5 @@
 import { buildGraph, nextReady } from "./dag.js";
-import { render } from "./variables.js";
+import { renderParams } from "./variables.js";
 
 // 推进逻辑：载入快照 → 找到下一个 ready 且未 done 节点 → 交给 stepRun
 // stepRun 返回：
@@ -16,22 +16,7 @@ function fillEnv(env, src) {
   }
 }
 
-// 浅层预渲染节点 params：字符串字段整体 render；env 数组每个元素的 v 字段 render；其余原样。
-// 返回新对象副本，不改动原始 node。
-function renderParams(params, env) {
-  const src = params ?? {};
-  const out = { ...src };
-  for (const [k, v] of Object.entries(src)) {
-    if (typeof v === "string") out[k] = render(v, env);
-  }
-  if (Array.isArray(src.env)) {
-    out.env = src.env.map((e) =>
-      e && typeof e === "object" && typeof e.v === "string" ? { ...e, v: render(e.v, env) } : e
-    );
-  }
-  return out;
-}
-
+// 深 walk 预渲染节点 params：见 variables.js 的 renderParams，返回全新副本，不改动原始 node。
 export function createAdvancer({ stepRun, snapshot, record, recordRegistry = async () => {}, complete = async () => {} }) {
   async function advanceOnce({ spec, snap, execId, environment }) {
     const graph = buildGraph(spec);
