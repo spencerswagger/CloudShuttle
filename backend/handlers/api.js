@@ -6,8 +6,25 @@ import { config } from "../config.js";
 import { sm4Encrypt, sm4Decrypt } from "../crypto/sm4.js";
 import { HttpError } from "../errors.js";
 import { randomUUID } from "node:crypto";
+import { checkVars, resolveScope } from "../engine/variables.js";
+import { buildGraph, ancestors } from "../engine/dag.js";
 
 const rows = (r) => r.rows;
+
+// 解析请求体里的流水线配置对象；spec_json 既可能是已解析对象也可能是 JSON 字符串
+function resolveSpec(body) {
+  if (typeof body?.spec_json === "string") {
+    try { return JSON.parse(body.spec_json); }
+    catch { throw new HttpError(400, "BAD_SPEC_JSON", "流水线配置格式错误"); }
+  }
+  return body?.spec_json ?? {};
+}
+
+// 保存前静态校验变量引用是否落在节点静态作用域内；未解析变量时返回中文错误串并抛出 422
+function assertVarsResolved(spec) {
+  const err = checkVars(spec, { ancestors });
+  if (err) throw new HttpError(422, "VAR_UNRESOLVED", err, "unknown variable");
+}
 
 // 把当前 spec 对应版本登记进 pipeline_rev（历史版本表）
 async function snapshotRev(pipelineId, rev, spec) {
@@ -36,7 +53,9 @@ export async function getPipeline(id) {
 }
 
 export async function createPipeline(body) {
-  const spec = JSON.stringify(body?.spec_json ?? {});
+  const specObj = resolveSpec(body);
+  assertVarsResolved(specObj);
+  const spec = JSON.stringify(specObj);
   // 每个 git 仓库 hook 独立密钥，创建时生成并存库
   const gitHookSecret = randomUUID();
   const { rows: r } = await pool.query(
@@ -136,13 +155,30 @@ export async function listDepartmentUsers({ credential, deptId, getCredentialSec
 function oapiForm(data) { return new URLSearchParams(data).toString(); }
 
 export async function updatePipeline(id, body) {
-  const spec = JSON.stringify(body?.spec_json ?? {});
+  const specObj = resolveSpec(body);
+  assertVarsResolved(specObj);
+  const spec = JSON.stringify(specObj);
   const { rows: r } = await pool.query(
     `UPDATE pipeline SET spec_json=$2::jsonb, rev=rev+1, updated_at=now() WHERE id=$1 RETURNING *`,
     [id, spec]
   );
   if (r[0]) await snapshotRev(id, r[0].rev, spec);
   return r[0];
+}
+
+// 某节点当前可用变量（与保存校验同一作用域口径）：全局 key ∪ 前驱节点声明的 outputs key
+// nodeId 为空或不存在时返回空数组，前端仅作提示、不必报错。
+export async function getNodeScope(id, nodeId) {
+  const { rows: r } = await pool.query(
+    `SELECT spec_json FROM pipeline_rev WHERE pipeline_id=$1 ORDER BY rev DESC LIMIT 1`,
+    [id]
+  );
+  const spec = r[0]?.spec_json ?? {};
+  const graph = buildGraph(spec);
+  const node = nodeId == null ? null : String(nodeId);
+  if (!node || !graph.nodes.has(node)) return { keys: [] };
+  const scope = resolveScope(graph, spec, ancestors, node);
+  return { keys: [...scope].sort() };
 }
 
 export async function deletePipeline(id) {

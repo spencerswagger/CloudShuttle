@@ -29,6 +29,7 @@ import { isPrivateIp, clientIp } from "./security.js";
 const RE = {
   pipelinesList: /^\/api\/pipelines$/,
   pipelineOne: /^\/api\/pipelines\/(\d+)$/,
+  pipelineScope: /^\/api\/pipelines\/(\d+)\/scope$/,
   credentials: /^\/api\/credentials$/,
   credentialOne: /^\/api\/credentials\/(\d+)$/,
   images: /^\/api\/images$/,
@@ -91,6 +92,9 @@ export function routeToHandler(path, method, body) {
     if (m === "GET") return { handler: "api.getPipeline" };
     if (m === "PUT" || m === "PATCH") return { handler: "api.updatePipeline" };
     if (m === "DELETE") return { handler: "api.deletePipeline" };
+  }
+  if (RE.pipelineScope.test(path)) {
+    if (m === "GET") return { handler: "api.getNodeScope" };
   }
   if (RE.pipelineRun.test(path)) {
     if (m === "POST") return { handler: "api.runPipeline" };
@@ -353,6 +357,14 @@ const DISPATCH = {
   "api.updatePipeline": async ({ path, body }) => ok(api.updatePipeline(Number(m(path, RE.pipelineOne)), body)),
   "api.deletePipeline": async ({ path }) => ok(api.deletePipeline(Number(m(path, RE.pipelineOne)))),
   "api.getPipeline": async ({ path }) => ok(api.getPipeline(Number(m(path, RE.pipelineOne)))),
+  "api.getNodeScope": async ({ path, event }) => {
+    const id = Number(m(path, RE.pipelineScope));
+    const raw = event?.path ?? event?.url ?? path;
+    const node = raw && raw.indexOf("?") >= 0
+      ? new URLSearchParams(raw.slice(raw.indexOf("?") + 1)).get("node")
+      : null;
+    return ok(api.getNodeScope(id, node));
+  },
   "api.listCredentials": async () => ok(api.listCredentials()),
   "api.createCredential": async ({ app, body, event }) =>
     ok(api.createCredential(body, { enroll: app.enroll, base: resolveCallbackBase(event) })),
