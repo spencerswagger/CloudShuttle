@@ -8,14 +8,32 @@ export function createOrchestrator({
   advance,
   record,
 }) {
-  async function run(spec) {
+  // 把扁平环境源（快照 environment 对象 + 可选外部 Map/对象）构造成内部 Map，值统一转字符串。
+  // 语义与 state.js 保持一致：快照环境作基础值，外部显式传入的同名变量覆盖优先。
+  function buildEnv(snapEnv, extra) {
+    const env = new Map();
+    if (snapEnv && typeof snapEnv === "object" && !(snapEnv instanceof Map)) {
+      for (const [k, v] of Object.entries(snapEnv)) env.set(k, String(v));
+    }
+    if (extra instanceof Map) {
+      for (const [k, v] of extra) env.set(k, String(v));
+    } else if (extra && typeof extra === "object") {
+      for (const [k, v] of Object.entries(extra)) env.set(k, String(v));
+    }
+    return env;
+  }
+
+  async function run(spec, environment) {
     // 新执行必须从空快照启动：openExecution 新造的自增 id 可能因 bootstrap 重跑
     // 序列而被复用，redis 里同 id 残留的 snap 快照（7 天 TTL 不清）会被误读成旧 waiting，
     // 导致全新运行 BLOCKED-BY-WAIT。故每次新运行先清一次，保证各执行完全独立。
     await snapshotStore.clear(spec.execId);
     console.log(`[run] exec=${spec.execId} 启动/续跑执行：已清除同 id 旧快照，开始推进节点`);
-    const snap = (await snapshotStore.load(spec.execId)) ?? {};
-    return advance({ spec, snap, execId: spec.execId });
+    const stored = (await snapshotStore.load(spec.execId)) ?? {};
+    // 恢复快照 environment（扁平对象）为基础值，再叠写外部显式传入的 environment（同名覆盖优先）
+    const env = buildEnv(stored.environment, environment);
+    const snap = { ...stored, environment: stored.environment ?? {} };
+    return advance({ spec, snap, execId: spec.execId, environment: env });
   }
 
   // 把某节点标记为终态、清空 waiting，写快照（供续跑）
@@ -24,6 +42,8 @@ export function createOrchestrator({
     const done = new Set(snap.done ?? []);
     done.add(nodeId);
     const next = { done: [...done], waiting: null };
+    // 透传快照 environment，确保续跑写回不丢变量地图
+    if (snap.environment) next.environment = snap.environment;
     if (failed) next.status = "failed";
     await snapshotStore.save(execId, next);
     console.log(
@@ -34,6 +54,7 @@ export function createOrchestrator({
   }
 
   return {
+    run,
     // git webhook：loadSpec 得到携带 execId 的 spec，载入快照后推进；
     // authority 来自请求 Host，写入 spec 供回调拼绝对地址
     async onGitWebhook({ pipelineId, trigger, authority }) {
@@ -46,7 +67,8 @@ export function createOrchestrator({
       const next = await markDone(nodeId, execId, false);
       await record({ execId, nodeId, status: "succeeded", output: { kind: "eci" } });
       const spec = await loadSpecForExec(execId);
-      return advance({ spec, snap: next, execId });
+      // 续跑不丢 environment：从 markDone 透传回的快照 environment 重建 Map，供 state.advanceOnce 继续引用
+      return advance({ spec, snap: next, execId, environment: buildEnv(next.environment, null) });
     },
     // ECI 失败回调 → 该节点终态失败，整个执行结束
     async onEciFail({ execId, nodeId }) {
@@ -67,7 +89,8 @@ export function createOrchestrator({
       const next = await markDone(nodeId, execId, false);
       await record({ execId, nodeId, status: "succeeded", output: { decision: "approve" } });
       const spec = await loadSpecForExec(execId);
-      return advance({ spec, snap: next, execId });
+      // 续跑不丢 environment：从 markDone 透传回的快照 environment 重建 Map，供 state.advanceOnce 继续引用
+      return advance({ spec, snap: next, execId, environment: buildEnv(next.environment, null) });
     },
   };
 }
