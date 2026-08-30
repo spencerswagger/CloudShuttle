@@ -40,8 +40,8 @@ export function createAdvancer({ stepRun, snapshot, record, recordRegistry = asy
       `[advance] exec=${execId} 推进一轮：已结束节点 ${done.size}/${graph.nodes.size}，` +
       `等待=${waiting ?? "无"}，本次就绪可执行节点=[${ready.join(",") || "无"}]`
     );
-    if (!ready.length) {
-      // 无就绪节点但 done 也未满 → 说明被上游未完成节点挡住（多为 shell/ECI 占位未实现导致）
+    if (!ready.length && done.size < graph.nodes.size) {
+      // 无就绪节点且 done 未满 → 说明被上游未完成节点挡住（多为 shell/ECI 占位未实现导致）
       console.warn(
         `[advance] exec=${execId} 没有可执行的就绪节点(已结束 ${done.size}/${graph.nodes.size})，` +
         `疑似被上游未完成节点阻塞 nodes=[${[...graph.nodes.keys()].join(",")}] ` +

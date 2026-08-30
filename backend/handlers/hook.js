@@ -41,11 +41,15 @@ export async function dingtalkCardCb(orchestrator, { token, secret, decision, bo
     decision: agreed ? "approve" : "reject",
   });
   console.log(`[dingtalk-card] advance done exec=${row.exec_id} node=${row.node_id} out=${JSON.stringify(out ?? {})}`);
-  // 审批已推进，异步把卡片状态更新为已同意/已拒绝（失败不影响审批结果）
+  // 审批已推进，把卡片状态更新为已同意/已拒绝。必须 await 后再响应：
+  // FC 在请求返回后冻结容器，fire-and-forget 的更新会挂起直到下次唤起（用户表现为要点两次才显示已同意）。
+  // 更新失败仅告警，不影响审批推进结果。
   if (typeof updateCard === "function") {
-    updateCard({ credential: row.credential, token: token_, status: agreed ? "agree" : "reject" }).catch((e) => {
+    try {
+      await updateCard({ credential: row.credential, token: token_, status: agreed ? "agree" : "reject" });
+    } catch (e) {
       console.warn("[dingtalk] update card status failed", e?.message);
-    });
+    }
   }
   return { status: 200, body: out ?? {} };
 }

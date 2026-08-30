@@ -35,3 +35,31 @@ test("handler 冒烟：直接调用导入的 handler 模块函数不崩溃", asy
   const app = await import("../index.js");
   assert.equal(typeof app.handler, "function");
 });
+
+test("审批回调返回前必须已完成卡片更新（FC 冻结下 fire-and-forget 会丢失）", async () => {
+  const { dingtalkCardCb } = await import("../handlers/hook.js");
+  let cardUpdated = false;
+  const ctx = {
+    token: "tk1",
+    body: { content: JSON.stringify({ cardPrivateData: { actionIds: ["agree"], params: { action: "agree" } } }) },
+    lookup: async () => ({ exec_id: 5, node_id: "n1", credential: "demo", secret: "s" }),
+    updateCard: async () => { await new Promise((r) => setTimeout(r, 30)); cardUpdated = true; },
+  };
+  const out = await dingtalkCardCb({ onApproval: async () => ({ status: "completed" }) }, ctx);
+  assert.equal(out.status, 200);
+  assert.equal(cardUpdated, true, "响应返回时卡片更新必须已执行完成，而非挂成后台任务");
+});
+
+test("卡片更新失败不影响审批推进结果（仍返回 200）", async () => {
+  const { dingtalkCardCb } = await import("../handlers/hook.js");
+  const out = await dingtalkCardCb(
+    { onApproval: async () => ({ status: "completed" }) },
+    {
+      token: "tk2",
+      body: { content: JSON.stringify({ cardPrivateData: { actionIds: ["reject"], params: { action: "reject" } } }) },
+      lookup: async () => ({ exec_id: 6, node_id: "n1", credential: "demo", secret: "s" }),
+      updateCard: async () => { throw new Error("dingtalk 500"); },
+    }
+  );
+  assert.equal(out.status, 200);
+});
