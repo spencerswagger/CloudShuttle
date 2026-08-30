@@ -5,7 +5,8 @@ import { useRoute, useRouter } from "vue-router";
 import draggable from "vuedraggable";
 import MarkdownIt from "markdown-it";
 import { notify } from "../lib/notify.js";
-import { getPipeline, createPipeline, updatePipeline, getPipelineHook } from "../api/pipeline.js";
+import { buildMappingDraft } from "../lib/webhookDraft.js";
+import { getPipeline, createPipeline, updatePipeline, getPipelineHook, resetWebhookSecret, fetchWebhookProbe } from "../api/pipeline.js";
 import { fetchImages } from "../api/image.js";
 import { fetchCredentials, listDepartments, listDepartmentUsers } from "../api/credential.js";
 import RunPipelineModal from "../components/RunPipelineModal.vue";
@@ -44,11 +45,11 @@ const isNew = computed(() => !editingId.value);
 const pageTitle = computed(() => (isNew.value ? "新建流水线" : `编辑流水线${current.value.name ? " · " + current.value.name : ""}`));
 
 async function hydrate() {
-  if (!editingId.value) { current.value = newPipeline(); return; }
+  if (!editingId.value) { current.value = newPipeline(); resetHookSession(); return; }
   try {
     const p = await getPipeline(editingId.value);
     current.value = JSON.parse(JSON.stringify(p));
-    hookSecret.value = ""; // 切换流水线时清空已缓存的 webhook 密钥，避免跨 /pipelines/:id 残留拼进 URL
+    resetHookSession(); // 切换流水线：丢弃后端下发的触发地址与调试接收态，避免跨 /pipelines/:id 残留
     // 下拉数据懒加载：仅当节点实际用到镜像/凭证才请求，避免挂载即连拉 3 个接口
     const ns = current.value.spec_json?.nodes ?? [];
     if (ns.some((n) => n.type === "shell")) loadImages();
@@ -349,25 +350,75 @@ function setOptions(p, ev) {
   p.options = String(ev.target.value).split(/[,，]/).map((s) => s.trim()).filter(Boolean);
 }
 
-// webhook 触发 URL；密钥经 getPipelineHook 显式获取后拼入 query
-const hookSecret = ref("");
+// ---------- Webhook 触发地址：由后端生成下发，前端只读展示 + 复制，不再本地拼接 ----------
+const HOOK_URL_PLACEHOLDER = "保存流水线后获取触发地址";
+const webhookUrl = ref(""); // 后端下发的完整触发地址（含 ?secret=）；为空即降级为占位
 const hookLoading = ref(false);
-const webhookUrl = computed(() => {
-  const base = `${location.origin}/hook/git/${encodeURIComponent(current.value?.name ?? "")}`;
-  return hookSecret.value ? `${base}?secret=${encodeURIComponent(hookSecret.value)}` : base;
-});
-async function loadHook() {
-  if (!current.value.id) { notify({ type: "error", message: "请先保存流水线再获取密钥" }); return; }
+const resetArmed = ref(false); // 「重置密钥」两段式确认：先点亮，再确认执行
+let resetArmTimer = null;
+let hookAutoFor = null; // 已自动拉取过地址的流水线 id，保证「切入 Webhook tab 自动拉一次」不重复请求
+
+function disarmReset() {
+  resetArmed.value = false;
+  if (resetArmTimer !== null) { clearTimeout(resetArmTimer); resetArmTimer = null; }
+}
+function armReset() {
+  if (!current.value.id) { notify({ type: "error", message: "请先保存流水线再重置密钥" }); return; }
+  if (resetArmed.value) { disarmReset(); resetHook(); return; }
+  resetArmed.value = true;
+  resetArmTimer = setTimeout(disarmReset, 6000); // 6 秒内不确认即自动撤销，避免误触轮换密钥
+}
+
+async function resetHook() {
+  hookLoading.value = true;
+  try {
+    const r = await resetWebhookSecret(current.value.id);
+    hookUrlSet(r, { ok: "已重置访问密钥，触发地址已更新（请同步到 GitHub / GitLab）" });
+  } catch (e) {
+    notify({ type: "error", message: hookErrText(e, "重置密钥失败") });
+  } finally { hookLoading.value = false; }
+}
+
+// 统一写入后端下发的地址；无 url 时按接口返回失败处理
+function hookUrlSet(r, { ok }) {
+  webhookUrl.value = r?.url ?? "";
+  if (webhookUrl.value) notify({ type: "success", message: ok });
+  else notify({ type: "error", message: "后端未返回触发地址，请重试" });
+}
+// 错误文案分流：404 归因接口未部署，其余如实透出 message（后端已归一含 requestId）
+function hookErrText(e, fallback) {
+  if (e?.status === 404) return `${fallback}：后端接口版本过旧，请更新部署后再试`;
+  return `${fallback}：${e?.message ?? "未知错误"}`;
+}
+
+// quiet=true 用于切入 tab 的自动拉取：成功不弹提示，失败静默降级为占位
+async function loadHook({ quiet = false } = {}) {
+  if (!current.value.id) {
+    if (!quiet) notify({ type: "error", message: "请先保存流水线再获取触发地址" });
+    return;
+  }
   hookLoading.value = true;
   try {
     const r = await getPipelineHook(current.value.id);
-    hookSecret.value = r?.gitHookSecret ?? "";
-    if (hookSecret.value) notify({ type: "success", message: "已获取 Webhook 密钥，URL 已更新" });
-  } catch { /* 全局拦截器提示 */ }
-  finally { hookLoading.value = false; }
+    webhookUrl.value = r?.url ?? "";
+    if (!webhookUrl.value && !quiet) notify({ type: "error", message: "后端未返回触发地址，请重试" });
+  } catch (e) {
+    webhookUrl.value = "";
+    if (!quiet) notify({ type: "error", message: hookErrText(e, "获取触发地址失败") });
+  } finally { hookLoading.value = false; }
 }
+
+// 已有 id 且未拉过地址时自动拉一次（切进 Webhook tab 或数据回填后）
+function maybeAutoLoadHook() {
+  if (triggerTab.value !== "webhook" || !current.value.id) return;
+  if (hookAutoFor === current.value.id) return;
+  hookAutoFor = current.value.id;
+  loadHook({ quiet: true });
+}
+
 async function copyHook() {
-  try { await navigator.clipboard.writeText(webhookUrl.value); notify({ type: "success", message: "已复制 Webhook URL" }); }
+  if (!webhookUrl.value) { notify({ type: "error", message: HOOK_URL_PLACEHOLDER }); return; }
+  try { await navigator.clipboard.writeText(webhookUrl.value); notify({ type: "success", message: "已复制 Webhook 触发地址" }); }
   catch { notify({ type: "error", message: "复制失败，请手动复制" }); }
 }
 const WEBHOOK_TEMPLATES = {
@@ -390,6 +441,155 @@ function applyTemplate(kind) {
   notify({ type: "success", message: kind === "github" ? "已填入 GitHub 模板映射" : "已填入 GitLab 模板映射" });
 }
 function addMapping() { webhookMappings.value.push({ name: "", jsonPath: "" }); }
+
+// ---------- 调试接收：轮询后端探针展示最近收到的请求体，并可一键生成映射草案 ----------
+// 全部为前端会话态（不入库）：离开 Webhook tab、关闭开关、组件卸载都会停掉 interval。
+const PROBE_POLL_MS = 3000;   // 轮询间隔
+const PROBE_JSON_MAX = 8000;  // pretty JSON 超过该长度只展示前段，避免大 payload 拖慢页面
+const PROBE_DRAFT_MAX = 40;   // 一次最多生成的草案条数
+
+const probeOn = ref(false);
+const probeBody = ref(null);        // 最近一次收到的请求体（object | null）
+const probeReceivedAt = ref(null);  // 后端记录的投递时间（ISO | null）
+const probeHttpStatus = ref(null);  // 后端记录的处理结果：200/401/503，null=历史数据
+const probePolled = ref(false);     // 是否已成功轮询过一次（区分「等待投递」与「接口不可用」）
+const probeMissing = ref(false);    // 后端未部署 webhook-probe 接口（404）：停止轮询并给出说明
+let probeTimer = null;
+let probeInFlight = false;          // 在途标记：慢网下跳过本轮，避免请求堆积
+let probeFailCount = 0;             // 连续非 404 失败计数：≥3 自动停轮询，避免无限空转
+
+function stopProbe() {
+  if (probeTimer !== null) { clearInterval(probeTimer); probeTimer = null; }
+}
+async function pollProbe() {
+  const id = current.value.id;
+  if (!id || probeInFlight) return;
+  probeInFlight = true;
+  try {
+    const r = await fetchWebhookProbe(id);
+    if (id !== current.value.id) return;      // 期间切换了流水线，丢弃过期响应
+    probeBody.value = r?.body ?? null;        // receivedAt 变化即整体刷新
+    probeReceivedAt.value = r?.receivedAt ?? null;
+    probeHttpStatus.value = r?.httpStatus ?? null;
+    probePolled.value = true;
+    probeFailCount = 0;
+  } catch (e) {
+    if (e?.status === 404) { probeMissing.value = true; probeForceStop(); return; }
+    // 其余失败静默重试，连续 3 次判定后端不可达，自动关闭避免每 3 秒空打
+    if (++probeFailCount >= 3) {
+      probeFailCount = 0;
+      probeForceStop();
+      notify({ type: "error", message: "调试接收暂时无法连接后端，已自动停止轮询" });
+    }
+  } finally { probeInFlight = false; }
+}
+function probeForceStop() { probeOn.value = false; stopProbe(); }
+function startProbe() {
+  stopProbe();
+  if (!probeOn.value || !current.value.id) return; // 无 id 不轮询
+  probeMissing.value = false;                      // 重新开启即清掉上一轮「接口不可用」标记
+  pollProbe();                                     // 开关即先拉一次，不必等满 3 秒
+  probeTimer = setInterval(pollProbe, PROBE_POLL_MS);
+}
+watch(probeOn, (v) => { if (v) startProbe(); else stopProbe(); });
+
+// 切 tab：离开 Webhook 立即停轮询并清空调试视图；进入则补一次地址自动拉取（探针数据后端持久，重开即回显）
+watch(triggerTab, (v) => {
+  if (v === "webhook") { maybeAutoLoadHook(); return; }
+  stopProbe();            // 显式清理，不依赖 probeOn 侦听的异步 flush
+  probeOn.value = false;
+  clearProbeView();
+  disarmReset();
+});
+
+function clearProbeView() {
+  probePolled.value = false;
+  probeMissing.value = false;
+  probeBody.value = null;
+  probeReceivedAt.value = null;
+  probeHttpStatus.value = null;
+  probeFailCount = 0;
+}
+
+function resetHookSession() {
+  stopProbe();
+  disarmReset();
+  webhookUrl.value = "";
+  hookAutoFor = null;
+  probeOn.value = false;
+  probePolled.value = false;
+  probeMissing.value = false;
+  probeBody.value = null;
+  probeReceivedAt.value = null;
+  probeHttpStatus.value = null;
+  probeFailCount = 0;
+}
+onBeforeUnmount(() => { stopProbe(); disarmReset(); }); // 卸载清理定时器，防泄漏
+
+const PROBE_GUIDE = "开着这个页面，去 GitHub / GitLab 保存并触发一次 Webhook，这里会实时显示收到的请求体。";
+const probeHasBody = computed(() => {
+  const b = probeBody.value;
+  if (!b || typeof b !== "object") return false;
+  return Array.isArray(b) ? b.length > 0 : Object.keys(b).length > 0;
+});
+const probeTimeText = computed(() => {
+  const raw = probeReceivedAt.value;
+  if (!raw) return "";
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? String(raw) : d.toLocaleString();
+});
+// 处理结果文案：让用户明确「能收到 ≠ 触发成功」（密钥不匹配/未配置时后端也记录）
+const PROBE_STATUS_TEXT = {
+  200: "已接收 · 触发成功",
+  401: "已接收 · 密钥不匹配（请同步最新触发地址到第三方平台）",
+  503: "已接收 · 此流水线未配置访问密钥",
+};
+const probeStatusText = computed(() => {
+  const s = probeHttpStatus.value;
+  return s && PROBE_STATUS_TEXT[s] ? PROBE_STATUS_TEXT[s] : "已接收";
+});
+const probeStatusCls = computed(() => {
+  const s = probeHttpStatus.value;
+  if (s === 200) return "ok";
+  if (s === 401 || s === 503) return "bad";
+  return "";
+});
+const probeJsonText = computed(() => {
+  if (!probeHasBody.value) return "";
+  try {
+    const t = JSON.stringify(probeBody.value, null, 2);
+    return typeof t === "string" ? t : String(probeBody.value);
+  } catch { return String(probeBody.value); }
+});
+const probeJsonOverflow = computed(() => probeJsonText.value.length > PROBE_JSON_MAX);
+const probeJsonShown = computed(() => (probeJsonOverflow.value ? probeJsonText.value.slice(0, PROBE_JSON_MAX) : probeJsonText.value));
+const probeEmptyText = computed(() => {
+  if (probeMissing.value) return "当前后端未部署调试接收接口（webhook-probe），升级后即可在此查看真实投递的请求体。";
+  return probeOn.value ? PROBE_GUIDE : `开启「调试接收」后每 ${PROBE_POLL_MS / 1000} 秒拉取一次。${PROBE_GUIDE}`;
+});
+
+// 请求体 → JSONPath 映射草案：遍历逻辑见 lib/webhookDraft.js（深度 ≤ 2、name sanitize + 去重、上限 40 条）
+const probeDrafts = computed(() => (probeHasBody.value ? buildMappingDraft(probeBody.value, { max: PROBE_DRAFT_MAX }) : []));
+// 追加：与现有 webhookMappings 按 name 去重，只增不覆盖
+function appendProbeDrafts() {
+  const drafts = probeDrafts.value;
+  if (!drafts.length) { notify({ type: "error", message: "请求体里没有可提取的字段，未生成映射草案" }); return; }
+  const exists = new Set(webhookMappings.value.map((m) => m?.name).filter(Boolean));
+  let added = 0;
+  for (const d of drafts) {
+    if (exists.has(d.name)) continue;
+    exists.add(d.name);
+    webhookMappings.value.push({ name: d.name, jsonPath: d.jsonPath });
+    added++;
+  }
+  notify({
+    type: "success",
+    message: added ? `已追加 ${added} 条映射` : `草案 ${drafts.length} 条与现有映射重名，未追加新行`,
+  });
+}
+
+// 数据回填后（编辑态）若在 Webhook tab 也补拉一次地址
+watch(() => current.value.id, () => maybeAutoLoadHook());
 </script>
 
 <template>
@@ -422,6 +622,7 @@ function addMapping() { webhookMappings.value.push({ name: "", jsonPath: "" }); 
       <div class="field name-field">
         <label class="field-label">流水线名称</label>
         <input class="input" v-model="current.name" placeholder="如：release-构建-发布" />
+        <p class="field-hint" v-if="current.id">名称是 Webhook 触发地址的一部分，修改并保存后，请重新复制触发地址到第三方平台。</p>
       </div>
       <div class="field">
         <label class="field-label">节点总数</label>
@@ -513,13 +714,69 @@ function addMapping() { webhookMappings.value.push({ name: "", jsonPath: "" }); 
       <!-- webhook 映射编辑器 -->
       <template v-else>
         <div class="field">
-          <label class="field-label">Webhook URL</label>
-          <div class="group-row">
-            <input class="input mono" :value="webhookUrl" readonly />
-            <button type="button" class="btn btn-sm btn-ghost" @click="copyHook">复制</button>
-            <button type="button" class="btn btn-sm" @click="loadHook" :disabled="hookLoading || !current.id">{{ hookLoading ? "获取中…" : "获取密钥" }}</button>
+          <div class="field-head">
+            <label class="field-label">Webhook 触发地址</label>
+            <span class="mono-tag">后端生成</span>
           </div>
-          <p class="field-hint">在 GitHub / GitLab 仓库配置该 Webhook，POST 到此地址即触发运行；访问密钥在 URL 末尾 <code class="mono ph-code">?secret=</code> 中。</p>
+          <div class="group-row">
+            <input class="input mono" :value="webhookUrl" :placeholder="HOOK_URL_PLACEHOLDER" readonly />
+            <button type="button" class="btn btn-sm btn-ghost" @click="copyHook" :disabled="!webhookUrl">复制</button>
+            <button type="button" class="btn btn-sm" @click="loadHook()" :disabled="hookLoading || !current.id">
+              {{ hookLoading ? "获取中…" : "获取地址" }}
+            </button>
+            <button
+              type="button"
+              class="btn btn-sm"
+              :class="{ 'btn-danger-solid': resetArmed }"
+              :disabled="hookLoading || !current.id"
+              :title="resetArmed ? '再次点击确认轮换密钥' : '轮换访问密钥并重新生成触发地址'"
+              @click="armReset"
+            >
+              {{ resetArmed ? "确认重置" : "重置密钥" }}
+            </button>
+          </div>
+          <p class="field-hint">
+            地址由后端生成并下发（访问密钥在 URL 末尾 <code class="mono ph-code">?secret=</code> 中），前端不再拼接；
+            复制到 GitHub / GitLab 仓库的 Webhook 配置即触发运行。重置密钥后旧地址立即失效。
+          </p>
+        </div>
+
+        <!-- 调试接收：轮询后端探针，展示最近收到的请求体并生成映射草案（纯前端会话态） -->
+        <div class="probe-panel">
+          <div class="probe-head">
+            <span class="probe-lead">
+              <span class="probe-title display">调试接收</span>
+              <span class="probe-dot" :class="{ live: probeOn && current.id, off: probeMissing }"></span>
+              <span class="probe-state muted">
+                {{ probeMissing ? "接口不可用" : probeOn ? (current.id ? `轮询中 · 每 ${PROBE_POLL_MS / 1000} 秒` : "未保存流水线") : "已停止" }}
+              </span>
+            </span>
+            <label class="switch" :title="current.id ? '开启后每 3 秒拉取一次最近收到的 Webhook 请求体' : '保存流水线后可开启'">
+              <input type="checkbox" v-model="probeOn" :disabled="!current.id" />
+              <span class="switch-slider"></span>
+            </label>
+          </div>
+
+          <div v-if="probePolled" class="probe-meta">
+            <span class="probe-time mono">最近触发：{{ probeTimeText || "尚无投递" }}</span>
+            <span class="probe-status mono" :class="probeStatusCls">{{ probeStatusText }}</span>
+            <button
+              type="button"
+              class="btn btn-sm btn-accent"
+              :disabled="!probeDrafts.length"
+              title="按请求体结构生成 JSONPath 映射草案，追加到下方映射表"
+              @click="appendProbeDrafts"
+            >
+              从请求生成映射草案
+            </button>
+          </div>
+          <template v-if="probeHasBody">
+            <pre class="probe-json mono">{{ probeJsonShown }}{{ probeJsonOverflow ? "\n…" : "" }}</pre>
+            <p v-if="probeJsonOverflow" class="field-hint">
+              请求体共 {{ probeJsonText.length }} 字符，为避免卡顿仅展示前 {{ PROBE_JSON_MAX }} 字符（映射草案仍按完整结构生成）。
+            </p>
+          </template>
+          <p v-else class="probe-empty muted">{{ probeEmptyText }}</p>
         </div>
 
         <div class="wh-templates">
@@ -552,6 +809,7 @@ function addMapping() { webhookMappings.value.push({ name: "", jsonPath: "" }); 
             <button type="button" class="btn btn-sm btn-ghost" @click="addMapping">＋ 添加映射</button>
           </div>
         </div>
+        <p class="field-hint wh-limits">仅支持 <code class="mono">POST</code> 且 <code class="mono">Content-Type: application/json</code> 的请求体；访问密钥通过 URL 末尾 <code class="mono">?secret=</code> 校验，不支持签名头/HMAC。</p>
       </template>
     </section>
 
@@ -1038,6 +1296,49 @@ function addMapping() { webhookMappings.value.push({ name: "", jsonPath: "" }); 
 .param-row:not(.param-head) .param-cell { min-width: 0; }
 .trig-acts { display: flex; justify-content: flex-end; margin-top: 4px; }
 .wh-templates { display: flex; gap: 8px; margin-bottom: 12px; }
+
+/* 调试接收面板：轮询状态 + 请求体预览 + 映射草案入口 */
+.probe-panel {
+  margin: 2px 0 14px; padding: 12px 14px;
+  background: var(--bg-1); border: 1px solid var(--line); border-radius: 10px;
+}
+.probe-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.probe-lead { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.probe-title { font-size: 13px; font-weight: 600; color: var(--text-1); }
+.probe-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-3); flex: 0 0 7px; }
+.probe-dot.live { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); animation: probePulse 1.6s var(--ease) infinite; }
+.probe-dot.off { background: var(--err); box-shadow: 0 0 0 3px var(--err-soft); animation: none; }
+.probe-state { font-family: var(--font-mono); font-size: 11px; letter-spacing: .03em; }
+@keyframes probePulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+.probe-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 12px 0 8px; flex-wrap: wrap; }
+.probe-time { font-size: 11.5px; color: var(--accent); }
+.probe-status { font-size: 11.5px; padding: 2px 8px; border-radius: 999px; background: var(--bg-3); color: var(--text-2); }
+.probe-status.ok { color: var(--ok, #3fb98d); background: var(--ok-soft, rgba(63,185,141,.12)); }
+.probe-status.bad { color: var(--err); background: var(--err-soft); }
+.wh-limits { margin-top: 10px; }
+.probe-json {
+  margin: 0; max-height: 260px; overflow: auto; padding: 10px 12px;
+  font-size: 11.5px; line-height: 1.55; color: var(--text-1); white-space: pre;
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: 8px;
+}
+.probe-empty {
+  margin: 12px 0 0; font-size: 12.5px; line-height: 1.6;
+  padding: 12px 14px; border: 1px dashed var(--line-strong); border-radius: 8px;
+}
+/* 开关（与运行弹窗 boolean 参数同款视觉） */
+.switch { position: relative; display: inline-block; width: 40px; height: 22px; flex: 0 0 40px; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.switch-slider {
+  position: absolute; inset: 0; cursor: pointer; border-radius: 100px;
+  background: var(--bg-3); border: 1px solid var(--line-strong); transition: all .18s var(--ease);
+}
+.switch-slider::before {
+  content: ""; position: absolute; height: 14px; width: 14px; left: 3px; top: 3px;
+  background: var(--text-3); border-radius: 50%; transition: transform .18s var(--ease), background .18s var(--ease);
+}
+.switch input:checked + .switch-slider { background: var(--accent-soft); border-color: var(--accent); }
+.switch input:checked + .switch-slider::before { transform: translateX(18px); background: var(--accent); }
+.switch input:disabled + .switch-slider { opacity: .5; cursor: not-allowed; }
 @media (max-width: 1080px) {
   .param-row:not(.param-head) { grid-template-columns: 1fr 1fr; }
   .param-cell.json { grid-column: 1 / 3; }
