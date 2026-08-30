@@ -62,47 +62,63 @@ async function hydrate() {
 watch(() => route.params.id, hydrate);
 onMounted(hydrate);
 
-// ---------- 可用变量：本地按静态作用域计算（全局 ∪ 前驱 outputs），与后端 checkVars 同规则 ----------
+// ---------- 可用变量：本地按静态作用域计算（触发参数 ∪ 前驱 outputs ∪ 内置），与后端 checkVars 同规则 ----------
 const VAR_MEANINGS = {
   pipeline_name: "流水线名称", run_no: "执行编号", started_at: "发起时间",
   pipeline_id: "流水线 ID", exec_id: "执行 ID",
 };
-// 全局变量 key：内置执行元信息 + manual 参数 key + webhook 映射 name
-function globalVarKeys() {
-  const t = current.value?.spec_json?.trigger || {};
-  return [
-    "pipeline_name", "run_no", "started_at", "pipeline_id", "exec_id",
-    ...(t.manual?.params ?? []).map((p) => p?.key),
-    ...(t.webhook?.mappings ?? []).map((m) => m?.name),
-  ].filter(Boolean);
-}
-// 节点可用变量 = 全局 ∪ 所有前驱节点声明的 outputs key（沿 edges 反向闭包）
-function localScopeKeys(n) {
+// 节点可用变量明细分组（供「插入变量」面板展示）：每组 items=[{k,t,d}]，k 变量名、t 标题、d 说明
+function varGroups(n) {
   const spec = current.value?.spec_json || {};
-  const keys = new Set(globalVarKeys());
+  const t = spec.trigger || {};
+  const groups = [];
+  const used = new Set();
+  const trig = [];
+  for (const p of t.manual?.params ?? []) {
+    if (p?.key && !used.has(p.key)) {
+      used.add(p.key);
+      const sub = [];
+      if (p.default != null && p.default !== "") sub.push("默认 " + p.default);
+      if (p.description) sub.push(p.description);
+      trig.push({ k: p.key, t: p.title || p.key, d: sub.join(" · ") });
+    }
+  }
+  for (const m of t.webhook?.mappings ?? []) {
+    if (m?.name && !used.has(m.name)) {
+      used.add(m.name);
+      trig.push({ k: m.name, t: "Webhook 提取", d: m.jsonPath || "" });
+    }
+  }
+  if (trig.length) groups.push({ g: "触发参数", items: trig });
+  // 上游节点声明的 outputs（沿 edges 反向闭包）
   const parentsOf = {};
   for (const e of spec.edges ?? []) (parentsOf[e.to] ??= []).push(e.from);
   const byId = Object.fromEntries((spec.nodes ?? []).map((x) => [x.id, x]));
+  const up = [];
   const stack = [...(parentsOf[n?.id] ?? [])];
   const seen = new Set();
   while (stack.length) {
     const id = stack.pop();
     if (seen.has(id)) continue;
     seen.add(id);
-    for (const o of byId[id]?.params?.outputs ?? []) if (o?.key) keys.add(o.key);
+    for (const o of byId[id]?.params?.outputs ?? []) {
+      if (o?.key && !used.has(o.key)) {
+        used.add(o.key);
+        up.push({ k: o.key, t: o.desc || "节点输出", d: "来自节点 " + drainId(id) });
+      }
+    }
     stack.push(...(parentsOf[id] ?? []));
   }
-  return [...keys].sort();
+  if (up.length) groups.push({ g: "上游节点输出", items: up });
+  const builtin = Object.entries(VAR_MEANINGS)
+    .filter(([k]) => !used.has(k))
+    .map(([k, label]) => ({ k, t: label, d: "运行时自动注入" }));
+  groups.push({ g: "执行内置", items: builtin });
+  return groups;
 }
-// chip 悬浮提示：内置变量给人话名，manual 参数带说明，其余标注来源
-function varTitle(k) {
-  if (VAR_MEANINGS[k]) return `内置变量 · ${VAR_MEANINGS[k]}`;
-  const p = (current.value?.spec_json?.trigger?.manual?.params ?? []).find((x) => x?.key === k);
-  if (p) return `触发参数 · ${p.title || p.key}${p.description ? " · " + p.description : ""}`;
-  const m = (current.value?.spec_json?.trigger?.webhook?.mappings ?? []).find((x) => x?.name === k);
-  if (m) return `Webhook 提取 · ${m.jsonPath || ""}`;
-  return "上游节点输出变量";
-}
+// 「插入变量」下拉面板：同一时刻只开一个，key = nodeId:field
+const varDrop = ref("");
+function toggleVarDrop(key) { varDrop.value = varDrop.value === key ? "" : key; }
 // 插入：优先在当前聚焦字段的光标处插入，否则追加到字段末尾；直接写响应式参数，无需模拟 input 事件
 const activeField = ref(null); // { el, node, field }
 function onFieldFocus(ev, n, field) { activeField.value = { el: ev.target, node: n, field }; }
@@ -110,6 +126,7 @@ function insertVar(name, n, field) {
   const snippet = "${" + name + "}";
   const p = n?.params;
   if (!p) return;
+  varDrop.value = "";
   const cur = String(p[field] ?? "");
   const af = activeField.value;
   if (af && af.node === n && af.field === field && document.contains(af.el)) {
@@ -160,7 +177,7 @@ const KIND_BADGE = { "dingtalk-corp": "钉", git: "G" };
 const selectedCred = (n) => creds.value.find((x) => x.name === n.params.robot);
 function toggleRobotDrop(id) { robotOpenId.value = robotOpenId.value === id ? "" : id; }
 function pickRobot(n, name) { n.params.robot = name; robotOpenId.value = ""; }
-function onDocClick() { if (robotOpenId.value) robotOpenId.value = ""; }
+function onDocClick() { if (robotOpenId.value) robotOpenId.value = ""; if (varDrop.value) varDrop.value = ""; }
 onMounted(() => document.addEventListener("click", onDocClick));
 
 // 审批卡片正文定制：内置占位符按流水线/执行运行时填充，前端默认给出带占位符的完整模板，避免空正文
@@ -604,8 +621,21 @@ function addMapping() { webhookMappings.value.push({ name: "", jsonPath: "" }); 
                     <label class="field-label">Shell 命令</label>
                     <textarea class="textarea mono autofit" v-model="n.params.command" rows="2" placeholder="echo 'hello cloudshuttle'" @focus="onFieldFocus($event, n, 'command')" @input="autofit"></textarea>
                     <div class="var-insert">
-                      <span class="vi-label">点选插入变量</span>
-                      <button v-for="k in localScopeKeys(n)" :key="k" type="button" class="vchip mono" :title="varTitle(k)" @click="insertVar(k, n, 'command')">{{ "${" + k + "}" }}</button>
+                      <div class="vi-wrap" @click.stop>
+                        <button type="button" class="btn btn-sm vi-btn" @click="toggleVarDrop(n.id + ':command')">
+                          插入变量
+                          <svg class="vi-caret" :class="{ flip: varDrop === n.id + ':command' }" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+                        </button>
+                        <div v-if="varDrop === n.id + ':command'" class="vi-drop">
+                          <template v-for="grp in varGroups(n)" :key="grp.g">
+                            <div class="vi-group">{{ grp.g }}</div>
+                            <button v-for="it in grp.items" :key="it.k" type="button" class="vi-item" @click="insertVar(it.k, n, 'command')">
+                              <span class="vi-l1"><code class="vi-key mono">{{ "${" + it.k + "}" }}</code><span class="vi-title">{{ it.t }}</span></span>
+                              <span v-if="it.d" class="vi-desc">{{ it.d }}</span>
+                            </button>
+                          </template>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </template>
@@ -672,8 +702,21 @@ function addMapping() { webhookMappings.value.push({ name: "", jsonPath: "" }); 
                           @input="autofit"
                         ></textarea>
                         <div class="var-insert">
-                          <span class="vi-label">点选插入变量</span>
-                          <button v-for="k in localScopeKeys(n)" :key="k" type="button" class="vchip mono" :title="varTitle(k)" @click="insertVar(k, n, 'message')">{{ "${" + k + "}" }}</button>
+                          <div class="vi-wrap" @click.stop>
+                            <button type="button" class="btn btn-sm vi-btn" @click="toggleVarDrop(n.id + ':message')">
+                              插入变量
+                              <svg class="vi-caret" :class="{ flip: varDrop === n.id + ':message' }" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+                            </button>
+                            <div v-if="varDrop === n.id + ':message'" class="vi-drop">
+                              <template v-for="grp in varGroups(n)" :key="grp.g">
+                                <div class="vi-group">{{ grp.g }}</div>
+                                <button v-for="it in grp.items" :key="it.k" type="button" class="vi-item" @click="insertVar(it.k, n, 'message')">
+                                  <span class="vi-l1"><code class="vi-key mono">{{ "${" + it.k + "}" }}</code><span class="vi-title">{{ it.t }}</span></span>
+                                  <span v-if="it.d" class="vi-desc">{{ it.d }}</span>
+                                </button>
+                              </template>
+                            </div>
+                          </div>
                         </div>
                       </template>
                       <div v-else class="md-render" v-html="approvalHtml(n)"></div>
@@ -872,16 +915,28 @@ function addMapping() { webhookMappings.value.push({ name: "", jsonPath: "" }); 
 /* 审批卡片正文：高度随内容自适应（field-sizing 为主，fit() JS 兜底旧内核） */
 .card-body { min-height: 108px; }
 .textarea.autofit { resize: none; overflow: hidden; field-sizing: content; }
-/* 点选插入变量：单行紧凑 chips，悬浮提示含义，替代原多段说明文字 */
-.var-insert { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0 2px; }
-.vi-label { font-size: 11px; color: var(--text-3); font-weight: 700; letter-spacing: .03em; }
-.vchip {
-  font-family: var(--font-mono); font-size: 11.5px; color: var(--text-2);
-  background: var(--bg-3); border: 1px solid var(--line-strong);
-  padding: 2px 8px; border-radius: 999px; cursor: pointer;
-  transition: color .15s var(--ease), border-color .15s var(--ease), background .15s var(--ease);
+/* 插入变量：按钮 + 明细下拉面板（变量名/标题/说明，信息对齐触发源表） */
+.var-insert { margin: 8px 0 2px; }
+.vi-wrap { position: relative; display: inline-block; }
+.vi-btn { display: inline-flex; align-items: center; gap: 5px; }
+.vi-caret { color: var(--text-3); transition: transform .18s var(--ease); }
+.vi-caret.flip { transform: rotate(180deg); }
+.vi-drop {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 45; width: 330px;
+  max-height: 300px; overflow: auto; padding: 5px;
+  background: var(--bg-2); border: 1px solid var(--line-strong); border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0,0,0,.35);
 }
-.vchip:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.vi-group { font-size: 10.5px; font-weight: 700; letter-spacing: .06em; color: var(--text-3); padding: 8px 8px 4px; }
+.vi-item {
+  display: flex; flex-direction: column; gap: 2px; width: 100%; text-align: left;
+  padding: 7px 8px; border-radius: 8px; cursor: pointer; border: none; background: none;
+}
+.vi-item:hover { background: var(--bg-3); }
+.vi-l1 { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.vi-key { font-size: 12px; color: var(--accent); flex: 0 0 auto; }
+.vi-title { font-size: 12px; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vi-desc { font-size: 11px; color: var(--text-2); padding-left: 2px; }
 .card-tabs { display: flex; align-items: center; gap: 6px; }
 .card-tab {
   font-size: 12px; font-weight: 600; color: var(--text-2);
