@@ -36,7 +36,7 @@ async function snapshotRev(pipelineId, rev, spec) {
 
 // ---------- 管道 ----------
 export async function listPipelines() {
-  // git_hook_secret 属敏感字段，仅能经 get/reset 接口显式获取
+  // webhook_secret 属敏感字段，仅能经 get/reset 接口显式获取
   return rows(
     await pool.query(`SELECT id, name, description, spec_json, rev, created_at, updated_at FROM pipeline ORDER BY id`)
   );
@@ -56,40 +56,63 @@ export async function createPipeline(body) {
   const specObj = resolveSpec(body);
   assertVarsResolved(specObj);
   const spec = JSON.stringify(specObj);
-  // 每个 git 仓库 hook 独立密钥，创建时生成并存库
-  const gitHookSecret = randomUUID();
+  // 每条管道的 webhook 触发独立密钥，创建时生成并存库
+  const webhookSecret = randomUUID();
   const { rows: r } = await pool.query(
-    `INSERT INTO pipeline(name, description, spec_json, git_hook_secret) VALUES($1,$2,$3::jsonb,$4) RETURNING *`,
-    [body?.name, body?.description ?? null, spec, gitHookSecret]
+    `INSERT INTO pipeline(name, description, spec_json, webhook_secret) VALUES($1,$2,$3::jsonb,$4) RETURNING *`,
+    [body?.name, body?.description ?? null, spec, webhookSecret]
   );
   await snapshotRev(r[0].id, 1, spec);
   return r[0];
 }
 
-// 查看/生成该管道的 git hook 密钥（懒生成：为空则补一个）
-export async function getGitHookSecret(id) {
+// webhook 触发地址（纯函数，可单测）：{base}/hook/webhook/{name}?secret={secret}
+// base 为空时退化为站点相对路径（前端可按需补 origin）；base 末尾多余斜杠会被去掉。
+export function buildWebhookUrl({ base = "", name, secret }) {
+  const trimmed = String(base ?? "").trim().replace(/\/+$/, "");
+  const path = `/hook/webhook/${encodeURIComponent(String(name ?? ""))}`;
+  return `${trimmed}${path}?secret=${encodeURIComponent(String(secret ?? ""))}`;
+}
+
+// 查看/生成该管道的 webhook 触发密钥与完整回调地址（懒生成：为空则补一个）
+// name 与 secret 同一条 SELECT 读出；url 由后端生成，前端只展示/复制。
+export async function getWebhookSecret(id, { base = "" } = {}) {
   const { rows: r } = await pool.query(
-    `SELECT git_hook_secret FROM pipeline WHERE id=$1`,
+    `SELECT name, webhook_secret FROM pipeline WHERE id=$1`,
     [id]
   );
   if (!r[0]) return null;
-  let secret = r[0].git_hook_secret;
+  let secret = r[0].webhook_secret;
   if (!secret) {
     secret = randomUUID();
-    await pool.query(`UPDATE pipeline SET git_hook_secret=$2 WHERE id=$1`, [id, secret]);
+    await pool.query(`UPDATE pipeline SET webhook_secret=$2 WHERE id=$1`, [id, secret]);
   }
-  return { id, gitHookSecret: secret };
+  return { ok: true, id, name: r[0].name, secret, url: buildWebhookUrl({ base, name: r[0].name, secret }) };
 }
 
-// 重置 git hook 密钥（泄露或轮换用）
-export async function resetGitHookSecret(id) {
+// 重置 webhook 触发密钥（泄露或轮换用），一并返回新的回调地址
+export async function resetWebhookSecret(id, { base = "" } = {}) {
   const secret = randomUUID();
   const { rows: r } = await pool.query(
-    `UPDATE pipeline SET git_hook_secret=$2 WHERE id=$1 RETURNING id`,
+    `UPDATE pipeline SET webhook_secret=$2 WHERE id=$1 RETURNING name`,
     [id, secret]
   );
   if (!r[0]) return null;
-  return { id, gitHookSecret: secret };
+  return { ok: true, id, name: r[0].name, secret, url: buildWebhookUrl({ base, name: r[0].name, secret }) };
+}
+
+// 调试探针：该管道最近一次 webhook 投递的原始 body（无记录时 body/receivedAt 均为 null）
+export async function getWebhookProbe(id) {
+  const { rows } = await pool.query(
+    `SELECT body, received_at FROM webhook_probe WHERE pipeline_id=$1`,
+    [id]
+  );
+  const row = rows[0];
+  return {
+    ok: true,
+    body: row?.body ?? null,
+    receivedAt: row?.received_at ? new Date(row.received_at).toISOString() : null,
+  };
 }
 
 // 查询指定钉钉企业机器人可发送的场景群（供后台选取 openConversationId）

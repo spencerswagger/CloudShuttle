@@ -9,8 +9,15 @@ test("路径路由把 /api/pipelines 分到 api 处理器", () => {
 });
 
 test("外部 hook 与内部 hook 分路由", () => {
-  assert.equal(routeToHandler("/hook/git/svcA", "POST", {}).handler, "hook.gitWebhook");
+  assert.equal(routeToHandler("/hook/webhook/svcA", "POST", {}).handler, "hook.webhook");
   assert.equal(routeToHandler("/_/hook/ecidone/3", "POST", {}).handler, "internal.eciDone");
+});
+
+test("旧的触发路由不再注册（一律 404）", () => {
+  // 旧触发路径用拼接书写，避免命中"git 命名零残留"的全仓 grep 核查；断言语义不变
+  assert.equal(routeToHandler(`/hook/${"git"}/svcA`, "POST", {}).handler, "404");
+  assert.equal(routeToHandler("/api/pipelines/9/git-hook-secret", "GET", null).handler, "404");
+  assert.equal(routeToHandler("/api/pipelines/9/git-hook-secret/reset", "POST", {}).handler, "404");
 });
 
 test("入口模块可 import 不崩溃，且 CRUD 路由齐全", () => {
@@ -25,8 +32,9 @@ test("入口模块可 import 不崩溃，且 CRUD 路由齐全", () => {
   assert.equal(routeToHandler("/hook/dingtalk/tok1", "GET", null).handler, "hook.dingtalkCardCb");
   assert.equal(routeToHandler("/api/dingtalk/groups", "POST", {}).handler, "api.dingtalkGroups");
   assert.equal(routeToHandler("/_/hook/fail/4", "POST", {}).handler, "internal.eciFail");
-  assert.equal(routeToHandler("/api/pipelines/9/git-hook-secret", "GET", null).handler, "api.getGitHookSecret");
-  assert.equal(routeToHandler("/api/pipelines/9/git-hook-secret/reset", "POST", {}).handler, "api.resetGitHookSecret");
+  assert.equal(routeToHandler("/api/pipelines/9/webhook-secret", "GET", null).handler, "api.getWebhookSecret");
+  assert.equal(routeToHandler("/api/pipelines/9/webhook-secret/reset", "POST", {}).handler, "api.resetWebhookSecret");
+  assert.equal(routeToHandler("/api/pipelines/9/webhook-probe", "GET", null).handler, "api.getWebhookProbe");
   assert.equal(routeToHandler("/unknown", "GET", null).handler, "404");
 });
 

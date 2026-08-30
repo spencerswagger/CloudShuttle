@@ -26,13 +26,22 @@ function fakeDeps(over = {}) {
   };
 }
 
-test("gitWebhook 触发首次推进并派发 shell", async () => {
+test("webhook 触发的等价链路：装配层造好 spec 后 run 首次推进并派发 shell", async () => {
+  // 生产链路：hook.webhook → hydrateForRun(loadSpec 读 spec + 开执行拿到 execId) → orchestrator.run
+  // （orchestrator 中历史遗留的 git 命名触发方法已作为无调用方的死代码删除，此用例改为直接走 run 的等价断言）
+  const calls = [];
   const adv = async ({ spec, snap }) => {
+    calls.push(["advance", spec.execId, snap]);
     return { spec, snap: { done: [], waiting: "n1" }, waiting: "n1" };
   };
-  const orch = createOrchestrator({ ...fakeDeps(), advance: adv });
-  const out = await orch.onGitWebhook({ pipelineId: 1, trigger: { ref: "main" } });
+  const deps = fakeDeps({ advance: adv });
+  const orch = createOrchestrator(deps);
+  const specWithExec = { ...(await deps.loadSpec(1, { trigger: "webhook", body: { ref: "main" } })), execId: 11 };
+  const out = await orch.run(specWithExec);
   assert.equal(out.waiting, "n1");
+  // 新执行先清同 id 旧快照，再带着 execId 推进一次
+  assert.deepEqual(deps.calls.filter((c) => c[0] === "clear"), [["clear", 11]]);
+  assert.deepEqual(calls.map((c) => c[1]), [11]);
 });
 
 test("eciDone 标记节点后推进到审批卡点", async () => {

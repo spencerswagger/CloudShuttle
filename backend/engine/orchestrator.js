@@ -1,6 +1,9 @@
 // hook 分发与续跑编排：回调已到 → 标记节点终态 + 再推进
-// 依赖注入：loadSpec(读 spec 并携带 execId) / loadSpecForExec(按 execId 读 spec)
-//           snapshotStore(快照读写) / advance(一次推进) / record(写节点记录)。
+// 依赖注入：loadSpec(读 spec 并携带 execId，作为 loadSpecForExec 的默认实现)
+//           loadSpecForExec(按 execId 读 spec) / snapshotStore(快照读写)
+//           advance(一次推进) / record(写节点记录)。
+// 触发（手动/webhook）不在本层装配 spec：由控制面 hydrateForRun 造好携带 execId 的
+// spec 与 environment 后直接调用 run，故本层不保留任何独立的 webhook 触发入口（历史死代码已删）。
 export function createOrchestrator({
   loadSpec,
   loadSpecForExec = loadSpec,
@@ -55,12 +58,6 @@ export function createOrchestrator({
 
   return {
     run,
-    // git webhook：loadSpec 得到携带 execId 的 spec，载入快照后推进；
-    // authority 来自请求 Host，写入 spec 供回调拼绝对地址
-    async onGitWebhook({ pipelineId, trigger, authority }) {
-      const spec = await loadSpec(pipelineId, trigger, authority ? { authority } : undefined);
-      return run(spec);
-    },
     // ECI 结束回调：节点成功 → 载入 spec 续跑到下一节点
     async onEciDone({ execId, nodeId }) {
       console.log(`[orchestrator] exec=${execId} 收到 ECI 节点 ${nodeId} 成功回调，标记完成并继续推进`);

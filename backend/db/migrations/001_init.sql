@@ -7,12 +7,10 @@ CREATE TABLE IF NOT EXISTS pipeline (
   description TEXT,
   spec_json JSONB NOT NULL DEFAULT '{}',
   rev INT NOT NULL DEFAULT 1,
-  git_hook_secret TEXT NOT NULL DEFAULT '',   -- git webhook 访问密钥（创建时生成）
+  webhook_secret TEXT NOT NULL DEFAULT '',    -- webhook 触发访问密钥（创建时生成）
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-
-ALTER TABLE pipeline ADD COLUMN IF NOT EXISTS git_hook_secret TEXT NOT NULL DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS pipeline_rev (
   id BIGSERIAL PRIMARY KEY,
@@ -62,6 +60,14 @@ CREATE TABLE IF NOT EXISTS webhook_registry (
 ALTER TABLE webhook_registry ADD COLUMN IF NOT EXISTS secret TEXT NOT NULL DEFAULT '';
 -- 存量库兼容：补充 credential 列，回调更新卡片状态时据此反查机器人凭证刷新 accessToken
 ALTER TABLE webhook_registry ADD COLUMN IF NOT EXISTS credential TEXT NOT NULL DEFAULT '';
+
+-- webhook 触发调试探针：每个管道只留最近一次收到的原始 body（含密钥校验失败的情况），
+-- 用于排查第三方到底发了什么；不设外键，管道删除后残留行无害。
+CREATE TABLE IF NOT EXISTS webhook_probe (
+  pipeline_id INT PRIMARY KEY,
+  body JSONB NOT NULL,
+  received_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 CREATE TABLE IF NOT EXISTS credential (
   id BIGSERIAL PRIMARY KEY,

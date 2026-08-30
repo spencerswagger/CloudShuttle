@@ -38,10 +38,11 @@ const RE = {
   executionOne: /^\/api\/executions\/(\d+)$/,
   executionCancel: /^\/api\/executions\/(\d+)\/cancel$/,
   executionRerun: /^\/api\/executions\/(\d+)\/rerun$/,
-  gitHookSecret: /^\/api\/pipelines\/(\d+)\/git-hook-secret$/,
-  gitHookSecretReset: /^\/api\/pipelines\/(\d+)\/git-hook-secret\/reset$/,
+  webhookSecret: /^\/api\/pipelines\/(\d+)\/webhook-secret$/,
+  webhookSecretReset: /^\/api\/pipelines\/(\d+)\/webhook-secret\/reset$/,
+  webhookProbe: /^\/api\/pipelines\/(\d+)\/webhook-probe$/,
   pipelineRun: /^\/api\/pipelines\/(\d+)\/run$/,
-  git: /^\/hook\/git\/([^/]+)/,
+  webhookTrigger: /^\/hook\/webhook\/([^/]+)/,
   dingtalkCard: /^\/hook\/dingtalk\/card\/([^/]+)/,
   dingtalkCardFixed: /^\/hook\/dingtalk\/card\/?$/,
   dingtalk: /^\/hook\/dingtalk\/([^/]+)/,
@@ -103,13 +104,16 @@ export function routeToHandler(path, method, body) {
     if (m === "GET") return { handler: "api.listPipelines" };
     if (m === "POST") return { handler: "api.createPipeline" };
   }
-  if (RE.gitHookSecret.test(path)) {
-    if (m === "GET") return { handler: "api.getGitHookSecret" };
+  if (RE.webhookSecret.test(path)) {
+    if (m === "GET") return { handler: "api.getWebhookSecret" };
   }
-  if (RE.gitHookSecretReset.test(path)) {
-    if (m === "POST") return { handler: "api.resetGitHookSecret" };
+  if (RE.webhookSecretReset.test(path)) {
+    if (m === "POST") return { handler: "api.resetWebhookSecret" };
   }
-  if (RE.git.test(path)) return { handler: "hook.gitWebhook" };
+  if (RE.webhookProbe.test(path)) {
+    if (m === "GET") return { handler: "api.getWebhookProbe" };
+  }
+  if (RE.webhookTrigger.test(path)) return { handler: "hook.webhook" };
   if (RE.dingtalkCard.test(path)) return { handler: "hook.dingtalkCardCb" };
   if (RE.dingtalkCardFixed.test(path)) return { handler: "hook.dingtalkCardCb" };
   if (RE.dingtalk.test(path)) return { handler: "hook.dingtalkCardCb" };
@@ -330,7 +334,8 @@ function parseHost(event) {
   const h = event?.headers ?? {};
   return h["x-forwarded-host"] || h["X-Forwarded-Host"] || h.host || h.Host || null;
 }
-// 回拨基地址：显式 CONTROL_BASE 优先，否则由请求 Host 推导（保存钉钉凭证时注册回调用）
+// 回拨基地址：显式 CONTROL_BASE 优先，否则由请求 Host 推导
+// （保存钉钉凭证注册回调、以及生成管道 webhook 回调地址时都用它）
 function resolveCallbackBase(event) {
   if (config.controlPlaneBase) return config.controlPlaneBase;
   const host = parseHost(event);
@@ -415,18 +420,19 @@ const DISPATCH = {
       },
     };
   },
-  "api.getGitHookSecret": async ({ path }) => {
-    const out = await api.getGitHookSecret(Number(m(path, RE.gitHookSecret)));
+  "api.getWebhookSecret": async ({ path, event }) => {
+    const out = await api.getWebhookSecret(Number(m(path, RE.webhookSecret)), { base: resolveCallbackBase(event) });
     if (!out) return { status: 404, body: { ok: false, code: "NOT_FOUND", message: "管道不存在" } };
     return ok(out);
   },
-  "api.resetGitHookSecret": async ({ path }) => {
-    const out = await api.resetGitHookSecret(Number(m(path, RE.gitHookSecretReset)));
+  "api.resetWebhookSecret": async ({ path, event }) => {
+    const out = await api.resetWebhookSecret(Number(m(path, RE.webhookSecretReset)), { base: resolveCallbackBase(event) });
     if (!out) return { status: 404, body: { ok: false, code: "NOT_FOUND", message: "管道不存在" } };
     return ok(out);
   },
-  "hook.gitWebhook": async ({ app, path, body, event }) =>
-    ok(hook.gitWebhook(
+  "api.getWebhookProbe": async ({ path }) => ok(api.getWebhookProbe(Number(m(path, RE.webhookProbe)))),
+  "hook.webhook": async ({ app, path, body, event }) =>
+    ok(hook.webhook(
       async ({ pipelineId, payload, authority }) => {
         const { spec, environment } = await app.hydrateForRun({
           pipelineId, kind: "webhook", webhookBody: payload, authority,
@@ -434,7 +440,7 @@ const DISPATCH = {
         return app.orchestrator.run(spec, environment);
       },
       {
-        pipelineName: m(path, RE.git), payload: body, authority: parseHost(event),
+        pipelineName: m(path, RE.webhookTrigger), payload: body, authority: parseHost(event),
         secret: qs(path, "secret"),
       },
     )),
@@ -489,6 +495,12 @@ const DISPATCH = {
       token: qs(path, "token"), secret: qs(path, "secret"), reason: body?.reason,
     }),
 };
+
+// 供单测校验路由双注册：routeToHandler 给出的 handler 名必须在 DISPATCH 中存在，
+// 否则运行期一定 404（新增端点时两处都要登记）。
+export function isDispatched(name) {
+  return Object.prototype.hasOwnProperty.call(DISPATCH, name);
+}
 
 function parseEvent(event) {
   const rawPath = event?.path ?? event?.url ?? "/";

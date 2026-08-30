@@ -1,5 +1,5 @@
-// backend/handlers/hook.js —— /hook/* 外部回调（git webhook / 钉钉审批）
-// git 与钉钉回调均需携带访问密钥；钉钉回调的 exec_id/node_id 以库内登记为准，防篡改。
+// backend/handlers/hook.js —— /hook/* 外部回调（webhook 触发 / 钉钉审批）
+// webhook 与钉钉回调均需携带访问密钥；钉钉回调的 exec_id/node_id 以库内登记为准，防篡改。
 import { pool } from "../db/pg.js";
 import { safeEqual } from "../security.js";
 
@@ -127,26 +127,52 @@ export async function updateDeliveredCard({ credential, token, status, getCreden
   console.log(`[dingtalk] ✔ 审批卡片状态更新成功：token=${token} status=${status}`);
 }
 
-// 按管道名解析 pipeline，返回 { pipelineId, gitHookSecret }（轻量查询 webhook 触发定位）
+// 按管道名解析 pipeline，返回 { pipelineId, webhookSecret }（轻量查询 webhook 触发定位）
 export async function resolvePipelineByName(name) {
-  const { rows: r } = await pool.query(`SELECT id, git_hook_secret FROM pipeline WHERE name=$1`, [name]);
+  const { rows: r } = await pool.query(`SELECT id, webhook_secret FROM pipeline WHERE name=$1`, [name]);
   if (!r[0]) throw new Error(`pipeline not found: ${name}`);
-  return { pipelineId: r[0].id, gitHookSecret: r[0].git_hook_secret ?? "" };
+  return { pipelineId: r[0].id, webhookSecret: r[0].webhook_secret ?? "" };
 }
 
-// git webhook：校验该仓库独立的访问密钥（创建时生成、落库），未配置则拒绝；
+// 调试探针的 SQL 与参数（纯函数，可单测）：每个管道只保留最近一次收到的 body
+export function probeStatement(pipelineId, body) {
+  return {
+    sql: `INSERT INTO webhook_probe(pipeline_id, body) VALUES($1,$2::jsonb)
+          ON CONFLICT (pipeline_id) DO UPDATE SET body=EXCLUDED.body, received_at=now()`,
+    params: [pipelineId, JSON.stringify(body ?? {})],
+  };
+}
+
+// 记录本次 webhook 收到的原始 body，供 GET /api/pipelines/:id/webhook-probe 排障查看。
+// 任何异常只告警，绝不影响 webhook 主流程（探针是辅助，不是前提）；query 可注入便于单测。
+export async function recordProbe(pipelineId, body, query = (sql, params) => pool.query(sql, params)) {
+  try {
+    const { sql, params } = probeStatement(pipelineId, body);
+    await query(sql, params);
+  } catch (err) {
+    console.warn(`[webhook] 探针写入失败 pipeline=${pipelineId}: ${err?.message ?? err}`);
+  }
+}
+
+// webhook 触发：校验该管道独立的访问密钥（创建时生成、落库），未配置则拒绝；
 // 鉴权通过后转交 run（由控制面注入，内部完成 spec 读取、webhook 变量装配与编排执行）。
 // run 入参 { pipelineId, payload, authority }，返回 orchestrator.run 的结果（含 waiting）。
-export async function gitWebhook(run, { pipelineName, payload, authority, secret }) {
-  const { pipelineId, gitHookSecret } = await resolvePipelineByName(pipelineName);
-  if (!gitHookSecret) {
-    return { status: 503, body: { ok: false, code: "HOOK_NOT_CONFIGURED", message: "该管道的 git hook 密钥未配置" } };
+// resolve / probe 可注入（默认走库），便于对密钥校验与探针记录点做单测。
+export async function webhook(
+  run,
+  { pipelineName, payload, authority, secret, resolve = resolvePipelineByName, probe = recordProbe }
+) {
+  const { pipelineId, webhookSecret } = await resolve(pipelineName);
+  // 探针记录点：定位到管道后立即记录，早于密钥校验，故密钥错误的投递也能看到实际 body
+  await probe(pipelineId, payload ?? {});
+  if (!webhookSecret) {
+    return { status: 503, body: { ok: false, code: "HOOK_NOT_CONFIGURED", message: "该管道的 webhook 密钥未配置" } };
   }
-  if (!safeEqual(gitHookSecret, secret)) {
-    return { status: 401, body: { ok: false, code: "UNAUTHORIZED", message: "git webhook 密钥错误" } };
+  if (!safeEqual(webhookSecret, secret)) {
+    return { status: 401, body: { ok: false, code: "UNAUTHORIZED", message: "webhook 密钥错误" } };
   }
   const out = await run({ pipelineId, payload: payload ?? {}, authority });
   return { status: 200, body: { ok: true, waiting: out?.waiting ?? null } };
 }
 
-// 钉钉审批卡片按钮回调请见 dingtalkCardCb（上方），此处仅保留 git 逻辑
+// 钉钉审批卡片按钮回调请见 dingtalkCardCb（上方），此处仅保留 webhook 触发逻辑
