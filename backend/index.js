@@ -324,10 +324,25 @@ async function buildApp() {
 function m(path, re) {
   return path.match(re)?.[1] ?? null;
 }
-function qs(path, key) {
-  const i = path.indexOf("?");
+// 取原始 query 参数（P0-1）：dispatch 上下文里的 path 已在 "?" 处截断（供路由精确匹配），
+// query 必须从 parseEvent 保留的 rawPath 读。优先级：ctx.rawPath → 原始 FC 事件的
+// rawPath/path/url（部分触发器把 query 拼在 path/url 里）→ ctx.path（已截断，取不到即 null）。
+// ctx 传 FC 事件对象本身同样可用。
+export function qsOf(ctx, key) {
+  const s = ctx ?? {};
+  const ev = s.event ?? s;
+  let raw = String(s.rawPath ?? ev.rawPath ?? ev.path ?? ev.url ?? s.path ?? "");
+  // 调用方直接传原始事件（未过 parseEvent）时，同样补齐独立存放的 query 字段
+  if (!raw.includes("?")) raw += extraQueryOf(ev);
+  const i = raw.indexOf("?");
   if (i < 0) return null;
-  return new URLSearchParams(path.slice(i + 1)).get(key) ?? null;
+  return new URLSearchParams(raw.slice(i + 1)).get(key) ?? null;
+}
+// 路径段还原（P0-2）：生成端 buildWebhookUrl 用 encodeURIComponent(name)，消费端必须解码，
+// 否则中文管道名带着百分号串去 WHERE name=$1 → 永远查不到并抛错。非法编码回退原串。
+export function decodePathSegment(seg) {
+  if (seg == null) return seg;
+  try { return decodeURIComponent(String(seg)); } catch { return String(seg); }
 }
 // 从请求 header 取可回拨的 host（供 CONTROL_BASE 自动推导）
 function parseHost(event) {
@@ -362,13 +377,10 @@ const DISPATCH = {
   "api.updatePipeline": async ({ path, body }) => ok(api.updatePipeline(Number(m(path, RE.pipelineOne)), body)),
   "api.deletePipeline": async ({ path }) => ok(api.deletePipeline(Number(m(path, RE.pipelineOne)))),
   "api.getPipeline": async ({ path }) => ok(api.getPipeline(Number(m(path, RE.pipelineOne)))),
-  "api.getNodeScope": async ({ path, event }) => {
-    const id = Number(m(path, RE.pipelineScope));
-    const raw = event?.path ?? event?.url ?? path;
-    const node = raw && raw.indexOf("?") >= 0
-      ? new URLSearchParams(raw.slice(raw.indexOf("?") + 1)).get("node")
-      : null;
-    return ok(api.getNodeScope(id, node));
+  "api.getNodeScope": async (ctx) => {
+    const { path } = ctx;
+    // node 参数在 query 里，统一走 qsOf 读原始路径（原先就地解析 event.path 的写法并入此处）
+    return ok(api.getNodeScope(Number(m(path, RE.pipelineScope)), qsOf(ctx, "node")));
   },
   "api.listCredentials": async () => ok(api.listCredentials()),
   "api.createCredential": async ({ app, body, event }) =>
@@ -431,8 +443,11 @@ const DISPATCH = {
     return ok(out);
   },
   "api.getWebhookProbe": async ({ path }) => ok(api.getWebhookProbe(Number(m(path, RE.webhookProbe)))),
-  "hook.webhook": async ({ app, path, body, event }) =>
-    ok(hook.webhook(
+  "hook.webhook": async (ctx) => {
+    const { app, path, body, event } = ctx;
+    // hook.webhook 自己返回 { status, body }（200/401/503），不能再套 ok()：
+    // 套了会把任何拒绝都包成 HTTP 200，第三方与本方探针语义同时失真（与 R3 的 http_status 同源）
+    return hook.webhook(
       async ({ pipelineId, payload, authority }) => {
         const { spec, environment } = await app.hydrateForRun({
           pipelineId, kind: "webhook", webhookBody: payload, authority,
@@ -440,19 +455,24 @@ const DISPATCH = {
         return app.orchestrator.run(spec, environment);
       },
       {
-        pipelineName: m(path, RE.webhookTrigger), payload: body, authority: parseHost(event),
-        secret: qs(path, "secret"),
+        // 管道名是百分号编码的路径段，先还原再查库；secret 在 query 里，从 rawPath 读
+        pipelineName: decodePathSegment(m(path, RE.webhookTrigger)),
+        payload: body, authority: parseHost(event),
+        secret: qsOf(ctx, "secret"),
       },
-    )),
-  "hook.dingtalkCardCb": async ({ app, path, body }) =>
-    hook.dingtalkCardCb(app.orchestrator, {
+    );
+  },
+  "hook.dingtalkCardCb": async (ctx) => {
+    const { app, path, body } = ctx;
+    return hook.dingtalkCardCb(app.orchestrator, {
       // 固定路由 /hook/dingtalk/card 不含 token：不能回退到 RE.dingtalk，
       // 否则会把 "card" 误当 token，导致永远 403；token 必须取自 body.outTrackId。
       token:
         m(path, RE.dingtalkCard) ||
         (RE.dingtalkCardFixed.test(path) ? null : m(path, RE.dingtalk)),
-      secret: qs(path, "secret"),
-      decision: qs(path, "decision"),
+      // secret/decision 走 URL query（新版 routeKey 回调不带它们，此时为 null 属正常）
+      secret: qsOf(ctx, "secret"),
+      decision: qsOf(ctx, "decision"),
       body,
       lookup: internal.lookupRegistry,
       updateCard: (payload) =>
@@ -462,7 +482,8 @@ const DISPATCH = {
           getAccessToken: app.dingtalkTokenCache,
           httpClient: axios,
         }),
-    }),
+    });
+  },
   "api.dingtalkGroups": async ({ app, body }) =>
     ok(api.listDingtalkGroups({
       credential: body?.credential,
@@ -486,14 +507,19 @@ const DISPATCH = {
       getAccessToken: app.dingtalkTokenCache,
       httpClient: axios,
     })),
-  "internal.eciDone": async ({ app, path, body }) =>
-    internal.eciDone(app.orchestrator, {
-      token: qs(path, "token"), secret: qs(path, "secret"), result: body,
-    }),
-  "internal.eciFail": async ({ app, path, body }) =>
-    internal.eciFail(app.orchestrator, {
-      token: qs(path, "token"), secret: qs(path, "secret"), reason: body?.reason,
-    }),
+  "internal.eciDone": async (ctx) => {
+    const { app, body } = ctx;
+    // token/secret 拼在回调 URL 的 query 上，必须从 rawPath 读
+    return internal.eciDone(app.orchestrator, {
+      token: qsOf(ctx, "token"), secret: qsOf(ctx, "secret"), result: body,
+    });
+  },
+  "internal.eciFail": async (ctx) => {
+    const { app, body } = ctx;
+    return internal.eciFail(app.orchestrator, {
+      token: qsOf(ctx, "token"), secret: qsOf(ctx, "secret"), reason: body?.reason,
+    });
+  },
 };
 
 // 供单测校验路由双注册：routeToHandler 给出的 handler 名必须在 DISPATCH 中存在，
@@ -502,15 +528,40 @@ export function isDispatched(name) {
   return Object.prototype.hasOwnProperty.call(DISPATCH, name);
 }
 
-function parseEvent(event) {
-  const rawPath = event?.path ?? event?.url ?? "/";
-  const path = String(rawPath).split("?")[0];
+// 解析 FC 事件为 { path, rawPath, method, body }。
+// path 在 "?" 处截断，仅供路由正则与路径段提取使用；rawPath 保留带 query 的原值，
+// query 参数一律经 qsOf(ctx, key) 从 rawPath 读（P0-1：早先只下传截断后的 path，
+// 导致 webhook secret / eci 回调 token+secret / 审批回调 decision 恒为 null）。
+// 部分事件形态（API 网关代理 / FC 代码包）不把 query 拼在 path 里，而是放在
+// rawQueryString / queryParameters，这里一并归一回 rawPath，避免同样的 query 丢失。
+export function parseEvent(event) {
+  const requestPath = String(event?.path ?? event?.url ?? "/");
+  const path = requestPath.split("?")[0];
+  const rawPath = requestPath.includes("?") ? requestPath : `${path}${extraQueryOf(event)}`;
   const method = (event?.httpMethod ?? event?.method ?? "GET").toUpperCase();
   let body = event?.body;
   if (typeof body === "string") {
     try { body = body ? JSON.parse(body) : null; } catch { body = null; }
   }
-  return { path, method, body };
+  return { path, rawPath, method, body };
+}
+
+// 事件里独立存放的 query（path 无 "?" 时的补充来源）；返回带前导 "?" 的串或空串
+function extraQueryOf(event) {
+  const q = event?.rawQueryString ?? event?.queryString ?? "";
+  if (typeof q === "string" && q) return `?${q.replace(/^\?/, "")}`;
+  const params = event?.queryParameters ?? event?.multiValueQueryStringParameters;
+  if (params && typeof params === "object") {
+    const usp = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) {
+      for (const one of Array.isArray(v) ? v : [v]) {
+        if (one != null) usp.append(k, String(one));
+      }
+    }
+    const s = usp.toString();
+    if (s) return `?${s}`;
+  }
+  return "";
 }
 
 let appPromise = null;
@@ -522,7 +573,7 @@ async function getApp() {
 // ---------- FC HTTP 触发器入口 ----------
 export async function handler(event) {
   const requestId = randomUUID();
-  const { path, method, body } = parseEvent(event);
+  const { path, rawPath, method, body } = parseEvent(event);
   const startedAt = Date.now();
   const finish = (status, out, warn = false) => {
     const ms = Date.now() - startedAt;
@@ -545,7 +596,8 @@ export async function handler(event) {
       return finish(404, { ok: false, code: "NOT_FOUND", message: "请求的接口不存在", requestId }, true);
     }
     const app = await getApp();
-    const { status, body: out } = await job({ app, path, method, body, event });
+    // rawPath 一并下传：dispatch 里凡读 query 都经 qsOf(ctx, key) 取原始路径
+    const { status, body: out } = await job({ app, path, rawPath, method, body, event });
     return finish(status, out);
   } catch (err) {
     const reason = `[${requestId}] ${method} ${path} FAILED: ` + (err?.detail ? `${err.detail} | ` : "") + (err?.stack || err);

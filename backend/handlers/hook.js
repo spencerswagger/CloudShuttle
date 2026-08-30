@@ -1,5 +1,10 @@
 // backend/handlers/hook.js —— /hook/* 外部回调（webhook 触发 / 钉钉审批）
-// webhook 与钉钉回调均需携带访问密钥；钉钉回调的 exec_id/node_id 以库内登记为准，防篡改。
+// 两者的鉴权口径不同，勿混：
+//   - webhook 触发：只支持 URL query 携带 ?secret=（能力边界：不支持签名头/HMAC，
+//     请求体必须是 Content-Type: application/json）；密钥按管道独立、创建时生成，未配置一律拒绝。
+//   - 钉钉审批回调：exec_id/node_id 一律以库内 webhook_registry 登记为准，防 URL 篡改。
+//     新版互动卡片走 callbackRouteKey 回调，回传体不带 secret（也不再拼在 URL 上），
+//     以随机 outTrackId 中的 token 为唯一凭据；secret 只在旧版 path/query 回调携带时才校验。
 import { pool } from "../db/pg.js";
 import { safeEqual } from "../security.js";
 
@@ -134,20 +139,44 @@ export async function resolvePipelineByName(name) {
   return { pipelineId: r[0].id, webhookSecret: r[0].webhook_secret ?? "" };
 }
 
-// 调试探针的 SQL 与参数（纯函数，可单测）：每个管道只保留最近一次收到的 body
-export function probeStatement(pipelineId, body) {
+// 探针落库上限：body 序列化后超过 256KB 只保留前 100KB 预览，避免第三方整包投递撑爆库表。
+const PROBE_MAX_BYTES = 256 * 1024;
+const PROBE_PREVIEW_CHARS = 100 * 1024;
+
+// 探针 body 落库前的归一（纯函数，可单测）：JSON 序列化 → 超限时存
+// {"_truncated":true,"preview":"<前 100KB 原文>"}；无法序列化（循环引用、BigInt 等）存占位对象。
+export function probeBodyJson(body) {
+  let json;
+  try {
+    json = JSON.stringify(body ?? {});
+    // body 为函数/symbol 时 JSON.stringify 返回 undefined
+    if (typeof json !== "string") json = "{}";
+  } catch {
+    return JSON.stringify({ _unserializable: true });
+  }
+  if (Buffer.byteLength(json, "utf8") <= PROBE_MAX_BYTES) return json;
+  return JSON.stringify({ _truncated: true, preview: json.slice(0, PROBE_PREVIEW_CHARS) });
+}
+
+// 调试探针的 SQL 与参数（纯函数，可单测）：每个管道只保留最近一次投递的 body + 处理结果，
+// 处理结束后一次性 UPSERT（P1-3：只记 body 会让用户看到「已收到」却在 401/500 上误判链路已通）。
+export function probeStatement(pipelineId, body, httpStatus = null) {
   return {
-    sql: `INSERT INTO webhook_probe(pipeline_id, body) VALUES($1,$2::jsonb)
-          ON CONFLICT (pipeline_id) DO UPDATE SET body=EXCLUDED.body, received_at=now()`,
-    params: [pipelineId, JSON.stringify(body ?? {})],
+    sql: `INSERT INTO webhook_probe(pipeline_id, body, http_status) VALUES($1,$2::jsonb,$3)
+          ON CONFLICT (pipeline_id) DO UPDATE SET body=EXCLUDED.body, http_status=EXCLUDED.http_status, received_at=now()`,
+    params: [pipelineId, probeBodyJson(body), httpStatus],
   };
 }
 
-// 记录本次 webhook 收到的原始 body，供 GET /api/pipelines/:id/webhook-probe 排障查看。
+// 记录本次 webhook 投递的原始 body 与最终处理结果（http_status：200/401/503/500），
+// 供 GET /api/pipelines/:id/webhook-probe 排障查看。
 // 任何异常只告警，绝不影响 webhook 主流程（探针是辅助，不是前提）；query 可注入便于单测。
-export async function recordProbe(pipelineId, body, query = (sql, params) => pool.query(sql, params)) {
+export async function recordProbe(
+  pipelineId, body, httpStatus = null,
+  query = (sql, params) => pool.query(sql, params)
+) {
   try {
-    const { sql, params } = probeStatement(pipelineId, body);
+    const { sql, params } = probeStatement(pipelineId, body, httpStatus);
     await query(sql, params);
   } catch (err) {
     console.warn(`[webhook] 探针写入失败 pipeline=${pipelineId}: ${err?.message ?? err}`);
@@ -158,21 +187,30 @@ export async function recordProbe(pipelineId, body, query = (sql, params) => poo
 // 鉴权通过后转交 run（由控制面注入，内部完成 spec 读取、webhook 变量装配与编排执行）。
 // run 入参 { pipelineId, payload, authority }，返回 orchestrator.run 的结果（含 waiting）。
 // resolve / probe 可注入（默认走库），便于对密钥校验与探针记录点做单测。
+// 探针在「处理结束后」记录一次，并带上本次处理结果 http_status；管道未命中（resolve 抛错）
+// 时无法定位 pipeline_id，不记录。
 export async function webhook(
   run,
   { pipelineName, payload, authority, secret, resolve = resolvePipelineByName, probe = recordProbe }
 ) {
   const { pipelineId, webhookSecret } = await resolve(pipelineName);
-  // 探针记录点：定位到管道后立即记录，早于密钥校验，故密钥错误的投递也能看到实际 body
-  await probe(pipelineId, payload ?? {});
-  if (!webhookSecret) {
-    return { status: 503, body: { ok: false, code: "HOOK_NOT_CONFIGURED", message: "该管道的 webhook 密钥未配置" } };
+  let status;
+  try {
+    if (!webhookSecret) {
+      status = 503;
+      return { status, body: { ok: false, code: "HOOK_NOT_CONFIGURED", message: "该管道的 webhook 密钥未配置" } };
+    }
+    if (!safeEqual(webhookSecret, secret)) {
+      status = 401;
+      return { status, body: { ok: false, code: "UNAUTHORIZED", message: "webhook 密钥错误" } };
+    }
+    const out = await run({ pipelineId, payload: payload ?? {}, authority });
+    status = 200;
+    return { status, body: { ok: true, waiting: out?.waiting ?? null } };
+  } finally {
+    // run 抛错（编排/入库失败）时 status 仍为空，按 500 记录；probe 自身不会抛。
+    await probe(pipelineId, payload ?? {}, status ?? 500);
   }
-  if (!safeEqual(webhookSecret, secret)) {
-    return { status: 401, body: { ok: false, code: "UNAUTHORIZED", message: "webhook 密钥错误" } };
-  }
-  const out = await run({ pipelineId, payload: payload ?? {}, authority });
-  return { status: 200, body: { ok: true, waiting: out?.waiting ?? null } };
 }
 
 // 钉钉审批卡片按钮回调请见 dingtalkCardCb（上方），此处仅保留 webhook 触发逻辑

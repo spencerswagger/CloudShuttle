@@ -163,7 +163,8 @@ docker push registry.cn-hangzhou.aliyuncs.com/<ns>/cloudshuttle-runner:0.1
 
 - 用节点 `params.image` / `params.command` / `env` / `resource` / `timeout`；
 - 给容器注入环境：`IMAGE`、`COMMAND`、`CLOUDSHUTTLE_JOB_URL`、`CLOUDSHUTTLE_TOKEN`、`CLOUDSHUTTLE_EXEC_ID`、`CLOUDSHUTTLE_NODE_ID`、`CLOUDSHUTTLE_CB_BASE`（与 `runner/run.sh` 读取对应）；
-- 容器退出后回调 `/_/hook/ecidone/{execId}`（成功）或 `/_/hook/fail/{execId}`（失败）。
+- 容器退出后回调 `/_/hook/ecidone/{execId}`（成功）或 `/_/hook/fail/{execId}`（失败）；回调 URL 由控制面生成，
+  鉴权双因子走 query：`?token=<回调token>&secret=<回调密钥>`（与 `webhook_registry` 登记记录比对，且 `/_/` 仅内网可访问）。
 
 本地单测以 mock `create` 注入，不依赖真实云资源，因此不接入也可跑通单测。
 
@@ -171,10 +172,28 @@ docker push registry.cn-hangzhou.aliyuncs.com/<ns>/cloudshuttle-runner:0.1
 
 ## 端到端验收（demo-rollout）
 
-POST 一个 git webhook：
+### webhook 触发地址与管理端点
+
+触发地址**由后端生成**（管道名做百分号编码，中文/空格名都可用；后端消费时解码还原），在流水线编辑页直接复制即可：
+
 ```bash
-curl -X POST http://localhost:9000/hook/git/demo-rollout \
+# {管道名} 为百分号编码后的 name，secret 为该管道独立密钥
+curl -X POST 'http://localhost:9000/hook/webhook/demo-rollout?secret=<你的密钥>' \
   -H 'content-type: application/json' -d '{"ref":"refs/heads/main"}'
 ```
+
+**能力边界（务必按此对接第三方）**：
+
+- 请求体只支持 `Content-Type: application/json`；平台把 body 原样存入执行留痕，并按节点配置的 JSONPath 映射成变量；
+- 鉴权只支持 **URL query 携带 `?secret=`**，**不支持签名头 / HMAC 校验**（GitHub 的 `X-Hub-Signature-256` 之类一律不校验）；密钥按管道独立、创建时生成；
+- 返回码：`200` 触发成功、`401` 密钥不匹配、`503` 该管道密钥未配置、`404` 路由不存在、`500` 处理抛错；
+- **改名会使触发地址变化**（地址里带的是管道名），改名后需重新复制地址给第三方。
+
+| 管理端点 | 方法 | 用途与返回 |
+|---|---|---|
+| `/api/pipelines/:id/webhook-secret` | GET | 取该管道的密钥与完整触发地址 `{ ok, id, name, secret, url }`；密钥为空时懒生成。密钥**只能**经此接口与下面的 reset 显式获取，常规的管道 list/get/create/update 返显不含 `webhook_secret` |
+| `/api/pipelines/:id/webhook-secret/reset` | POST | 轮换密钥（泄露/定期换），返回新的 `{ ok, id, name, secret, url }`；拿到新地址后需到第三方同步更新 |
+| `/api/pipelines/:id/webhook-probe` | GET | 调试探针：该管道**最近一次**投递的 `{ ok, body, receivedAt, httpStatus }`。`body` 为第三方真实请求体（序列化超 256KB 时只存前 100KB 预览 `{"_truncated":true,"preview":"…"}`）；`httpStatus` 是那次投递的处理结果（200/401/503/500，`null`=尚无记录）。密钥错的投递也会记录，故 401 时仍能看到 body |
+
 期望流转：`running → (shell→ECI) → 发审批卡片 → (通过) → succeeded`。
 跑之前：确认已创建名为 `demo-robot` 的钉钉机器人凭证（approval 节点 `params.robot` 引用它）。

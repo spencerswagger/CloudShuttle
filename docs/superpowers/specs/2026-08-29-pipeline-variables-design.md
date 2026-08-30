@@ -102,7 +102,9 @@ git 平台事件并无统一协议——因此 git 就是 webhook 的一种，�
 * **manual**：参数 schema 编辑器——增删改 `{key,title,type,enum,default,required,description,placeholder}`，
   type 映射到项目现有控件（string/text/enum/number/boolean），不引入 @formily 运行时。
 
-* **webhook**：展示/复制该流水线的 webhook URL（沿用 `git_hook_secret` 鉴权机制）；平台模板下拉
+* **webhook**：展示/复制该流水线的 webhook URL（地址由后端生成，鉴权沿用**该管道独立的 `webhook_secret`**，
+  经 URL query `?secret=` 携带；密钥只在 `webhook-secret` / `webhook-secret/reset` 接口显式下发，
+  常规管道返显不含它。能力边界：仅 `application/json` body + URL secret，不支持签名头）；平台模板下拉
   （GitHub / GitLab 一键套 JSONPath）+ 映射项列表 `(name, jsonPath)`。
 
 **运行弹窗**：按 manual schema 用现有控件渲染表单，填值后注入并触发执行；webhook 触发走 URL。

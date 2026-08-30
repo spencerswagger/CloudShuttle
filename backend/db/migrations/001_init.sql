@@ -61,11 +61,14 @@ ALTER TABLE webhook_registry ADD COLUMN IF NOT EXISTS secret TEXT NOT NULL DEFAU
 -- 存量库兼容：补充 credential 列，回调更新卡片状态时据此反查机器人凭证刷新 accessToken
 ALTER TABLE webhook_registry ADD COLUMN IF NOT EXISTS credential TEXT NOT NULL DEFAULT '';
 
--- webhook 触发调试探针：每个管道只留最近一次收到的原始 body（含密钥校验失败的情况），
--- 用于排查第三方到底发了什么；不设外键，管道删除后残留行无害。
+-- webhook 触发调试探针：每个管道只留最近一次投递的原始 body 与本次处理结果。
+-- http_status 记录该次投递的最终处理结果（200=触发成功、401=密钥不匹配、503=密钥未配置、
+-- 500=处理抛错），避免用户只看到「已收到 body」却在鉴权/执行失败时误判链路已通。
+-- 不设外键，管道删除后残留行无害；pipeline_id 用 BIGINT 对齐 pipeline.id。
 CREATE TABLE IF NOT EXISTS webhook_probe (
-  pipeline_id INT PRIMARY KEY,
+  pipeline_id BIGINT PRIMARY KEY,
   body JSONB NOT NULL,
+  http_status INT,
   received_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

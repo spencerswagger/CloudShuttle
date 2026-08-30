@@ -35,17 +35,21 @@ async function snapshotRev(pipelineId, rev, spec) {
 }
 
 // ---------- 管道 ----------
+// 管道对外返显列（共享常量，list/get/create/update 四处同源，避免漂移）：
+// webhook_secret 属敏感字段，只能经 GET /api/pipelines/:id/webhook-secret 显式获取，
+// 因此 create/update 的 RETURNING 也走这份列清单，不再用 RETURNING * 把密钥带回响应。
+export const PIPELINE_COLUMNS = "id, name, description, spec_json, rev, created_at, updated_at";
+
 export async function listPipelines() {
-  // webhook_secret 属敏感字段，仅能经 get/reset 接口显式获取
   return rows(
-    await pool.query(`SELECT id, name, description, spec_json, rev, created_at, updated_at FROM pipeline ORDER BY id`)
+    await pool.query(`SELECT ${PIPELINE_COLUMNS} FROM pipeline ORDER BY id`)
   );
 }
 
 // 详情（编辑返显用）：单条流水线，含完整 spec_json
 export async function getPipeline(id) {
   const { rows } = await pool.query(
-    `SELECT id, name, description, spec_json, rev, created_at, updated_at FROM pipeline WHERE id=$1`,
+    `SELECT ${PIPELINE_COLUMNS} FROM pipeline WHERE id=$1`,
     [id]
   );
   if (!rows[0]) throw new HttpError(404, "PIPELINE_NOT_FOUND", "流水线不存在");
@@ -59,7 +63,8 @@ export async function createPipeline(body) {
   // 每条管道的 webhook 触发独立密钥，创建时生成并存库
   const webhookSecret = randomUUID();
   const { rows: r } = await pool.query(
-    `INSERT INTO pipeline(name, description, spec_json, webhook_secret) VALUES($1,$2,$3::jsonb,$4) RETURNING *`,
+    `INSERT INTO pipeline(name, description, spec_json, webhook_secret) VALUES($1,$2,$3::jsonb,$4)
+     RETURNING ${PIPELINE_COLUMNS}`,
     [body?.name, body?.description ?? null, spec, webhookSecret]
   );
   await snapshotRev(r[0].id, 1, spec);
@@ -101,10 +106,12 @@ export async function resetWebhookSecret(id, { base = "" } = {}) {
   return { ok: true, id, name: r[0].name, secret, url: buildWebhookUrl({ base, name: r[0].name, secret }) };
 }
 
-// 调试探针：该管道最近一次 webhook 投递的原始 body（无记录时 body/receivedAt 均为 null）
+// 调试探针：该管道最近一次 webhook 投递的原始 body 与本次处理结果（httpStatus：200=触发成功、
+// 401=密钥不匹配、503=密钥未配置、500=处理抛错；null=无记录）。响应契约：
+// { ok:true, body, receivedAt, httpStatus }
 export async function getWebhookProbe(id) {
   const { rows } = await pool.query(
-    `SELECT body, received_at FROM webhook_probe WHERE pipeline_id=$1`,
+    `SELECT body, received_at, http_status FROM webhook_probe WHERE pipeline_id=$1`,
     [id]
   );
   const row = rows[0];
@@ -112,6 +119,7 @@ export async function getWebhookProbe(id) {
     ok: true,
     body: row?.body ?? null,
     receivedAt: row?.received_at ? new Date(row.received_at).toISOString() : null,
+    httpStatus: row?.http_status ?? null,
   };
 }
 
@@ -177,13 +185,16 @@ export async function listDepartmentUsers({ credential, deptId, getCredentialSec
 
 function oapiForm(data) { return new URLSearchParams(data).toString(); }
 
+// 编辑管道：name/description 与 spec 一并落库（前端可编辑这两项，之前 SET 漏掉导致改名不生效）。
+// 注意：改名后 webhook 触发地址随 name 变化，需由前端提示用户重新复制地址。
 export async function updatePipeline(id, body) {
   const specObj = resolveSpec(body);
   assertVarsResolved(specObj);
   const spec = JSON.stringify(specObj);
   const { rows: r } = await pool.query(
-    `UPDATE pipeline SET spec_json=$2::jsonb, rev=rev+1, updated_at=now() WHERE id=$1 RETURNING *`,
-    [id, spec]
+    `UPDATE pipeline SET name=$2, description=$3, spec_json=$4::jsonb, rev=rev+1, updated_at=now()
+      WHERE id=$1 RETURNING ${PIPELINE_COLUMNS}`,
+    [id, body?.name, body?.description ?? null, spec]
   );
   if (r[0]) await snapshotRev(id, r[0].rev, spec);
   return r[0];
