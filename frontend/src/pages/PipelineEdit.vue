@@ -1,11 +1,11 @@
 <!-- 流水线编辑页：路由驱动，新建(/pipelines/new) 或 编辑(/pipelines/:id) -->
 <script setup>
-import { ref, reactive, computed, onMounted, onBeforeUnmount, watch } from "vue";
+import { ref, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import draggable from "vuedraggable";
 import MarkdownIt from "markdown-it";
 import { notify } from "../lib/notify.js";
-import { getPipeline, createPipeline, updatePipeline, getPipelineHook, fetchScope } from "../api/pipeline.js";
+import { getPipeline, createPipeline, updatePipeline, getPipelineHook } from "../api/pipeline.js";
 import { fetchImages } from "../api/image.js";
 import { fetchCredentials, listDepartments, listDepartmentUsers } from "../api/credential.js";
 import RunPipelineModal from "../components/RunPipelineModal.vue";
@@ -44,7 +44,6 @@ const isNew = computed(() => !editingId.value);
 const pageTitle = computed(() => (isNew.value ? "新建流水线" : `编辑流水线${current.value.name ? " · " + current.value.name : ""}`));
 
 async function hydrate() {
-  scopes.clear();
   if (!editingId.value) { current.value = newPipeline(); return; }
   try {
     const p = await getPipeline(editingId.value);
@@ -54,8 +53,7 @@ async function hydrate() {
     const ns = current.value.spec_json?.nodes ?? [];
     if (ns.some((n) => n.type === "shell")) loadImages();
     if (ns.some((n) => n.type === "approval")) loadCreds();
-    // 可用变量懒加载：进入编辑页为每个节点拉取一次作用域（scopes 缓存，避免重复请求）
-    for (const n of ns) ensureScope(n);
+    nextTick(fitAll); // 回填内容后按内容重算各正文/命令输入框高度
   } catch (e) {
     if (e?.status === 404) notify({ type: "error", message: "未找到该流水线，可能已被删除" });
     else notify({ type: "error", message: e?.message || "加载流水线失败" });
@@ -64,42 +62,71 @@ async function hydrate() {
 watch(() => route.params.id, hydrate);
 onMounted(hydrate);
 
-// ---------- T15 可用变量提示 ----------
-// 节点可用变量懒加载缓存：nodeId -> { state: idle|loading|done, keys: [] }，缓存避免跨重渲染重复请求
-const scopes = reactive(new Map());
-const scopeOf = (n) => scopes.get(n?.id) ?? { state: "idle", keys: [] };
-const scopeKeys = (n) => scopeOf(n).keys ?? [];
-async function ensureScope(n) {
-  if (!n?.id) return;
-  const cur = scopes.get(n.id);
-  if (cur && (cur.state === "loading" || cur.state === "done")) return; // 已在途/已就绪 -> 跳过
-  // 新建未保存（无 id 无法调接口）：不请求，仅提示保存后可用
-  if (!editingId.value) { scopes.set(n.id, { state: "idle", keys: [] }); return; }
-  scopes.set(n.id, { state: "loading", keys: [] });
-  try {
-    const r = await fetchScope(editingId.value, n.id);
-    scopes.set(n.id, { state: "done", keys: r?.keys ?? [] });
-  } catch {
-    scopes.set(n.id, { state: "done", keys: [] });
+// ---------- 可用变量：本地按静态作用域计算（全局 ∪ 前驱 outputs），与后端 checkVars 同规则 ----------
+const VAR_MEANINGS = {
+  pipeline_name: "流水线名称", run_no: "执行编号", started_at: "发起时间",
+  pipeline_id: "流水线 ID", exec_id: "执行 ID",
+};
+// 全局变量 key：内置执行元信息 + manual 参数 key + webhook 映射 name
+function globalVarKeys() {
+  const t = current.value?.spec_json?.trigger || {};
+  return [
+    "pipeline_name", "run_no", "started_at", "pipeline_id", "exec_id",
+    ...(t.manual?.params ?? []).map((p) => p?.key),
+    ...(t.webhook?.mappings ?? []).map((m) => m?.name),
+  ].filter(Boolean);
+}
+// 节点可用变量 = 全局 ∪ 所有前驱节点声明的 outputs key（沿 edges 反向闭包）
+function localScopeKeys(n) {
+  const spec = current.value?.spec_json || {};
+  const keys = new Set(globalVarKeys());
+  const parentsOf = {};
+  for (const e of spec.edges ?? []) (parentsOf[e.to] ??= []).push(e.from);
+  const byId = Object.fromEntries((spec.nodes ?? []).map((x) => [x.id, x]));
+  const stack = [...(parentsOf[n?.id] ?? [])];
+  const seen = new Set();
+  while (stack.length) {
+    const id = stack.pop();
+    if (seen.has(id)) continue;
+    seen.add(id);
+    for (const o of byId[id]?.params?.outputs ?? []) if (o?.key) keys.add(o.key);
+    stack.push(...(parentsOf[id] ?? []));
+  }
+  return [...keys].sort();
+}
+// chip 悬浮提示：内置变量给人话名，manual 参数带说明，其余标注来源
+function varTitle(k) {
+  if (VAR_MEANINGS[k]) return `内置变量 · ${VAR_MEANINGS[k]}`;
+  const p = (current.value?.spec_json?.trigger?.manual?.params ?? []).find((x) => x?.key === k);
+  if (p) return `触发参数 · ${p.title || p.key}${p.description ? " · " + p.description : ""}`;
+  const m = (current.value?.spec_json?.trigger?.webhook?.mappings ?? []).find((x) => x?.name === k);
+  if (m) return `Webhook 提取 · ${m.jsonPath || ""}`;
+  return "上游节点输出变量";
+}
+// 插入：优先在当前聚焦字段的光标处插入，否则追加到字段末尾；直接写响应式参数，无需模拟 input 事件
+const activeField = ref(null); // { el, node, field }
+function onFieldFocus(ev, n, field) { activeField.value = { el: ev.target, node: n, field }; }
+function insertVar(name, n, field) {
+  const snippet = "${" + name + "}";
+  const p = n?.params;
+  if (!p) return;
+  const cur = String(p[field] ?? "");
+  const af = activeField.value;
+  if (af && af.node === n && af.field === field && document.contains(af.el)) {
+    const el = af.el;
+    const s = el.selectionStart ?? cur.length;
+    const e = el.selectionEnd ?? cur.length;
+    p[field] = cur.slice(0, s) + snippet + cur.slice(e);
+    nextTick(() => { el.focus(); const pos = s + snippet.length; el.setSelectionRange(pos, pos); fit(el); });
+  } else {
+    p[field] = cur && !cur.endsWith("\n") ? cur + "\n" + snippet : cur + snippet;
+    nextTick(fitAll);
   }
 }
-// 追踪当前聚焦的输入框，点击 chip 时把 ${name} 插入其光标处
-const activeEl = ref(null);
-function onFieldFocus(ev, n) {
-  activeEl.value = ev?.target;
-  ensureScope(n);
-}
-function insertVar(name) {
-  const el = activeEl.value;
-  if (!el || typeof el.value !== "string") return;
-  const v = `\${${name}}`;
-  const s = el.selectionStart ?? el.value.length;
-  const e = el.selectionEnd ?? el.value.length;
-  el.value = el.value.slice(0, s) + v + el.value.slice(e);
-  el.selectionStart = el.selectionEnd = s + v.length;
-  el.focus();
-  el.dispatchEvent(new Event("input", { bubbles: true })); // 触发 v-model 感知 DOM 变更
-}
+// textarea 高度自适应：CSS field-sizing 优先，此处兜底旧内核
+function fit(el) { if (!el) return; el.style.height = "auto"; el.style.height = el.scrollHeight + "px"; }
+function autofit(ev) { fit(ev.target); }
+function fitAll() { document.querySelectorAll("textarea.autofit").forEach(fit); }
 
 const NODE_KINDS = {
   shell:    { label: "Shell 执行",   accent: "var(--accent)",  icon: "M4 5l6 7-6 7m8 0h8" },
@@ -137,15 +164,15 @@ function onDocClick() { if (robotOpenId.value) robotOpenId.value = ""; }
 onMounted(() => document.addEventListener("click", onDocClick));
 
 // 审批卡片正文定制：内置占位符按流水线/执行运行时填充，前端默认给出带占位符的完整模板，避免空正文
-const APPROVAL_PLACEHOLDERS = "${pipeline_name} 流水线名 · ${run_no} 执行编号 · ${started_at} 发起时间 · ${pipeline_id} / ${exec_id}";
+// 注意：占位符 ${...} 必须放普通字符串；写进反引号模板串会被 JS 当插值导致 ReferenceError
 const DEFAULT_APPROVAL_BODY =
-  `### 人工审批请求\n\n` +
-  `| 项 | 内容 |\n|---|---|\n` +
-  `| 流水线 | ${pipeline_name} |\n` +
-  `| 执行编号 | #${run_no} |\n` +
-  `| 发起时间 | ${started_at} |\n\n` +
-  `请审核该审批请求，确认无误后点击下方按钮通过。`;
-function resetApprovalMsg(n) { n.params.message = DEFAULT_APPROVAL_BODY; }
+  "### 人工审批请求\n\n" +
+  "| 项 | 内容 |\n|---|---|\n" +
+  "| 流水线 | ${pipeline_name} |\n" +
+  "| 执行编号 | #${run_no} |\n" +
+  "| 发起时间 | ${started_at} |\n\n" +
+  "请审核该审批请求，确认无误后点击下方按钮通过。";
+function resetApprovalMsg(n) { n.params.message = DEFAULT_APPROVAL_BODY; nextTick(fitAll); }
 const approvalPreview = (n) => {
   const vars = {
     pipeline_name: "release-构建-发布", run_no: "12",
@@ -575,15 +602,10 @@ function addMapping() { webhookMappings.value.push({ name: "", jsonPath: "" }); 
                   </div>
                   <div class="field">
                     <label class="field-label">Shell 命令</label>
-                    <textarea class="textarea mono" v-model="n.params.command" rows="2" placeholder="echo 'hello cloudshuttle'" @focus="onFieldFocus($event, n)"></textarea>
-                    <div class="var-hint">
-                      <span class="var-hint-label">可用变量</span>
-                      <template v-if="isNew"><span class="muted var-hint-text">保存流水线后可在此引用节点变量</span></template>
-                      <template v-else-if="scopeOf(n).state === 'loading'"><span class="muted var-hint-text">加载中…</span></template>
-                      <template v-else-if="!scopeKeys(n).length"><span class="muted var-hint-text">当前节点无可引用变量（可引用触发源参数与前驱节点声明的 ${outputs}）</span></template>
-                      <template v-else>
-                        <button v-for="k in scopeKeys(n)" :key="k" type="button" class="ph-chip var-chip" @click="insertVar(k)">${`${k}`}</button>
-                      </template>
+                    <textarea class="textarea mono autofit" v-model="n.params.command" rows="2" placeholder="echo 'hello cloudshuttle'" @focus="onFieldFocus($event, n, 'command')" @input="autofit"></textarea>
+                    <div class="var-insert">
+                      <span class="vi-label">点选插入变量</span>
+                      <button v-for="k in localScopeKeys(n)" :key="k" type="button" class="vchip mono" :title="varTitle(k)" @click="insertVar(k, n, 'command')">{{ "${" + k + "}" }}</button>
                     </div>
                   </div>
                 </template>
@@ -642,25 +664,17 @@ function addMapping() { webhookMappings.value.push({ name: "", jsonPath: "" }); 
                       </div>
                       <template v-if="cardModeOf(n) === 'edit'">
                         <textarea
-                          class="textarea mono card-body"
+                          class="textarea mono card-body autofit"
                           v-model="n.params.message"
                           rows="4"
-                          placeholder="编写审批卡片正文（支持 Markdown），或在下方点击占位符标签插入。"
-                          @focus="onFieldFocus($event, n)"
+                          placeholder="编写审批卡片正文（支持 Markdown），点击下方变量标签可插入。"
+                          @focus="onFieldFocus($event, n, 'message')"
+                          @input="autofit"
                         ></textarea>
-                        <div class="ph-chips">
-                          <code v-for="ph in ['${pipeline_name}','${run_no}','${started_at}','${pipeline_id}','${exec_id}']" :key="ph" class="ph-chip">{{ ph }}</code>
+                        <div class="var-insert">
+                          <span class="vi-label">点选插入变量</span>
+                          <button v-for="k in localScopeKeys(n)" :key="k" type="button" class="vchip mono" :title="varTitle(k)" @click="insertVar(k, n, 'message')">{{ "${" + k + "}" }}</button>
                         </div>
-                        <div class="var-hint">
-                          <span class="var-hint-label">可用变量</span>
-                          <template v-if="isNew"><span class="muted var-hint-text">保存流水线后可在此引用节点变量</span></template>
-                          <template v-else-if="scopeOf(n).state === 'loading'"><span class="muted var-hint-text">加载中…</span></template>
-                          <template v-else-if="!scopeKeys(n).length"><span class="muted var-hint-text">当前节点无可引用变量（可引用触发源参数与前驱节点声明的 ${outputs}）</span></template>
-                          <template v-else>
-                            <button v-for="k in scopeKeys(n)" :key="k" type="button" class="ph-chip var-chip" @click="insertVar(k)">${`${k}`}</button>
-                          </template>
-                        </div>
-                        <p class="field-hint">占位符说明：{{ APPROVAL_PLACEHOLDERS }}。默认已内置模板，点击「恢复默认」可还原。</p>
                       </template>
                       <div v-else class="md-render" v-html="approvalHtml(n)"></div>
                     </div>
@@ -855,25 +869,19 @@ function addMapping() { webhookMappings.value.push({ name: "", jsonPath: "" }); 
 .cs-check { margin-left: auto; flex: 0 0 auto; color: var(--accent); }
 .cs-empty { padding: 12px; text-align: center; color: var(--text-3); font-size: 12.5px; }
 
-/* 审批卡片正文定制 */
-.card-body { resize: vertical; min-height: 70px; }
-.ph-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 2px; }
-.ph-chip {
-  font-family: var(--font-mono); font-size: 11.5px; color: var(--accent);
-  background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
-  padding: 2px 7px; border-radius: 6px;
+/* 审批卡片正文：高度随内容自适应（field-sizing 为主，fit() JS 兜底旧内核） */
+.card-body { min-height: 108px; }
+.textarea.autofit { resize: none; overflow: hidden; field-sizing: content; }
+/* 点选插入变量：单行紧凑 chips，悬浮提示含义，替代原多段说明文字 */
+.var-insert { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0 2px; }
+.vi-label { font-size: 11px; color: var(--text-3); font-weight: 700; letter-spacing: .03em; }
+.vchip {
+  font-family: var(--font-mono); font-size: 11.5px; color: var(--text-2);
+  background: var(--bg-3); border: 1px solid var(--line-strong);
+  padding: 2px 8px; border-radius: 999px; cursor: pointer;
+  transition: color .15s var(--ease), border-color .15s var(--ease), background .15s var(--ease);
 }
-/* T15 可用变量提示：label + 可点击 chip（与静态占位符区分的中性风格） */
-.var-hint { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 0 2px; }
-.var-hint-label { font-size: 11.5px; color: var(--text-3); font-weight: 600; letter-spacing: .03em; }
-.var-hint-text { font-size: 11.5px; color: var(--text-2); line-height: 1.5; }
-.ph-chip.var-chip {
-  cursor: pointer; color: var(--text-2); background: var(--bg-3);
-  border-color: var(--line-strong);
-}
-.ph-chip.var-chip:hover {
-  color: var(--accent); border-color: var(--accent); background: var(--accent-soft);
-}
+.vchip:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
 .card-tabs { display: flex; align-items: center; gap: 6px; }
 .card-tab {
   font-size: 12px; font-weight: 600; color: var(--text-2);
@@ -956,10 +964,11 @@ function addMapping() { webhookMappings.value.push({ name: "", jsonPath: "" }); 
 }
 .param-list { display: flex; flex-direction: column; gap: 8px; }
 .param-row { display: grid; gap: 10px; align-items: center; }
+/* 表头与数据行用同一份 8 列网格保证逐列对齐；加重字号颜色，便于填写识别 */
 .param-row.param-head {
-  display: flex; gap: 10px;
-  font-family: var(--font-mono); font-size: 10.5px; letter-spacing: .06em;
-  text-transform: uppercase; color: var(--text-3); padding: 0 2px;
+  grid-template-columns: .9fr 1fr 1fr 1fr 1.3fr 44px 1.6fr 30px;
+  font-family: var(--font-mono); font-size: 11.5px; font-weight: 700; letter-spacing: .05em;
+  text-transform: uppercase; color: var(--text-2); padding: 2px 2px 0;
 }
 .param-cell.key { grid-column: 1; }
 .param-cell.title { grid-column: 2; }
