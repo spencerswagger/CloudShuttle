@@ -2,6 +2,19 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { makeShellStep, outputKeysOf } from "./shell.js";
 
+// runner 引导变量：固定在 env 最前，environment/p.env 不得覆盖该契约。
+function controlEnv({ base, token, execId, nodeId }) {
+  return [
+    { k: "CLOUDSHUTTLE_JOB_URL", v: `${base}/_/hook/job/${token}` },
+    { k: "CLOUDSHUTTLE_OUT_FILE", v: "/tmp/out" },
+    { k: "CLOUDSHUTTLE_TOKEN", v: token },
+    { k: "CLOUDSHUTTLE_CB_SECRET", v: token },
+    { k: "CLOUDSHUTTLE_CB_BASE", v: base },
+    { k: "CLOUDSHUTTLE_EXEC_ID", v: String(execId) },
+    { k: "CLOUDSHUTTLE_NODE_ID", v: nodeId },
+  ];
+}
+
 test("outputKeysOf：无显式 outputs 时给默认单 key step_out", () => {
   assert.deepEqual(outputKeysOf({ image: "alpine" }), ["step_out"]);
   assert.deepEqual(outputKeysOf({}), ["step_out"]);
@@ -36,8 +49,9 @@ test("shell step：environment 扁平变量追加进 env 数组（节点 p.env �
   assert.equal(out.kind, "dispatch");
   assert.equal(out.ref, "job-1");
   assert.deepEqual(out.outputKeys, ["step_out"], "应声明默认输出 key");
-  // env 顺序：节点自身 A 在前，environment 的 pipeline_name/run_no 在后
+  // env 顺序：引导变量 + 节点自身 A 在前，environment 的 pipeline_name/run_no 在后
   assert.deepEqual(dispatched.env, [
+    ...controlEnv({ base: "https://cp.example.com", token: "tok-1", execId: 11, nodeId: "n1" }),
     { k: "A", v: "1" },
     { k: "pipeline_name", v: "demo" },
     { k: "run_no", v: "7" },
@@ -57,16 +71,19 @@ test("shell step：environment 为普通对象时同样铺平成 {k,v}", async (
     recordRegistry: async () => {},
   });
   assert.equal(out.outputKeys[0], "step_out");
-  assert.deepEqual(dispatched.env, [{ k: "foo", v: "bar" }, { k: "num", v: "5" }]);
+  assert.deepEqual(dispatched.env, [
+    ...controlEnv({ base: "https://cp", token: "t", execId: 1, nodeId: "n" }),
+    { k: "foo", v: "bar" }, { k: "num", v: "5" },
+  ]);
 });
 
-test("shell step：无 environment 时 env 仅为节点自身 p.env", async () => {
+test("shell step：无 environment 时 env 仅含引导变量（无节点 env 与 environment）", async () => {
   let dispatched = null;
   const eciProvider = { dispatch: async (arg) => { dispatched = arg; return { jobRef: "j" }; } };
   const step = makeShellStep({ eciProvider, genToken: () => "t", controlPlaneBase: "https://cp" });
   const node = { id: "n", type: "shell", params: { image: "i", command: "c", env: [] } };
   await step(node, { execId: 1, recordRegistry: async () => {} });
-  assert.deepEqual(dispatched.env, []);
+  assert.deepEqual(dispatched.env, controlEnv({ base: "https://cp", token: "t", execId: 1, nodeId: "n" }));
 });
 
 test("shell step：显式 outputs 时输出 key 列表来自声明", async () => {
