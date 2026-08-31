@@ -26,5 +26,14 @@ test("shell step 派发 ECI：注入 job URL / 输出文件 / 回调 token+secre
   assert.equal(asMap.CLOUDSHUTTLE_EXEC_ID, "11");
   assert.equal(asMap.CLOUDSHUTTLE_NODE_ID, "n1");
   assert.equal(dispatched.callbackUrl, "https://cp.example.com/_/hook/ecidone/11?token=tok-1&secret=tok-1");
+  assert.equal(dispatched.execId, 11);
+  assert.equal(dispatched.nodeId, "n1");
+  assert.equal(dispatched.image, "alpine");
+  assert.equal(dispatched.command, "echo hi");
+  assert.equal(dispatched.token, "tok-1");
   assert.equal(registry[0].kind, "eci");
+  assert.equal(registry[0].token, "tok-1");
+  assert.equal(registry[0].secret, "tok-1");
+  assert.equal(registry[0].execId, 11);
+  assert.equal(registry[0].nodeId, "n1");
 });
