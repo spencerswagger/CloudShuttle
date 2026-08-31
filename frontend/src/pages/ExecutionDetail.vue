@@ -130,7 +130,7 @@ const triggerLabel = computed(() => {
       </section>
 
       <section v-if="steps.some((s) => s.logs || (typeof s.output === 'object' && s.output && Object.keys(s.output).length))" class="card steps-card rise" style="animation-delay:.09s">
-        <h3 class="block-title display">节点输入 / 输出</h3>
+        <h3 class="block-title display">节点日志 / 输出</h3>
         <div v-for="(s, i) in steps" :key="'o' + i" class="node-out">
           <template v-if="s.logs">
             <span class="step-name">{{ s.node_id || s.node?.name || s.name || `STEP ${i + 1}` }} · 日志</span>
