@@ -13,8 +13,6 @@ set +e
 /tmp/cmd.sh > "$LOG_FILE" 2>&1        # stdout/stderr 全部进日志；命令向 $CLOUDSHUTTLE_OUT_FILE 写 K=V 实现输出
 RC=$?
 set -e
-LOGS=$(cat "$LOG_FILE")
-OUTPUT=$(cat "$OUT_FILE")
 OUTJSON=$(jq -Rs . < "$OUT_FILE")
 LOGJSON=$(jq -Rs . < "$LOG_FILE")
 CB_URL="${CLOUDSHUTTLE_CB_BASE}/_/hook"
