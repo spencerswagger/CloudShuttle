@@ -15,14 +15,16 @@ RC=$?
 set -e
 LOGS=$(cat "$LOG_FILE")
 OUTPUT=$(cat "$OUT_FILE")
+OUTJSON=$(jq -Rs . < "$OUT_FILE")
+LOGJSON=$(jq -Rs . < "$LOG_FILE")
 CB_URL="${CLOUDSHUTTLE_CB_BASE}/_/hook"
 if [ "$RC" -eq 0 ]; then
   curl -fsS -X POST "${CB_URL}/ecidone/${CLOUDSHUTTLE_EXEC_ID}?token=${CLOUDSHUTTLE_TOKEN}&secret=${CLOUDSHUTTLE_CB_SECRET}" \
     -H 'content-type: application/json' \
-    -d "{\"result\":{\"output\":$(echo "$OUTPUT" | jq -Rs .),\"logs\":$(echo "$LOGS" | jq -Rs .)}}"
+    -d "{\"result\":{\"output\":${OUTJSON},\"logs\":${LOGJSON}}}"
 else
   curl -fsS -X POST "${CB_URL}/fail/${CLOUDSHUTTLE_EXEC_ID}?token=${CLOUDSHUTTLE_TOKEN}&secret=${CLOUDSHUTTLE_CB_SECRET}" \
     -H 'content-type: application/json' \
-    -d "{\"reason\":\"exit $RC\",\"logs\":$(echo "$LOGS" | jq -Rs .)}"
+    -d "{\"reason\":\"exit $RC\",\"logs\":${LOGJSON}}"
 fi
 exit $RC
