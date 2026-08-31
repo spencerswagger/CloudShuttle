@@ -119,21 +119,34 @@ function toggleVarDrop(key) { varDrop.value = varDrop.value === key ? "" : key; 
 // 插入：优先在当前聚焦字段的光标处插入，否则追加到字段末尾；直接写响应式参数，无需模拟 input 事件
 const activeField = ref(null); // { el, node, field }
 function onFieldFocus(ev, n, field) { activeField.value = { el: ev.target, node: n, field }; }
+// 读取/写入字段值：支持 "env:0:v" 这类嵌套路径字段（分隔方式与 env 行 field key 一致）
+function paramGet(p, field) {
+  if (typeof field !== "string" || !field.includes(":")) return p ? p[field] : undefined;
+  return field.split(":").reduce((o, k) => (o == null ? o : o[k]), p);
+}
+function paramSet(p, field, v) {
+  if (typeof field !== "string" || !field.includes(":")) { if (p) p[field] = v; return; }
+  const segs = field.split(":");
+  let o = p;
+  for (let i = 0; i < segs.length - 1; i++) { if (o == null) return; o = o[segs[i]]; }
+  if (o) o[segs[segs.length - 1]] = v;
+}
 function insertVar(name, n, field) {
   const snippet = "${" + name + "}";
   const p = n?.params;
   if (!p) return;
   varDrop.value = "";
-  const cur = String(p[field] ?? "");
+  const cur = String(paramGet(p, field) ?? "");
   const af = activeField.value;
   if (af && af.node === n && af.field === field && document.contains(af.el)) {
     const el = af.el;
     const s = el.selectionStart ?? cur.length;
     const e = el.selectionEnd ?? cur.length;
-    p[field] = cur.slice(0, s) + snippet + cur.slice(e);
-    nextTick(() => { el.focus(); const pos = s + snippet.length; el.setSelectionRange(pos, pos); fit(el); });
+    paramSet(p, field, cur.slice(0, s) + snippet + cur.slice(e));
+    nextTick(() => { el.focus(); const pos = s + snippet.length; el.setSelectionRange(pos, pos); if (el.classList?.contains?.("autofit")) fit(el); });
   } else {
-    p[field] = cur && !cur.endsWith("\n") ? cur + "\n" + snippet : cur + snippet;
+    // 嵌套字段多为单行 input，不追加换行；顶层 textarea 保持原有换行补全
+    paramSet(p, field, field.includes(":") ? cur + snippet : (cur && !cur.endsWith("\n") ? cur + "\n" + snippet : cur + snippet));
     nextTick(fitAll);
   }
 }
@@ -285,7 +298,7 @@ const addNode = (type) => {
     step: type,
     params:
       type === "shell"
-        ? { image: images.value[0]?.image ?? "alpine", command: "", env: [] }
+        ? { image: images.value[0]?.image ?? "alpine", command: "", env: [], outputs: [{ key: "step_out" }] }
         : { robot: "", message: DEFAULT_APPROVAL_BODY, target: { type: "user", openIds: "", members: [] } },
   };
   current.value.spec_json.nodes.push(node);
@@ -801,6 +814,51 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
                       </div>
                     </div>
                   </div>
+                  <div class="field">
+                    <label class="field-label">附加环境变量（K=V）</label>
+                    <div class="kv-list">
+                      <div v-for="(e, ei) in n.params.env || []" :key="ei" class="kv-row">
+                        <input class="input mono kv-key" v-model="e.k" placeholder="KEY" />
+                        <div class="kv-val">
+                          <input class="input mono" v-model="e.v" placeholder="value（可用 ${} 引用变量）" @focus="onFieldFocus($event, n, 'env:' + ei + ':v')" />
+                          <div class="var-insert">
+                            <div class="vi-wrap" @click.stop>
+                              <button type="button" class="btn btn-sm vi-btn" @click="toggleVarDrop(n.id + ':env:' + ei)">＋ 变量</button>
+                              <div v-if="varDrop === n.id + ':env:' + ei" class="vi-drop">
+                                <template v-for="grp in varGroups(n)" :key="grp.g">
+                                  <div class="vi-group">{{ grp.g }}</div>
+                                  <button v-for="it in grp.items" :key="it.k" type="button" class="vi-item" @click="insertVar(it.k, n, 'env:' + ei + ':v')">
+                                    <span class="vi-l1"><code class="vi-key mono">{{ "${" + it.k + "}" }}</code><span class="vi-title">{{ it.t }}</span></span>
+                                    <span v-if="it.d" class="vi-desc">{{ it.d }}</span>
+                                  </button>
+                                </template>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                        <button type="button" class="btn btn-sm btn-danger" title="删除" @click="n.params.env.splice(ei, 1)">×</button>
+                      </div>
+                      <button type="button" class="btn btn-sm btn-ghost" @click="(n.params.env = n.params.env || []).push({ k: '', v: '' })">＋ 添加环境变量</button>
+                    </div>
+                  </div>
+                  <div class="field">
+                    <label class="field-label">输出变量（K=V，写回供后继节点引用）</label>
+                    <div class="kv-list">
+                      <div v-for="(o, oi) in n.params.outputs || []" :key="oi" class="kv-row">
+                        <input class="input mono kv-key" v-model="o.key" :placeholder="'step_out' + (oi ? '' : '（默认）')" />
+                        <button type="button" class="btn btn-sm btn-danger" title="删除" @click="n.params.outputs.splice(oi, 1)">×</button>
+                      </div>
+                      <button type="button" class="btn btn-sm btn-ghost" @click="(n.params.outputs = n.params.outputs || []).push({ key: '' })">＋ 添加输出 key</button>
+                    </div>
+                    <p class="field-hint">脚本内可用 <code class="mono ph-code">echo "key=value" >> "$CLOUDSHUTTLE_OUT_FILE"</code> 写回；未配置 key 时默认输出单变量 <code class="mono ph-code">step_out</code>。</p>
+                  </div>
+                  <div class="field">
+                    <label class="field-label">执行规格 / 超时（秒）</label>
+                    <div class="group-row">
+                      <input class="input mono" v-model="n.params.resource" placeholder="2 vCPU · 4 GiB（可选）" />
+                      <input class="input mono" v-model.number="n.params.timeout" placeholder="300" />
+                    </div>
+                  </div>
                 </template>
                 <template v-else>
                   <div class="approval-grid">
@@ -1078,6 +1136,13 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
 /* 审批卡片正文：高度随内容自适应（field-sizing 为主，fit() JS 兜底旧内核） */
 .card-body { min-height: 108px; }
 .textarea.autofit { resize: none; overflow: hidden; field-sizing: content; }
+/* shell 节点附加配置：KV 列表（env / outputs） */
+.kv-list { display: flex; flex-direction: column; gap: 6px; }
+.kv-row { display: flex; align-items: center; gap: 6px; }
+.kv-row .btn-danger { flex: 0 0 auto; }
+.kv-key { width: 220px; flex: 0 0 auto; }
+.kv-val { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.kv-val > .input { width: 100%; }
 /* 插入变量：按钮 + 明细下拉面板（变量名/标题/说明，信息对齐触发源表） */
 .var-insert { margin: 8px 0 2px; }
 .vi-wrap { position: relative; display: inline-block; }
