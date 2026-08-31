@@ -394,7 +394,12 @@ export async function createExecution(body) {
 export async function getExecution(id) {
   const { rows } = await pool.query(`SELECT * FROM execution WHERE id=$1`, [id]);
   if (!rows[0]) throw new HttpError(404, "EXECUTION_NOT_FOUND", "执行记录不存在");
-  return rows[0];
+  const { rows: steps } = await pool.query(
+    `SELECT node_id, type, status, output, logs FROM execution_node
+      WHERE exec_id=$1 ORDER BY id`,
+    [id]
+  );
+  return { ...rows[0], steps };
 }
 
 export async function executionPipelineId(id) {
