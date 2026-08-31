@@ -10,6 +10,7 @@ import { getPipeline, createPipeline, updatePipeline, getPipelineHook, resetWebh
 import { fetchImages } from "../api/image.js";
 import { fetchCredentials, listDepartments, listDepartmentUsers } from "../api/credential.js";
 import RunPipelineModal from "../components/RunPipelineModal.vue";
+import TriggerParamsEditor from "../components/TriggerParamsEditor.vue";
 
 const route = useRoute();
 const router = useRouter();
@@ -34,7 +35,8 @@ async function loadCreds() {
 
 const newPipeline = () => ({
   id: null, name: "", description: "",
-  spec_json: { nodes: [], edges: [], trigger: { manual: { params: [] }, webhook: { mappings: [] } } },
+  // 统一触发参数：manual 与 webhook 共用一份 params（webhook 用每项的 jsonPath 从请求体取值）
+  spec_json: { nodes: [], edges: [], trigger: { params: [] } },
 });
 const current = ref(newPipeline());
 const nodes = computed({ get: () => current.value.spec_json.nodes, set: (v) => (current.value.spec_json.nodes = v) });
@@ -71,24 +73,18 @@ const VAR_MEANINGS = {
 // 节点可用变量明细分组（供「插入变量」面板展示）：每组 items=[{k,t,d}]，k 变量名、t 标题、d 说明
 function varGroups(n) {
   const spec = current.value?.spec_json || {};
-  const t = spec.trigger || {};
   const groups = [];
   const used = new Set();
   const trig = [];
-  for (const p of t.manual?.params ?? []) {
-    if (p?.key && !used.has(p.key)) {
-      used.add(p.key);
-      const sub = [];
-      if (p.default != null && p.default !== "") sub.push("默认 " + p.default);
-      if (p.description) sub.push(p.description);
-      trig.push({ k: p.key, t: p.title || p.key, d: sub.join(" · ") });
-    }
-  }
-  for (const m of t.webhook?.mappings ?? []) {
-    if (m?.name && !used.has(m.name)) {
-      used.add(m.name);
-      trig.push({ k: m.name, t: "Webhook 提取", d: m.jsonPath || "" });
-    }
+  // 统一触发参数（triggerCfg 已把旧结构归一）：标题/说明/默认值直接取自配置
+  for (const p of triggerParams.value ?? []) {
+    if (!p?.key || used.has(p.key)) continue;
+    used.add(p.key);
+    const sub = [];
+    if (p.default != null && p.default !== "") sub.push("默认 " + p.default);
+    if (p.description) sub.push(p.description);
+    if (p.jsonPath) sub.push("Webhook: " + p.jsonPath);
+    trig.push({ k: p.key, t: p.title || p.key, d: sub.join(" · ") });
   }
   if (trig.length) groups.push({ g: "触发参数", items: trig });
   // 上游节点声明的 outputs（沿 edges 反向闭包）
@@ -295,22 +291,32 @@ const addNode = (type) => {
   current.value.spec_json.nodes.push(node);
 };
 
-const save = async () => {
-  if (!current.value.name.trim()) { notify({ type: "error", message: "请先填写流水线名称" }); return; }
+const save = async ({ stay = false } = {}) => {
+  if (!current.value.name.trim()) { notify({ type: "error", message: "请先填写流水线名称" }); return false; }
   // 编辑态下若返显失败（id 缺失）则不静默新建、也不空覆盖，提示重试
   if (editingId.value && !current.value.id) {
     notify({ type: "error", message: "流水线数据尚未加载完成，请稍候或刷新后重试" });
-    return;
+    return false;
   }
   saving.value = true;
   try {
     if (editingId.value) await updatePipeline(editingId.value, current.value);
     else Object.assign(current.value, await createPipeline(current.value));
     notify({ type: "success", message: "已保存流水线 ✓" });
-    router.push("/pipelines");
-  } catch { /* 全局拦截器提示 */ }
+    hookAutoFor = null;      // 名称/spec 可能变化，保存后允许重新拉取触发地址
+    if (!stay) router.push("/pipelines");
+    else if (triggerTab.value === "webhook") loadHook({ quiet: true }); // 留在页面时刷新地址
+    return true;
+  } catch { /* 全局拦截器提示 */ return false; }
   finally { saving.value = false; }
 };
+
+// 需要 id 的操作（获取触发地址、调试接收）在未保存时先自动保存且不离开页面
+async function ensureSaved() {
+  if (current.value.id) return true;
+  if (triggerTab.value === "webhook") notify({ type: "success", message: "首次获取地址将先保存当前流水线" });
+  return await save({ stay: true });
+}
 
 const runModal = ref(null);
 const run = () => {
@@ -321,37 +327,33 @@ const run = () => {
 const back = () => router.push("/pipelines");
 
 // ---------- T13 触发源配置 ----------
-// 收敛为两类：manual（运行时按表单填值注入）与 webhook（按 JSONPath 从请求体抽变量）。
-// 编辑流水线 spec_json.trigger；老数据未存 trigger 时按需补齐默认结构。
+// 统一触发参数：manual 与 webhook 共用一份 params（key/title/type/default/required/description 齐全，
+// webhook 触发额外用每项 jsonPath 从请求体取值）。旧数据（manual.params + webhook.mappings 分离）
+// 在 triggerCfg 归一时按 key 合并为新结构，保存后落库即为统一形态。
+// 把旧结构 manual.params + webhook.mappings 合并为统一 params（与后端 triggerParamsOf 同规则）
+function mergeLegacyTrigger(t) {
+  const merged = new Map();
+  for (const p of t?.manual?.params ?? []) if (p?.key) merged.set(p.key, { ...p, options: p.options ?? [] });
+  for (const m of t?.webhook?.mappings ?? []) {
+    if (!m?.name) continue;
+    const hit = merged.get(m.name);
+    if (hit) hit.jsonPath = m.jsonPath;
+    else merged.set(m.name, { key: m.name, title: "", type: "string", default: "", required: false, description: "", options: [], jsonPath: m.jsonPath });
+  }
+  return [...merged.values()];
+}
 const triggerCfg = computed(() => {
   const t = current.value.spec_json.trigger ?? (current.value.spec_json.trigger = {});
-  t.manual ??= { params: [] };
-  t.webhook ??= { mappings: [] };
+  if (!Array.isArray(t.params)) t.params = mergeLegacyTrigger(t);
+  delete t.manual; // 归一后不再保留旧结构，避免保存回旧字段
+  delete t.webhook;
   return t;
 });
-const manualParams = computed({
-  get: () => triggerCfg.value.manual.params,
-  set: (v) => (triggerCfg.value.manual.params = v),
-});
-const webhookMappings = computed({
-  get: () => triggerCfg.value.webhook.mappings,
-  set: (v) => (triggerCfg.value.webhook.mappings = v),
-});
+const triggerParams = computed(() => triggerCfg.value.params);
 const triggerTab = ref("manual");
-const TYPES = ["string", "text", "number", "boolean", "enum"];
-
-function addManualParam() {
-  manualParams.value.push({ key: "", title: "", type: "string", default: "", required: false, description: "", options: [] });
-}
-function removeManualParam(i) { manualParams.value.splice(i, 1); }
-// enum 选项以逗号分隔的字符串在编辑器里编辑，实时拆分为数组落库
-const optionsText = (p) => (p.options ?? []).join(", ");
-function setOptions(p, ev) {
-  p.options = String(ev.target.value).split(/[,，]/).map((s) => s.trim()).filter(Boolean);
-}
 
 // ---------- Webhook 触发地址：由后端生成下发，前端只读展示 + 复制，不再本地拼接 ----------
-const HOOK_URL_PLACEHOLDER = "保存流水线后获取触发地址";
+const HOOK_URL_PLACEHOLDER = "点击「获取地址」将自动保存并生成触发地址";
 const webhookUrl = ref(""); // 后端下发的完整触发地址（含 ?secret=）；为空即降级为占位
 const hookLoading = ref(false);
 const resetArmed = ref(false); // 「重置密钥」两段式确认：先点亮，再确认执行
@@ -362,8 +364,8 @@ function disarmReset() {
   resetArmed.value = false;
   if (resetArmTimer !== null) { clearTimeout(resetArmTimer); resetArmTimer = null; }
 }
-function armReset() {
-  if (!current.value.id) { notify({ type: "error", message: "请先保存流水线再重置密钥" }); return; }
+async function armReset() {
+  if (!(await ensureSaved())) return;
   if (resetArmed.value) { disarmReset(); resetHook(); return; }
   resetArmed.value = true;
   resetArmTimer = setTimeout(disarmReset, 6000); // 6 秒内不确认即自动撤销，避免误触轮换密钥
@@ -391,12 +393,10 @@ function hookErrText(e, fallback) {
   return `${fallback}：${e?.message ?? "未知错误"}`;
 }
 
-// quiet=true 用于切入 tab 的自动拉取：成功不弹提示，失败静默降级为占位
+// quiet=true 用于切入 tab 的自动拉取：成功不弹提示，失败静默降级为占位。
+// 未保存时先自动保存（stay 模式，不离开页面），满足「无需先手动保存」的直达体验。
 async function loadHook({ quiet = false } = {}) {
-  if (!current.value.id) {
-    if (!quiet) notify({ type: "error", message: "请先保存流水线再获取触发地址" });
-    return;
-  }
+  if (!(await ensureSaved())) return;
   hookLoading.value = true;
   try {
     const r = await getPipelineHook(current.value.id);
@@ -421,26 +421,6 @@ async function copyHook() {
   try { await navigator.clipboard.writeText(webhookUrl.value); notify({ type: "success", message: "已复制 Webhook 触发地址" }); }
   catch { notify({ type: "error", message: "复制失败，请手动复制" }); }
 }
-const WEBHOOK_TEMPLATES = {
-  github: [
-    { name: "git_ref", jsonPath: "$.ref" },
-    { name: "repo_name", jsonPath: "$.repository.name" },
-    { name: "pusher", jsonPath: "$.pusher.name" },
-    { name: "commit_message", jsonPath: "$.head_commit.message" },
-  ],
-  gitlab: [
-    { name: "git_ref", jsonPath: "$.ref" },
-    { name: "project", jsonPath: "$.project.path_with_namespace" },
-    { name: "user_name", jsonPath: "$.user_name" },
-    { name: "commit_message", jsonPath: "$.commits[0].message" },
-  ],
-};
-function applyTemplate(kind) {
-  const tpl = WEBHOOK_TEMPLATES[kind] ?? [];
-  webhookMappings.value = tpl.map((x) => ({ name: x.name, jsonPath: x.jsonPath }));
-  notify({ type: "success", message: kind === "github" ? "已填入 GitHub 模板映射" : "已填入 GitLab 模板映射" });
-}
-function addMapping() { webhookMappings.value.push({ name: "", jsonPath: "" }); }
 
 // ---------- 调试接收：轮询后端探针展示最近收到的请求体，并可一键生成映射草案 ----------
 // 全部为前端会话态（不入库）：离开 Webhook tab、关闭开关、组件卸载都会停掉 interval。
@@ -484,15 +464,16 @@ async function pollProbe() {
   } finally { probeInFlight = false; }
 }
 function probeForceStop() { probeOn.value = false; stopProbe(); }
-function startProbe() {
+async function startProbe() {
   stopProbe();
-  if (!probeOn.value || !current.value.id) return; // 无 id 不轮询
+  if (!probeOn.value) return;
+  // 未保存时先自动保存（stay 模式），保存成功才开始轮询
+  if (!(await ensureSaved())) { probeOn.value = false; return; }
   probeMissing.value = false;                      // 重新开启即清掉上一轮「接口不可用」标记
   pollProbe();                                     // 开关即先拉一次，不必等满 3 秒
   probeTimer = setInterval(pollProbe, PROBE_POLL_MS);
 }
 watch(probeOn, (v) => { if (v) startProbe(); else stopProbe(); });
-
 // 切 tab：离开 Webhook 立即停轮询并清空调试视图；进入则补一次地址自动拉取（探针数据后端持久，重开即回显）
 watch(triggerTab, (v) => {
   if (v === "webhook") { maybeAutoLoadHook(); return; }
@@ -570,21 +551,24 @@ const probeEmptyText = computed(() => {
 
 // 请求体 → JSONPath 映射草案：遍历逻辑见 lib/webhookDraft.js（深度 ≤ 2、name sanitize + 去重、上限 40 条）
 const probeDrafts = computed(() => (probeHasBody.value ? buildMappingDraft(probeBody.value, { max: PROBE_DRAFT_MAX }) : []));
-// 追加：与现有 webhookMappings 按 name 去重，只增不覆盖
+// 追加：与现有统一触发参数按 key 去重，只增不覆盖；草案补齐统一 params 的全部字段
 function appendProbeDrafts() {
   const drafts = probeDrafts.value;
   if (!drafts.length) { notify({ type: "error", message: "请求体里没有可提取的字段，未生成映射草案" }); return; }
-  const exists = new Set(webhookMappings.value.map((m) => m?.name).filter(Boolean));
+  const exists = new Set(triggerParams.value.map((p) => p?.key).filter(Boolean));
   let added = 0;
   for (const d of drafts) {
     if (exists.has(d.name)) continue;
     exists.add(d.name);
-    webhookMappings.value.push({ name: d.name, jsonPath: d.jsonPath });
+    triggerParams.value.push({
+      key: d.name, title: "", type: "string", default: "", required: false, description: "", options: [],
+      jsonPath: d.jsonPath, // jsonPath 由草案直接带入，manual 触发时忽略该字段走表单/default
+    });
     added++;
   }
   notify({
     type: "success",
-    message: added ? `已追加 ${added} 条映射` : `草案 ${drafts.length} 条与现有映射重名，未追加新行`,
+    message: added ? `已追加 ${added} 条触发参数（含 JSONPath）` : `草案 ${drafts.length} 条与现有参数重名，未追加新行`,
   });
 }
 
@@ -653,62 +637,10 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
         </div>
       </div>
 
-      <!-- manual schema 编辑器 -->
+      <!-- 统一触发参数编辑器：manual 与 webhook 共用一份 params，webhook tab 额外展示 JSONPath 列 -->
       <template v-if="triggerTab === 'manual'">
-        <p class="field-hint trig-desc">运行弹窗将按此 schema 渲染表单；填写的值作为执行期变量注入，可用 <code class="mono ph-code">${key}</code> 引用。</p>
-        <div v-if="!manualParams.length" class="trig-empty">
-          <span class="muted">尚未配置 manual 参数，手动运行时将直接触发。</span>
-          <button type="button" class="btn btn-sm btn-ghost" @click="addManualParam">＋ 添加参数</button>
-        </div>
-        <div v-else class="param-list">
-          <div class="param-row param-head">
-            <span class="param-cell key">key</span>
-            <span class="param-cell title">标题</span>
-            <span class="param-cell type">类型</span>
-            <span class="param-cell default">默认值</span>
-            <span class="param-cell options">选项</span>
-            <span class="param-cell req">必填</span>
-            <span class="param-cell desc">说明</span>
-            <span class="param-cell del"> </span>
-          </div>
-          <div v-for="(p, i) in manualParams" :key="p.key + i" class="param-row">
-            <div class="param-cell key">
-              <input class="input mono" v-model="p.key" placeholder="branch" />
-            </div>
-            <div class="param-cell title">
-              <input class="input" v-model="p.title" placeholder="分支" />
-            </div>
-            <div class="param-cell type">
-              <select class="select" v-model="p.type">
-                <option v-for="t in TYPES" :key="t" :value="t">{{ t }}</option>
-              </select>
-            </div>
-            <div class="param-cell default">
-              <select v-if="p.type === 'boolean'" class="select" v-model="p.default">
-                <option value="">默认</option>
-                <option value="true">true</option>
-                <option value="false">false</option>
-              </select>
-              <input v-else class="input" v-model="p.default" placeholder="main" />
-            </div>
-            <div class="param-cell options">
-              <input v-if="p.type === 'enum'" class="input mono" :value="optionsText(p)" @input="setOptions(p, $event)" placeholder="a, b, c（逗号分隔）" />
-              <span v-else class="muted">—</span>
-            </div>
-            <div class="param-cell req">
-              <input class="row-check" type="checkbox" v-model="p.required" title="必填" />
-            </div>
-            <div class="param-cell desc">
-              <input class="input" v-model="p.description" placeholder="要发布的 Git 分支" />
-            </div>
-            <div class="param-cell del">
-              <button type="button" class="btn btn-sm btn-danger" title="删除该参数" @click="removeManualParam(i)">×</button>
-            </div>
-          </div>
-          <div class="trig-acts">
-            <button type="button" class="btn btn-sm btn-ghost" @click="addManualParam">＋ 添加参数</button>
-          </div>
-        </div>
+        <p class="field-hint trig-desc">运行弹窗将按此 schema 渲染表单；填写的值作为执行期变量注入，可用 <code class="mono ph-code">${key}</code> 引用。切到 Webhook tab 可为同一份参数补配 JSONPath。</p>
+        <TriggerParamsEditor :params="triggerParams" />
       </template>
 
       <!-- webhook 映射编辑器 -->
@@ -721,14 +653,14 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
           <div class="group-row">
             <input class="input mono" :value="webhookUrl" :placeholder="HOOK_URL_PLACEHOLDER" readonly />
             <button type="button" class="btn btn-sm btn-ghost" @click="copyHook" :disabled="!webhookUrl">复制</button>
-            <button type="button" class="btn btn-sm" @click="loadHook()" :disabled="hookLoading || !current.id">
+            <button type="button" class="btn btn-sm" @click="loadHook()" :disabled="hookLoading">
               {{ hookLoading ? "获取中…" : "获取地址" }}
             </button>
             <button
               type="button"
               class="btn btn-sm"
               :class="{ 'btn-danger-solid': resetArmed }"
-              :disabled="hookLoading || !current.id"
+              :disabled="hookLoading"
               :title="resetArmed ? '再次点击确认轮换密钥' : '轮换访问密钥并重新生成触发地址'"
               @click="armReset"
             >
@@ -738,6 +670,7 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
           <p class="field-hint">
             地址由后端生成并下发（访问密钥在 URL 末尾 <code class="mono ph-code">?secret=</code> 中），前端不再拼接；
             复制到 GitHub / GitLab 仓库的 Webhook 配置即触发运行。重置密钥后旧地址立即失效。
+            未保存的流水线点击「获取地址」会先自动保存（不离开本页）。
           </p>
         </div>
 
@@ -748,11 +681,11 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
               <span class="probe-title display">调试接收</span>
               <span class="probe-dot" :class="{ live: probeOn && current.id, off: probeMissing }"></span>
               <span class="probe-state muted">
-                {{ probeMissing ? "接口不可用" : probeOn ? (current.id ? `轮询中 · 每 ${PROBE_POLL_MS / 1000} 秒` : "未保存流水线") : "已停止" }}
+                {{ probeMissing ? "接口不可用" : probeOn ? `轮询中 · 每 ${PROBE_POLL_MS / 1000} 秒` : "已停止" }}
               </span>
             </span>
-            <label class="switch" :title="current.id ? '开启后每 3 秒拉取一次最近收到的 Webhook 请求体' : '保存流水线后可开启'">
-              <input type="checkbox" v-model="probeOn" :disabled="!current.id" />
+            <label class="switch" title="开启后每 3 秒拉取一次最近收到的 Webhook 请求体（未保存时先自动保存）">
+              <input type="checkbox" v-model="probeOn" />
               <span class="switch-slider"></span>
             </label>
           </div>
@@ -779,36 +712,8 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
           <p v-else class="probe-empty muted">{{ probeEmptyText }}</p>
         </div>
 
-        <div class="wh-templates">
-          <button type="button" class="btn btn-sm" @click="applyTemplate('github')">GitHub 模板</button>
-          <button type="button" class="btn btn-sm" @click="applyTemplate('gitlab')">GitLab 模板</button>
-        </div>
-
-        <div v-if="!webhookMappings.length" class="trig-empty">
-          <span class="muted">尚未配置 JSONPath 映射，Webhook 触发不会注入变量。</span>
-          <button type="button" class="btn btn-sm btn-ghost" @click="addMapping">＋ 添加映射</button>
-        </div>
-        <div v-else class="param-list">
-          <div class="param-row param-head">
-            <span class="param-cell key">name</span>
-            <span class="param-cell json">JSONPath</span>
-            <span class="param-cell del"> </span>
-          </div>
-          <div v-for="(m, i) in webhookMappings" :key="i" class="param-row">
-            <div class="param-cell key">
-              <input class="input mono" v-model="m.name" placeholder="git_ref" />
-            </div>
-            <div class="param-cell json">
-              <input class="input mono" v-model="m.jsonPath" placeholder="$.ref" />
-            </div>
-            <div class="param-cell del">
-              <button type="button" class="btn btn-sm btn-danger" title="删除该映射" @click="webhookMappings.splice(i, 1)">×</button>
-            </div>
-          </div>
-          <div class="trig-acts">
-            <button type="button" class="btn btn-sm btn-ghost" @click="addMapping">＋ 添加映射</button>
-          </div>
-        </div>
+        <p class="field-hint trig-desc">与 Manual 参数共用同一份配置（只填一遍）；Webhook 触发时按每行的 JSONPath 从请求体取值，取不到时回退默认值。</p>
+        <TriggerParamsEditor :params="triggerParams" show-json />
         <p class="field-hint wh-limits">仅支持 <code class="mono">POST</code> 且 <code class="mono">Content-Type: application/json</code> 的请求体；访问密钥通过 URL 末尾 <code class="mono">?secret=</code> 校验，不支持签名头/HMAC。</p>
       </template>
     </section>
@@ -1290,12 +1195,14 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
 .param-cell.options { grid-column: 5; }
 .param-cell.req { grid-column: 6; text-align: center; display: flex; justify-content: center; }
 .param-cell.desc { grid-column: 7; }
-.param-cell.json { grid-column: 2 / 7; }
 .param-cell.del { grid-column: 8; }
 .param-row:not(.param-head) { grid-template-columns: .9fr 1fr 1fr 1fr 1.3fr 44px 1.6fr 30px; }
 .param-row:not(.param-head) .param-cell { min-width: 0; }
+/* Webhook 模式（withJson）：额外第 8 列 JSONPath，del 移到第 9 列；表头/数据行同模板对齐 */
+.param-row.withJson { grid-template-columns: .85fr .9fr .9fr .9fr 1.1fr 44px 1.2fr 1.3fr 30px; }
+.param-row.withJson .param-cell.json { grid-column: 8; }
+.param-row.withJson .param-cell.del { grid-column: 9; }
 .trig-acts { display: flex; justify-content: flex-end; margin-top: 4px; }
-.wh-templates { display: flex; gap: 8px; margin-bottom: 12px; }
 
 /* 调试接收面板：轮询状态 + 请求体预览 + 映射草案入口 */
 .probe-panel {
@@ -1341,7 +1248,9 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
 .switch input:disabled + .switch-slider { opacity: .5; cursor: not-allowed; }
 @media (max-width: 1080px) {
   .param-row:not(.param-head) { grid-template-columns: 1fr 1fr; }
-  .param-cell.json { grid-column: 1 / 3; }
+  .param-row.withJson { grid-template-columns: 1fr 1fr; }
+  .param-row.withJson .param-cell.json { grid-column: 1 / 3; }
+  .param-row.withJson .param-cell.del { grid-column: auto; }
   .param-row:not(.param-head) .param-cell { width: 100%; }
   .param-row.param-head { display: none; }
 }

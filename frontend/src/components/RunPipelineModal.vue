@@ -11,7 +11,13 @@ const form = reactive({});
 const errs = reactive({});
 const submitting = ref(false);
 
-const params = computed(() => pipeline.value?.spec_json?.trigger?.manual?.params ?? []);
+// 统一触发参数：manual 与 webhook 共用一份 params（webhook 的 jsonPath 在表单渲染时忽略）
+const triggerOf = () => pipeline.value?.spec_json?.trigger ?? {};
+const params = computed(() => {
+  const t = triggerOf();
+  // 优先统一结构 spec.trigger.params；旧结构（manual.params）兜底
+  return t.params ?? t.manual?.params ?? [];
+});
 
 // 判定某参数当前取值是否「为空」（用于必填校验与缺省回退）
 const isEmpty = (v) => v === undefined || v === null || v === "";
