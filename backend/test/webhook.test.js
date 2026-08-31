@@ -389,6 +389,7 @@ test("routeToHandler 命中的处理器在 DISPATCH 中都有登记（双注册�
     ["/api/executions/3/rerun", "POST"],
     ["/hook/dingtalk/card/tk", "POST"],
     ["/_/hook/ecidone/1", "POST"],
+    ["/_/hook/job/tk9", "GET"],
   ];
   for (const [path, method] of routes) {
     const { handler } = routeToHandler(path, method, {});

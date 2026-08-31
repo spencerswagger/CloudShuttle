@@ -11,6 +11,7 @@ test("路径路由把 /api/pipelines 分到 api 处理器", () => {
 test("外部 hook 与内部 hook 分路由", () => {
   assert.equal(routeToHandler("/hook/webhook/svcA", "POST", {}).handler, "hook.webhook");
   assert.equal(routeToHandler("/_/hook/ecidone/3", "POST", {}).handler, "internal.eciDone");
+  assert.equal(routeToHandler("/_/hook/job/tk9", "GET", null).handler, "internal.getJob");
 });
 
 test("旧的触发路由不再注册（一律 404）", () => {

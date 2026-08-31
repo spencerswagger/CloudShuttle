@@ -19,6 +19,8 @@ import { randomUUID } from "node:crypto";
 import axios from "axios";
 import { sm4Decrypt } from "./crypto/sm4.js";
 import { HttpError } from "./errors.js";
+import { renderParams } from "./engine/variables.js";
+import { outputKeysOf } from "./steps/shell.js";
 
 import * as api from "./handlers/api.js";
 import * as hook from "./handlers/hook.js";
@@ -52,6 +54,7 @@ const RE = {
   dingtalkDeptUsers: /^\/api\/dingtalk\/department-users$/,
   eciDone: /^\/_\/hook\/ecidone\/(\d+)/,
   eciFail: /^\/_\/hook\/fail\/(\d+)/,
+  job: /^\/_\/hook\/job\/([^/?]+)/,
 };
 
 export function routeToHandler(path, method, body) {
@@ -131,6 +134,7 @@ export function routeToHandler(path, method, body) {
   }
   if (RE.eciDone.test(path)) return { handler: "internal.eciDone" };
   if (RE.eciFail.test(path)) return { handler: "internal.eciFail" };
+  if (RE.job.test(path)) return { handler: "internal.getJob" };
   return { handler: "404" };
 }
 
@@ -169,13 +173,13 @@ async function loadSpecForExec(execId) {
   return { ...(r[0]?.spec_json ?? {}), execId };
 }
 
-async function writeNodeRecord({ execId, nodeId, status, output, ref }) {
+async function writeNodeRecord({ execId, nodeId, status, output, ref, logs }) {
   await pool.query(
-    `INSERT INTO execution_node(exec_id, node_id, step, type, status, output)
-     VALUES($1,$2,'','',$3,$4::jsonb)
+    `INSERT INTO execution_node(exec_id, node_id, step, type, status, output, logs)
+     VALUES($1,$2,'','',$3,$4::jsonb,$5)
      ON CONFLICT (exec_id, node_id)
-     DO UPDATE SET status=EXCLUDED.status, output=EXCLUDED.output, finished_at=now()`,
-    [execId, nodeId, status, JSON.stringify(ref ? { ref } : output ?? {})]
+     DO UPDATE SET status=EXCLUDED.status, output=EXCLUDED.output, logs=EXCLUDED.logs, finished_at=now()`,
+    [execId, nodeId, status, JSON.stringify(ref ? { ref } : output ?? {}), logs ?? null]
   );
 }
 
@@ -241,6 +245,30 @@ async function buildApp() {
              secret=EXCLUDED.secret, credential=EXCLUDED.credential, expires_at=EXCLUDED.expires_at`,
       [token, execId, nodeId, kind, secret ?? "", credential ?? ""]
     );
+  }
+  // 拉取型的内部端点：run.sh 按 token 拉取本轮 job 的 command/timeout/outputKeys/env
+  async function getJob({ token }) {
+    const row = await internal.lookupRegistry({ token, kind: "eci" });
+    if (!row) return { status: 401, body: { ok: false, error: "invalid token" } };
+    const execId = Number(row.exec_id);
+    const nodeId = row.node_id;
+    const spec = await loadSpecForExec(execId);
+    const node = (spec.nodes ?? []).find((n) => n.id === nodeId);
+    if (!node) return { status: 404, body: { ok: false, error: "node not found" } };
+    const snap = (await snapshotStore.load(execId)) ?? {};
+    const env = new Map(Object.entries(snap.environment ?? {}));
+    const rendered = renderParams(node.params, env);
+    const envEntries = Array.isArray(rendered.env) ? rendered.env : [];
+    const envFlat = [...envEntries, ...[...env].map(([k, v]) => ({ k, v: String(v) }))];
+    return {
+      status: 200,
+      body: {
+        command: rendered.command ?? "",
+        timeout: rendered.timeout ?? undefined,
+        outputKeys: outputKeysOf(node.params),
+        env: envFlat,
+      },
+    };
   }
   const steps = {
     shell: makeShellStep({ eciProvider, genToken: randomUUID, controlPlaneBase: resolveControlBase }),
@@ -317,6 +345,7 @@ async function buildApp() {
   return {
     orchestrator, snapshotStore, mutex, getCredentialSecrets,
     dingtalkTokenCache, enroll: dingtalkEnroll, hydrateForRun,
+    getJob,
   };
 }
 
@@ -520,6 +549,8 @@ const DISPATCH = {
       token: qsOf(ctx, "token"), secret: qsOf(ctx, "secret"), reason: body?.reason,
     });
   },
+  "internal.getJob": ({ app, path }) =>
+    app.getJob({ token: decodePathSegment(m(path, RE.job)) }),
 };
 
 // 供单测校验路由双注册：routeToHandler 给出的 handler 名必须在 DISPATCH 中存在，
