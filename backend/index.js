@@ -4,7 +4,8 @@
 import { pool } from "./db/pg.js";
 import { redis } from "./db/redis.js";
 import { config } from "./config.js";
-import { createEciProvider } from "./providers/eci.js";
+import EciClient, { CreateContainerGroupRequest } from "@alicloud/eci20180808";
+import { createEciProvider, buildCreateEciRequest } from "./providers/eci.js";
 import { createDingtalkCorpProvider } from "./providers/dingtalk-corp.js";
 import { createDingtalkTokenCache } from "./providers/dingtalk-token.js";
 import { createDingtalkEnroll } from "./providers/dingtalk-enroll.js";
@@ -201,9 +202,31 @@ async function buildInitialEnvironment({ execId, pipelineId }) {
   ]);
 }
 
-// 真实 ECI OpenAPI（CreateContainerGroup）封装见 deploy/README；联调阶段用真实实现
-async function createEciGroup() {
-  throw new Error("ECI dispatch not implemented until integration (see deploy/README)");
+// 真实 ECI OpenAPI：用 eci 凭证里的 AK/SK/Region/VSwitch/安全组 创建一次性容器组，返回容器组 ID
+async function createEciGroup(params) {
+  const eci = params?.eci;
+  if (!eci) {
+    throw new Error("未为本 shell 节点选择 ECI 凭证：请先创建 eci 类型凭证并在节点上选择");
+  }
+  const { accessKeyId, accessKeySecret, regionId } = eci;
+  if (!accessKeyId || !accessKeySecret || !regionId) {
+    throw new Error("ECI 凭证缺少 accessKeyId/accessKeySecret/regionId，请检查配置");
+  }
+  const reqData = buildCreateEciRequest(params);
+  const client = new EciClient({
+    accessKeyId,
+    accessKeySecret,
+    regionId,
+    endpoint: `eci.${regionId}.aliyuncs.com`,
+  });
+  const request = new CreateContainerGroupRequest(reqData);
+  const resp = await client.createContainerGroup(request);
+  const cgId = resp?.body?.containerGroupId;
+  if (!cgId) {
+    console.error(`[eci] CreateContainerGroup returned no containerGroupId: ${JSON.stringify(resp?.body ?? resp)}`);
+    throw new Error("ECI 创建容器组成功但未返回容器组 ID");
+  }
+  return cgId;
 }
 
 // 完整装配（真实部署时在 FC 初始化阶段调用一次；本文件顶部不强制执行）
@@ -270,8 +293,27 @@ async function buildApp() {
       },
     };
   }
+  // ECI 凭证解析：shell 节点经 params.credential 引用 eci 凭证，返回解密的阿里云调用配置
+  async function getEciConfig(name) {
+    if (!name) return null;
+    const kind = await getCredentialKind(name);
+    if (kind !== "eci") {
+      throw new Error(`凭证 "${name}" 不是 ECI 凭证（当前类型：${kind || "未找到"}）`);
+    }
+    const secret = await getCredentialSecrets(name);
+    return {
+      accessKeyId: secret.accessKeyId,
+      accessKeySecret: secret.accessKeySecret,
+      regionId: secret.regionId,
+      vswitchId: secret.vswitchId,
+      securityGroupId: secret.securityGroupId,
+    };
+  }
   const steps = {
-    shell: makeShellStep({ eciProvider, genToken: randomUUID, controlPlaneBase: resolveControlBase }),
+    shell: makeShellStep({
+      eciProvider, genToken: randomUUID, controlPlaneBase: resolveControlBase,
+      getEci: getEciConfig,
+    }),
     approval: makeApprovalStep({
       dingtalkCorpProvider, getCredentialKind, getCredentialSecrets,
       genToken: randomUUID, controlPlaneBase: resolveControlBase,

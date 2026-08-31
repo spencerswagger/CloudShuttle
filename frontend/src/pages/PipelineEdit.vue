@@ -54,8 +54,8 @@ async function hydrate() {
     resetHookSession(); // 切换流水线：丢弃后端下发的触发地址与调试接收态，避免跨 /pipelines/:id 残留
     // 下拉数据懒加载：仅当节点实际用到镜像/凭证才请求，避免挂载即连拉 3 个接口
     const ns = current.value.spec_json?.nodes ?? [];
+    if (ns.some((n) => n.type === "shell" || n.type === "approval")) loadCreds();
     if (ns.some((n) => n.type === "shell")) loadImages();
-    if (ns.some((n) => n.type === "approval")) loadCreds();
     nextTick(fitAll); // 回填内容后按内容重算各正文/命令输入框高度
   } catch (e) {
     if (e?.status === 404) notify({ type: "error", message: "未找到该流水线，可能已被删除" });
@@ -171,10 +171,12 @@ const isCorpRobot = (name) => {
   const c = creds.value.find((x) => x.name === name);
   return convKinds.includes(c?.kind);
 };
+// shell 节点只展示 eci 类型凭证作为运行载体
+const eciCreds = computed(() => (creds.value || []).filter((c) => c.kind === "eci"));
 
 // 高级机器人下拉：主标题取自凭证名，副标题拼接企业/应用元信息（display_meta），并展示应用图标
 const robotOpenId = ref(""); // 当前展开下拉的节点 id；空串表示全部收起
-const kindName = (k) => ({ "dingtalk-corp": "钉钉企业机器人", git: "Git 令牌" }[k] || k || "凭证");
+const kindName = (k) => ({ "dingtalk-corp": "钉钉企业机器人", eci: "阿里云 ECI", git: "Git 令牌" }[k] || k || "凭证");
 const credTitle = (c) => c?.name || "未命名凭证";
 const credSub = (c) => {
   const parts = [];
@@ -290,15 +292,15 @@ const nodeTarget = (n) =>
 
 const addNode = (type) => {
   // 添加节点后会用到对应下拉，此时再按需加载其数据
+  if (type === "shell" || type === "approval") loadCreds();
   if (type === "shell") loadImages();
-  if (type === "approval") loadCreds();
   const node = {
     id: `n${Date.now()}`,
     type,
     step: type,
     params:
       type === "shell"
-        ? { image: images.value[0]?.image ?? "alpine", command: "", env: [], outputs: [{ key: "step_out" }] }
+        ? { image: images.value[0]?.image ?? "alpine", command: "", env: [], outputs: [{ key: "step_out" }], credential: "" }
         : { robot: "", message: DEFAULT_APPROVAL_BODY, target: { type: "user", openIds: "", members: [] } },
   };
   current.value.spec_json.nodes.push(node);
@@ -783,6 +785,15 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
               <div class="node-body">
                 <template v-if="n.type === 'shell'">
                   <div class="field">
+                    <label class="field-label">ECI 凭证 <span class="req">*</span></label>
+                    <select class="select" v-model="n.params.credential">
+                      <option value="">选择运行载体（阿里云 ECI 凭证）…</option>
+                      <option v-for="c in eciCreds" :key="c.name" :value="c.name">{{ c.name }}</option>
+                    </select>
+                    <p class="field-hint" v-if="!eciCreds.length">暂无 ECI 凭证，请先在「凭证」中创建阿里云 ECI 类型凭证</p>
+                    <p class="field-hint" v-else>Shell 节点将使用该凭证在阿里云 ECI 上创建一次性容器执行命令</p>
+                  </div>
+                  <div class="field">
                     <label class="field-label">运行镜像</label>
                     <div class="group-row">
                       <select class="select" v-model="n.params.image">
@@ -1191,6 +1202,7 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
 
 .field-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
 .field-head .field-label { margin-bottom: 0; }
+.field-label .req { color: var(--warn); margin-left: 2px; }
 
 .member-list { border-top: 1px solid rgba(255,255,255,.06); }
 .member-row {

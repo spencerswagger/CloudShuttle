@@ -1,6 +1,23 @@
 // 凭证类型元数据（列表页与表单页共用）
 export const CRED_KINDS = [
   {
+    value: "eci",
+    label: "阿里云 ECI",
+    icon: "M12 2l8 4v6a8 8 0 0 1-4.5 7.2L12 21l-3.5-1.8A8 8 0 0 1 4 12V6l8-4zm-2 11l2 2 4-5",
+    hint: "提供阿里云弹性容器实例（ECI）的调用凭据，供 Shell 节点在云端一次性运行命令。保存时不做在线校验；请确保 AK 具备 ECI 与 VPC 相关权限。",
+    guide: [
+      { title: "创建 AccessKey", text: "阿里云控制台 → 访问控制 RAM → 用户 → 创建 AccessKey，建议仅授予 ECI 与 VPC 权限", url: "https://ram.console.aliyun.com" },
+      { title: "准备交换机与安全组", text: "在目标地域创建 VPC → 交换机（VSwitch）与安全组（SecurityGroup），ECI 实例将部署在其中", url: "https://ecs.console.aliyun.com" },
+    ],
+    fields: [
+      { k: "accessKeyId", label: "AccessKey ID", ph: "LTAI5t…" },
+      { k: "accessKeySecret", label: "AccessKey Secret", ph: "AccessKey Secret", secret: true },
+      { k: "regionId", label: "地域 Region ID", ph: "cn-hangzhou", hint: "如 cn-hangzhou / cn-shanghai" },
+      { k: "vswitchId", label: "交换机 VSwitch ID", ph: "vsw-…" },
+      { k: "securityGroupId", label: "安全组 ID", ph: "sg-…", hint: "安全组需放行 runner 回调所需出网" },
+    ],
+  },
+  {
     value: "dingtalk-corp",
     label: "钉钉企业机器人",
     icon: "M6 3h12v18H6zM9.5 8h5M9.5 12h5M9.5 16h3",

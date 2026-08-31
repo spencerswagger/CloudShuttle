@@ -1,6 +1,56 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { makeShellStep } from "../steps/shell.js";
+import { createEciProvider, parseResource, buildCreateEciRequest } from "../providers/eci.js";
+
+test("parseResource 解析 vCPU/内存", () => {
+  assert.deepEqual(parseResource("2 vCPU · 4 GiB"), { cpu: 2, memory: 4 });
+  assert.deepEqual(parseResource("1 vCPU · 1 Gi"), { cpu: 1, memory: 1 });
+  assert.deepEqual(parseResource(""), { cpu: undefined, memory: undefined });
+  assert.deepEqual(parseResource("0.5 cpu · 2 gib"), { cpu: 0.5, memory: 2 });
+});
+
+test("buildCreateEciRequest 拼 CreateContainerGroup 参数", () => {
+  const req = buildCreateEciRequest({
+    name: "cloudshuttle-1-n1",
+    image: "alpine",
+    command: "echo hi",
+    env: [{ k: "A", v: "1" }],
+    resource: "2 vCPU · 4 GiB",
+    timeout: 300,
+    eci: {
+      accessKeyId: "ak", accessKeySecret: "sk", regionId: "cn-hangzhou",
+      vswitchId: "vsw-1", securityGroupId: "sg-1",
+    },
+  });
+  assert.equal(req.regionId, "cn-hangzhou");
+  assert.equal(req.containerGroupName, "cloudshuttle-1-n1");
+  assert.equal(req.securityGroupId, "sg-1");
+  assert.equal(req.vSwitchId, "vsw-1");
+  assert.equal(req.cpu, 2);
+  assert.equal(req.memory, 4);
+  assert.equal(req.activeDeadlineSeconds, 300);
+  assert.equal(req.clientToken, "cloudshuttle-1-n1");
+  assert.deepEqual(req.container[0].environmentVar, [{ key: "A", value: "1" }]);
+  assert.deepEqual(req.container[0].image, "alpine");
+});
+
+test("createEciProvider.dispatch 透传 eci 配置并拼容器组名", async () => {
+  let got = null;
+  const provider = createEciProvider({ create: async (p) => { got = p; return "eci-xxx"; } });
+  const { jobRef } = await provider.dispatch({
+    execId: 7, nodeId: "n2", image: "alpine", command: "x",
+    env: [], resource: "1 vCPU · 1 GiB", timeout: 60,
+    callbackUrl: "cb", token: "tok", eci: { regionId: "cn-hangzhou" },
+  });
+  assert.equal(jobRef, "eci-xxx");
+  assert.equal(got.name, "cloudshuttle-7-n2");
+  assert.deepEqual(got.eci, { regionId: "cn-hangzhou" });
+});
+
+test("buildCreateEciRequest 缺 eci 配置时抛错", () => {
+  assert.throws(() => buildCreateEciRequest({ name: "x", image: "a" }), /eci credential config missing/);
+});
 
 test("shell step 派发 ECI：注入 job URL / 输出文件 / 回调 token+secret / 控制面基址", async () => {
   let dispatched = null;

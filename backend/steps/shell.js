@@ -26,7 +26,7 @@ function envToEntries(environment) {
   return [];
 }
 
-export function makeShellStep({ eciProvider, genToken, controlPlaneBase }) {
+export function makeShellStep({ eciProvider, genToken, controlPlaneBase, getEci }) {
   return async function shellStep(node, ctx) {
     const p = node.params;
     const base = typeof controlPlaneBase === "function" ? controlPlaneBase(ctx) : controlPlaneBase;
@@ -46,10 +46,13 @@ export function makeShellStep({ eciProvider, genToken, controlPlaneBase }) {
     ];
     // 最终 env = 引导变量 + 节点自身 p.env + environment 全部项（environment 在尾、同名覆盖优先，但不得盖过引导变量）
     const env = [...controlEnv, ...(Array.isArray(p.env) ? p.env : []), ...envToEntries(ctx.environment)];
+    // shell 节点 params.credential 引用 eci 凭证，解析得到完整阿里云配置
+    const eci = p.credential ? await getEci(p.credential) : null;
     const { jobRef } = await eciProvider.dispatch({
       execId: ctx.execId, nodeId: node.id,
       image: p.image, command: p.command, env,
       resource: p.resource, timeout: p.timeout, callbackUrl, token,
+      eci,
     });
     await ctx.recordRegistry({ kind: "eci", token, secret, execId: ctx.execId, nodeId: node.id });
     // 声明输出 key：ECI 回调侧按此校验 parseOutput，并把 K=V 写回 environment 供后继节点引用
