@@ -54,17 +54,35 @@ export function parseOutput(text) {
 }
 
 /**
- * 触发源全局 key：执行元信息 + manual.params[](key) + webhook.mappings[](name)。
+ * 统一触发参数读取：manual 与 webhook 共用一份 params（webhook 多一个 jsonPath 字段）。
+ * 新结构 spec.trigger.params[] = {key, default, jsonPath?, ...}；
+ * 旧结构（trigger.manual.params + trigger.webhook.mappings）合并兜底，存量库未重存也能触发。
+ * @param {object} spec
+ * @returns {Array<{key?:string, default?:*, jsonPath?:string}>}
+ */
+export function triggerParamsOf(spec) {
+  const t = spec?.trigger;
+  if (Array.isArray(t?.params)) return t.params;
+  const merged = new Map();
+  for (const p of t?.manual?.params ?? []) if (p?.key) merged.set(p.key, { ...p });
+  for (const m of t?.webhook?.mappings ?? []) {
+    if (!m?.name) continue;
+    const hit = merged.get(m.name);
+    if (hit) hit.jsonPath = m.jsonPath;
+    else merged.set(m.name, { key: m.name, jsonPath: m.jsonPath });
+  }
+  return [...merged.values()];
+}
+
+/**
+ * 触发源全局 key：执行元信息 + 统一触发参数的 key（含旧结构合并）。
  * @param {object} spec
  * @returns {string[]}
  */
 export function globalKeysOf(spec) {
   const keys = ["pipeline_id", "pipeline_name", "run_no", "exec_id", "started_at"];
-  for (const p of spec?.trigger?.manual?.params ?? []) {
+  for (const p of triggerParamsOf(spec)) {
     if (p?.key) keys.push(p.key);
-  }
-  for (const m of spec?.trigger?.webhook?.mappings ?? []) {
-    if (m?.name) keys.push(m.name);
   }
   return keys;
 }

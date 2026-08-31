@@ -169,3 +169,54 @@ test("assembleTriggerEnv：无 trigger 配置时仅返回 initEnv，且不抛错
   const env = assembleTriggerEnv({ spec: { nodes: [] }, initEnv: new Map([["exec_id", "3"]]) });
   assert.deepEqual(Object.fromEntries(env), { exec_id: "3" });
 });
+
+// ---------- 统一触发参数：manual 与 webhook 共用 spec.trigger.params（webhook 多 jsonPath） ----------
+
+test("统一 params：webhook 按 jsonPath 抽取，未命中回退 default", () => {
+  const env = assembleTriggerEnv({
+    spec: {
+      trigger: {
+        params: [
+          { key: "branch", default: "main", jsonPath: "$.ref" },
+          { key: "env", default: "prod" }, // 无 jsonPath：webhook 触发也用 default
+        ],
+      },
+    },
+    webhookBody: { ref: "refs/heads/dev" },
+    initEnv: new Map(),
+  });
+  assert.deepEqual(Object.fromEntries(env), { branch: "refs/heads/dev", env: "prod" });
+});
+
+test("统一 params：manual 表单值覆盖 default，jsonPath 字段被忽略", () => {
+  const env = assembleTriggerEnv({
+    spec: { trigger: { params: [{ key: "branch", default: "main", jsonPath: "$.ref" }] } },
+    formValue: { branch: "feat-x" },
+    initEnv: new Map(),
+  });
+  assert.equal(env.get("branch"), "feat-x");
+});
+
+test("统一 params：webhook 命中为 null 时回退 default，而非写入 null", () => {
+  const env = assembleTriggerEnv({
+    spec: { trigger: { params: [{ key: "n", default: "d", jsonPath: "$.x" }] } },
+    webhookBody: { x: null },
+    initEnv: new Map(),
+  });
+  assert.equal(env.get("n"), "d");
+});
+
+test("triggerParamsOf：旧结构（manual.params + webhook.mappings）按 key 合并兜底", () => {
+  const env = assembleTriggerEnv({
+    spec: {
+      trigger: {
+        manual: { params: [{ key: "branch", default: "main" }] },
+        webhook: { mappings: [{ name: "branch", jsonPath: "$.ref" }, { name: "extra", jsonPath: "$.e" }] },
+      },
+    },
+    webhookBody: { ref: "dev" },
+    initEnv: new Map(),
+  });
+  // branch 双边都有 → 合并为同一参数（jsonPath 叠上）；extra 仅 webhook 有 → 补 key
+  assert.deepEqual(Object.fromEntries(env), { branch: "dev" });
+});
