@@ -122,10 +122,25 @@ const triggerLabel = computed(() => {
         <ol class="steps">
           <li v-for="(s, i) in steps" :key="i" class="step">
             <span class="step-idx mono">{{ String(i + 1).padStart(2, "0") }}</span>
-            <span class="step-name">{{ s.node?.name || s.name || `STEP ${i + 1}` }}</span>
+            <span class="step-name">{{ s.node_id || s.node?.name || s.name || `STEP ${i + 1}` }}</span>
+            <span v-if="s.type" class="step-type mono">{{ s.type }}</span>
             <span class="step-status mono">{{ s.status || "—" }}</span>
           </li>
         </ol>
+      </section>
+
+      <section v-if="steps.some((s) => s.logs || (typeof s.output === 'object' && s.output && Object.keys(s.output).length))" class="card steps-card rise" style="animation-delay:.09s">
+        <h3 class="block-title display">节点输入 / 输出</h3>
+        <div v-for="(s, i) in steps" :key="'o' + i" class="node-out">
+          <template v-if="s.logs">
+            <span class="step-name">{{ s.node_id || s.node?.name || s.name || `STEP ${i + 1}` }} · 日志</span>
+            <pre class="log-pre mono">{{ s.logs }}</pre>
+          </template>
+          <template v-if="s.output && typeof s.output === 'object' && Object.keys(s.output).length">
+            <span class="step-name">{{ s.node_id || s.node?.name || s.name || `STEP ${i + 1}` }} · 输出</span>
+            <pre class="log-pre mono">{{ JSON.stringify(s.output, null, 2) }}</pre>
+          </template>
+        </div>
       </section>
 
       <section v-if="exec.log" class="card log-card rise" style="animation-delay:.1s">
@@ -162,6 +177,10 @@ const triggerLabel = computed(() => {
 .step-idx { font-size: 11px; color: var(--accent); }
 .step-name { flex: 1; color: var(--text-1); }
 .step-status { font-size: 11px; color: var(--text-3); }
+.step-type { margin-left: 8px; font-size: 11px; color: var(--text-3); }
+
+.node-out { margin-bottom: 14px; }
+.node-out .step-name { margin-bottom: 6px; }
 
 .log-pre {
   margin: 0; padding: 14px 16px;
