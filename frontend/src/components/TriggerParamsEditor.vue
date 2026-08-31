@@ -76,3 +76,42 @@ function setOptions(p, ev) {
     </div>
   </div>
 </template>
+
+<style scoped>
+/* 统一触发参数表：样式随组件自带，避免依赖父作用域失效（scoped 不穿透） */
+.trig-empty {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  padding: 14px 16px; border: 1px dashed var(--line-strong); border-radius: 9px; font-size: 12.5px;
+}
+.param-list { display: flex; flex-direction: column; gap: 8px; }
+.param-row { display: grid; gap: 10px; align-items: center; }
+/* 表头与数据行用同一份 8 列网格保证逐列对齐；加重字号颜色，便于填写识别 */
+.param-row.param-head {
+  grid-template-columns: .9fr 1fr 1fr 1fr 1.3fr 44px 1.6fr 30px;
+  font-family: var(--font-mono); font-size: 11.5px; font-weight: 700; letter-spacing: .05em;
+  text-transform: uppercase; color: var(--text-2); padding: 2px 2px 0;
+}
+.param-cell.key { grid-column: 1; }
+.param-cell.title { grid-column: 2; }
+.param-cell.type { grid-column: 3; }
+.param-cell.default { grid-column: 4; }
+.param-cell.options { grid-column: 5; }
+.param-cell.req { grid-column: 6; text-align: center; display: flex; justify-content: center; }
+.param-cell.desc { grid-column: 7; }
+.param-cell.del { grid-column: 8; }
+.param-row:not(.param-head) { grid-template-columns: .9fr 1fr 1fr 1fr 1.3fr 44px 1.6fr 30px; }
+.param-row:not(.param-head) .param-cell { min-width: 0; }
+/* Webhook 模式（withJson）：额外第 8 列 JSONPath，del 移到第 9 列；表头/数据行同模板对齐 */
+.param-row.withJson { grid-template-columns: .85fr .9fr .9fr .9fr 1.1fr 44px 1.2fr 1.3fr 30px; }
+.param-row.withJson .param-cell.json { grid-column: 8; }
+.param-row.withJson .param-cell.del { grid-column: 9; }
+.trig-acts { display: flex; justify-content: flex-end; margin-top: 4px; }
+@media (max-width: 1080px) {
+  .param-row:not(.param-head) { grid-template-columns: 1fr 1fr; }
+  .param-row.withJson { grid-template-columns: 1fr 1fr; }
+  .param-row.withJson .param-cell.json { grid-column: 1 / 3; }
+  .param-row.withJson .param-cell.del { grid-column: auto; }
+  .param-row:not(.param-head) .param-cell { width: 100%; }
+  .param-row.param-head { display: none; }
+}
+</style>
