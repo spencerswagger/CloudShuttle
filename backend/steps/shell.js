@@ -52,7 +52,7 @@ export function makeShellStep({ eciProvider, genToken, controlPlaneBase }) {
       resource: p.resource, timeout: p.timeout, callbackUrl, token,
     });
     await ctx.recordRegistry({ kind: "eci", token, secret, execId: ctx.execId, nodeId: node.id });
-    // 声明输出 key，供后续 ECI 回调侧解析写回 environment（本期只到声明 + 接口层，不做真执行写回）
+    // 声明输出 key：ECI 回调侧按此校验 parseOutput，并把 K=V 写回 environment 供后继节点引用
     return { kind: "dispatch", ref: jobRef, outputKeys: outputKeysOf(p) };
   };
 }
