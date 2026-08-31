@@ -4,6 +4,8 @@
 //           advance(一次推进) / record(写节点记录)。
 // 触发（手动/webhook）不在本层装配 spec：由控制面 hydrateForRun 造好携带 execId 的
 // spec 与 environment 后直接调用 run，故本层不保留任何独立的 webhook 触发入口（历史死代码已删）。
+import { parseOutput } from "./variables.js";
+
 export function createOrchestrator({
   loadSpec,
   loadSpecForExec = loadSpec,
@@ -58,14 +60,16 @@ export function createOrchestrator({
 
   return {
     run,
-    // ECI 结束回调：节点成功 → 载入 spec 续跑到下一节点
-    async onEciDone({ execId, nodeId }) {
-      console.log(`[orchestrator] exec=${execId} 收到 ECI 节点 ${nodeId} 成功回调，标记完成并继续推进`);
+    // ECI 结束回调：节点成功 → 解析 K=V 输出写回 environment → 载入 spec 续跑到下一节点
+    async onEciDone({ execId, nodeId, output, logs }) {
+      console.log(`[orchestrator] exec=${execId} 收到 ECI 节点 ${nodeId} 成功回调，解析输出并继续推进`);
+      const parsed = parseOutput(output);
       const next = await markDone(nodeId, execId, false);
-      await record({ execId, nodeId, status: "succeeded", output: { kind: "eci" } });
+      await record({ execId, nodeId, status: "succeeded", output: parsed, logs });
       const spec = await loadSpecForExec(execId);
-      // 续跑不丢 environment：从 markDone 透传回的快照 environment 重建 Map，供 state.advanceOnce 继续引用
-      return advance({ spec, snap: next, execId, environment: buildEnv(next.environment, null) });
+      // 把解析出的 K=V 写回 environment（对后继节点可见），再向后继 advance
+      const env = buildEnv(next.environment, parsed);
+      return advance({ spec, snap: next, execId, environment: env });
     },
     // ECI 失败回调 → 该节点终态失败，整个执行结束
     async onEciFail({ execId, nodeId }) {

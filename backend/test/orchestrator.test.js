@@ -116,6 +116,26 @@ test("markDone 写回快照透传 environment，与读入一致", async () => {
   assert.deepEqual(saved.environment, { x: "1" }); // save 捕获入参含 environment
 });
 
+test("eciDone：解析 K=V output 写回 environment，后继节点可见（FC 冻结下回调返回前必须完成）", async () => {
+  const spec = {
+    execId: 1,
+    nodes: [
+      { id: "a", type: "shell", params: { outputs: [{ key: "src" }], command: "echo src=abc" } },
+      { id: "b", type: "approval", params: { message: "src=${src}" } },
+    ],
+    edges: [["a", "b"]],
+  };
+  let advancedEnv = null;
+  const orchestrator = createOrchestrator({
+    loadSpecForExec: async () => spec,
+    snapshotStore: { load: async () => ({ done: [], waiting: null, environment: {} }), save: async () => {}, clear: async () => {} },
+    advance: async ({ environment }) => { advancedEnv = Object.fromEntries(environment); return { status: "completed" }; },
+    record: async () => {},
+  });
+  await orchestrator.onEciDone({ execId: 1, nodeId: "a", output: "git_sha=9f1c\nsrc=abc", logs: "# run\necho hi" });
+  assert.equal(advancedEnv.src, "abc", "A 的输出 src=abc 必须写回 environment 供 B 引用");
+});
+
 test("跨回调续跑不丢 environment：markDone 后接续的 advance 入参仍含已累积变量", async () => {
   let captured = null;
   const adv = async (arg) => { captured = arg; return { spec: arg.spec, snap: arg.snap, waiting: "n2" }; };
