@@ -51,7 +51,7 @@ export function makeShellStep({ eciProvider, genToken, controlPlaneBase, getEci 
     const { jobRef } = await eciProvider.dispatch({
       execId: ctx.execId, nodeId: node.id,
       image: p.image, command: p.command, env,
-      resource: p.resource, timeout: p.timeout, callbackUrl, token,
+      cpu: p.cpu, memory: p.memory, timeout: p.timeout, callbackUrl, token,
       eci,
     });
     await ctx.recordRegistry({ kind: "eci", token, secret, execId: ctx.execId, nodeId: node.id });

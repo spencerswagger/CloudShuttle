@@ -1,22 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { makeShellStep } from "../steps/shell.js";
-import { createEciProvider, parseResource, buildCreateEciRequest } from "../providers/eci.js";
+import { createEciProvider, buildCreateEciRequest, probeSpecsOf } from "../providers/eci.js";
 
-test("parseResource 解析 vCPU/内存", () => {
-  assert.deepEqual(parseResource("2 vCPU · 4 GiB"), { cpu: 2, memory: 4 });
-  assert.deepEqual(parseResource("1 vCPU · 1 Gi"), { cpu: 1, memory: 1 });
-  assert.deepEqual(parseResource(""), { cpu: undefined, memory: undefined });
-  assert.deepEqual(parseResource("0.5 cpu · 2 gib"), { cpu: 0.5, memory: 2 });
-});
-
-test("buildCreateEciRequest 拼 CreateContainerGroup 参数", () => {
+test("buildCreateEciRequest 拼 CreateContainerGroup 参数（cpu/memory/timeout 结构化）", () => {
   const req = buildCreateEciRequest({
     name: "cloudshuttle-1-n1",
     image: "alpine",
     command: "echo hi",
     env: [{ k: "A", v: "1" }],
-    resource: "2 vCPU · 4 GiB",
+    cpu: "2",
+    memory: "4",
     timeout: 300,
     eci: {
       accessKeyId: "ak", accessKeySecret: "sk", regionId: "cn-hangzhou",
@@ -35,17 +29,53 @@ test("buildCreateEciRequest 拼 CreateContainerGroup 参数", () => {
   assert.deepEqual(req.container[0].image, "alpine");
 });
 
+test("buildCreateEciRequest 未配置 cpu/memory/timeout 时不传对应字段", () => {
+  const req = buildCreateEciRequest({
+    name: "x", image: "a", command: "c", env: [],
+    eci: { regionId: "cn-hangzhou", vswitchId: "vsw", securityGroupId: "sg" },
+  });
+  assert.equal(req.cpu, undefined);
+  assert.equal(req.memory, undefined);
+  assert.equal(req.activeDeadlineSeconds, undefined);
+});
+
 test("createEciProvider.dispatch 透传 eci 配置并拼容器组名", async () => {
   let got = null;
   const provider = createEciProvider({ create: async (p) => { got = p; return "eci-xxx"; } });
   const { jobRef } = await provider.dispatch({
     execId: 7, nodeId: "n2", image: "alpine", command: "x",
-    env: [], resource: "1 vCPU · 1 GiB", timeout: 60,
+    env: [], cpu: "1", memory: "2", timeout: 60,
     callbackUrl: "cb", token: "tok", eci: { regionId: "cn-hangzhou" },
   });
   assert.equal(jobRef, "eci-xxx");
   assert.equal(got.name, "cloudshuttle-7-n2");
   assert.deepEqual(got.eci, { regionId: "cn-hangzhou" });
+  assert.equal(got.cpu, "1");
+  assert.equal(got.memory, "2");
+  assert.equal(got.timeout, 60);
+});
+
+test("probeSpecsOf 只把询价成功的组合视为可购档位", async () => {
+  // 模拟 2/4 可购、1/1 报错（如地区无货/权限问题）
+  const { cpus, mems, combos } = await probeSpecsOf({
+    priceOf: async (cpu, memory) => {
+      if (cpu === 1 && memory === 1) throw new Error("no stock");
+      return { unitPrice: cpu + memory };
+    },
+    combos: [{ cpu: 1, memory: 1 }, { cpu: 2, memory: 4 }],
+  });
+  assert.deepEqual(cpus, [2]);
+  assert.deepEqual(mems, [4]);
+  assert.equal(combos.length, 2);
+  assert.equal(combos[0].available, false);
+  assert.equal(combos[1].available, true);
+});
+
+test("probeSpecsOf 全部失败抛可读错误", async () => {
+  await assert.rejects(
+    probeSpecsOf({ priceOf: async () => { throw new Error("SignatureDoesNotMatch"); }, combos: [{ cpu: 1, memory: 2 }] }),
+    /无法从阿里云校验 ECI 规格.*SignatureDoesNotMatch/s
+  );
 });
 
 test("buildCreateEciRequest 缺 eci 配置时抛错", () => {

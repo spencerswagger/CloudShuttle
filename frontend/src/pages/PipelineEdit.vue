@@ -8,7 +8,7 @@ import { notify } from "../lib/notify.js";
 import { buildMappingDraft } from "../lib/webhookDraft.js";
 import { getPipeline, createPipeline, updatePipeline, getPipelineHook, resetWebhookSecret, fetchWebhookProbe } from "../api/pipeline.js";
 import { fetchImages } from "../api/image.js";
-import { fetchCredentials, listDepartments, listDepartmentUsers } from "../api/credential.js";
+import { fetchCredentials, fetchEciSpecs, listDepartments, listDepartmentUsers } from "../api/credential.js";
 import RunPipelineModal from "../components/RunPipelineModal.vue";
 import TriggerParamsEditor from "../components/TriggerParamsEditor.vue";
 
@@ -101,7 +101,12 @@ function varGroups(n) {
     for (const o of byId[id]?.params?.outputs ?? []) {
       if (o?.key && !used.has(o.key)) {
         used.add(o.key);
-        up.push({ k: o.key, t: o.desc || "节点输出", d: "来自节点 " + drainId(id) });
+        const sel = o.description || o.title;
+        up.push({
+          k: o.key,
+          t: o.title || o.key,
+          d: [sel ? `来自节点 ${drainId(id)} · ${sel}` : `来自节点 ${drainId(id)}`, o.type].filter(Boolean).join(" · "),
+        });
       }
     }
     stack.push(...(parentsOf[id] ?? []));
@@ -159,6 +164,47 @@ const NODE_KINDS = {
   shell:    { label: "Shell 执行",   accent: "var(--accent)",  icon: "M4 5l6 7-6 7m8 0h8" },
   approval: { label: "人工审批",     accent: "var(--ember)",   icon: "M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6zm-3.5 6.5L11 12l4-4.5" },
 };
+// Shell 节点运行规格（vCPU 数 / 内存 GiB）：预设档位，选中 ECI 凭证后用阿里云接口探测结果覆盖
+const ECI_PRESET_CPUS = ["0.5", "1", "2", "4", "8"];
+const ECI_PRESET_MEMS = ["1", "2", "4", "8", "16"];
+const ECI_CPUS = ref([...ECI_PRESET_CPUS]);
+const ECI_MEMS = ref([...ECI_PRESET_MEMS]);
+const eciSpecLoading = ref(false);
+const eciSpecError = ref("");
+// 用 eci 凭证探测阿里云可购规格：成功则刷新 CPU/内存下拉，失败降级预设并提示原因
+function probeEciSpecs(name) {
+  if (!name) return;
+  eciSpecLoading.value = true;
+  eciSpecError.value = "";
+  fetchEciSpecs(name)
+    .then((res) => {
+      const d = res?.data ?? res;
+      if (d?.ok === false || !d?.cpus) throw new Error(d?.message || "无法获取 ECI 规格");
+      const cpus = (d.cpus || []).map(String).filter(Boolean);
+      const mems = (d.mems || []).map(String).filter(Boolean);
+      if (cpus.length) ECI_CPUS.value = cpus;
+      if (mems.length) ECI_MEMS.value = mems;
+    })
+    .catch((err) => {
+      ECI_CPUS.value = [...ECI_PRESET_CPUS];
+      ECI_MEMS.value = [...ECI_PRESET_MEMS];
+      eciSpecError.value = err?.message || String(err);
+    })
+    .finally(() => { eciSpecLoading.value = false; });
+}
+// 每个 shell 节点的凭证变化时自动探测规格（含首次加载已配置凭证的节点）
+let prevEciCredential = {};
+watch(
+  () => nodes.value.filter((n) => n.type === "shell").map((n) => ({ id: n.id, c: n.params?.credential ?? "" })),
+  (list) => {
+    const cur = {};
+    for (const { id, c } of list) {
+      cur[id] = c;
+      if (c && c !== prevEciCredential[id]) probeEciSpecs(c);
+    }
+    prevEciCredential = cur;
+  }
+);
 
 const drainId = (id) => {
   const s = String(id);
@@ -300,7 +346,7 @@ const addNode = (type) => {
     step: type,
     params:
       type === "shell"
-        ? { image: images.value[0]?.image ?? "alpine", command: "", env: [], outputs: [{ key: "step_out" }], credential: "" }
+        ? { image: images.value[0]?.image ?? "alpine", command: "", env: [], outputs: [{ key: "step_out" }], credential: "", cpu: "1", memory: "2", timeout: 300 }
         : { robot: "", message: DEFAULT_APPROVAL_BODY, target: { type: "user", openIds: "", members: [] } },
   };
   current.value.spec_json.nodes.push(node);
@@ -853,22 +899,40 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
                     </div>
                   </div>
                   <div class="field">
-                    <label class="field-label">输出变量（K=V，写回供后继节点引用）</label>
-                    <div class="kv-list">
-                      <div v-for="(o, oi) in n.params.outputs || []" :key="oi" class="kv-row">
-                        <input class="input mono kv-key" v-model="o.key" :placeholder="'step_out' + (oi ? '' : '（默认）')" />
-                        <button type="button" class="btn btn-sm btn-danger" title="删除" @click="n.params.outputs.splice(oi, 1)">×</button>
-                      </div>
-                      <button type="button" class="btn btn-sm btn-ghost" @click="(n.params.outputs = n.params.outputs || []).push({ key: '' })">＋ 添加输出 key</button>
-                    </div>
-                    <p class="field-hint">脚本内可用 <code class="mono ph-code">echo "key=value" >> "$CLOUDSHUTTLE_OUT_FILE"</code> 写回；未配置 key 时默认输出单变量 <code class="mono ph-code">step_out</code>。</p>
+                    <label class="field-label">输出变量（K=V 写回，供后继节点引用）</label>
+                    <TriggerParamsEditor :params="n.params.outputs ?? (n.params.outputs = [])" :show-required="false" />
+                    <p class="field-hint">脚本内可用 <code class="mono ph-code">echo "key=value" >> "$CLOUDSHUTTLE_OUT_FILE"</code> 写回；未声明 key 时默认输出单变量 <code class="mono ph-code">step_out</code>。</p>
                   </div>
                   <div class="field">
-                    <label class="field-label">执行规格 / 超时（秒）</label>
-                    <div class="group-row">
-                      <input class="input mono" v-model="n.params.resource" placeholder="2 vCPU · 4 GiB（可选）" />
-                      <input class="input mono" v-model.number="n.params.timeout" placeholder="300" />
+                    <label class="field-label">运行规格</label>
+                    <div class="approval-grid">
+                      <div class="sub-field">
+                        <label class="sub-label">CPU（vCPU）</label>
+                        <select class="select" v-model="n.params.cpu">
+                          <option v-for="c in ECI_CPUS" :key="c" :value="c">{{ c }}</option>
+                        </select>
+                      </div>
+                      <div class="sub-field">
+                        <label class="sub-label">内存（GiB）</label>
+                        <select class="select" v-model="n.params.memory">
+                          <option v-for="m in ECI_MEMS" :key="m" :value="m">{{ m }}</option>
+                        </select>
+                      </div>
                     </div>
+                    <p class="field-hint" :class="{ warn: eciSpecError }">
+                      {{ eciSpecLoading
+                        ? "正在从阿里云探测可购规格…"
+                        : (eciSpecError
+                            ? `规格探测失败，已回退预设：${eciSpecError}`
+                            : n.params.credential
+                              ? "已加载该地域可购规格（来自阿里云接口）"
+                              : "选中 ECI 凭证后将自动加载该地域可购规格") }}
+                    </p>
+                  </div>
+                  <div class="field">
+                    <label class="field-label">超时（秒）</label>
+                    <input class="input mono" v-model.number="n.params.timeout" placeholder="300" />
+                    <p class="field-hint">容器运行超时上限，到期未完成会被强制终止，单位秒</p>
                   </div>
                 </template>
                 <template v-else>
@@ -1090,6 +1154,8 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
 
 .node-body { padding: 16px; }
 .approval-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.sub-field { display: flex; flex-direction: column; gap: 5px; }
+.sub-field .sub-label { font-size: 12px; color: var(--text-2); }
 .kind-tabs.mini { display: flex; gap: 8px; }
 .kind-tabs.mini .kind-tab {
   flex: 1; justify-content: center; padding: 8px 6px;
@@ -1220,6 +1286,7 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
 .empty-tip { font-size: 12.5px; padding: 6px 2px; }
 .refresh-btn { flex: 0 0 auto; white-space: nowrap; }
 .field-hint { margin-top: 6px; font-size: 12px; color: var(--text-2); line-height: 1.5; }
+.field-hint.warn { color: var(--ember, #f59e0b); }
 
 .org-mask { position: fixed; inset: 0; z-index: 60; background: rgba(0,0,0,.55); display: flex; align-items: center; justify-content: center; }
 .org-panel { width: 520px; max-width: 92vw; max-height: 80vh; background: var(--bg-2); border: 1px solid var(--line-strong); border-radius: 12px; display: flex; flex-direction: column; overflow: hidden; }

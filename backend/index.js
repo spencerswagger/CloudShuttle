@@ -5,7 +5,7 @@ import { pool } from "./db/pg.js";
 import { redis } from "./db/redis.js";
 import { config } from "./config.js";
 import EciClient, { CreateContainerGroupRequest } from "@alicloud/eci20180808";
-import { createEciProvider, buildCreateEciRequest } from "./providers/eci.js";
+import { createEciProvider, buildCreateEciRequest, describeEciSpecs, ECI_PRESET_CHOICES } from "./providers/eci.js";
 import { createDingtalkCorpProvider } from "./providers/dingtalk-corp.js";
 import { createDingtalkTokenCache } from "./providers/dingtalk-token.js";
 import { createDingtalkEnroll } from "./providers/dingtalk-enroll.js";
@@ -56,6 +56,7 @@ const RE = {
   eciDone: /^\/_\/hook\/ecidone\/(\d+)/,
   eciFail: /^\/_\/hook\/fail\/(\d+)/,
   job: /^\/_\/hook\/job\/([^/?]+)/,
+  eciSpecs: /^\/api\/eci\/specs\/([^/]+)/,
 };
 
 export function routeToHandler(path, method, body) {
@@ -136,6 +137,7 @@ export function routeToHandler(path, method, body) {
   if (RE.eciDone.test(path)) return { handler: "internal.eciDone" };
   if (RE.eciFail.test(path)) return { handler: "internal.eciFail" };
   if (RE.job.test(path)) return { handler: "internal.getJob" };
+  if (RE.eciSpecs.test(path)) return { handler: "api.eciSpecs" };
   return { handler: "404" };
 }
 
@@ -514,6 +516,21 @@ const DISPATCH = {
     return ok(out);
   },
   "api.getWebhookProbe": async ({ path }) => ok(api.getWebhookProbe(Number(m(path, RE.webhookProbe)))),
+  "api.eciSpecs": async (ctx) => {
+    const { app, path } = ctx;
+    // 用 eci 凭证的 AK 探测该 region 可购规格档位；失败时返回预设 + 可读错误供前端降级展示
+    const name = decodePathSegment(m(path, RE.eciSpecs));
+    try {
+      const eci = await app.getEciConfig(name);
+      const out = await describeEciSpecs({ eci });
+      return ok({ name, ...out, preset: ECI_PRESET_CHOICES });
+    } catch (err) {
+      return {
+        status: 200,
+        body: { ok: false, code: "ECI_SPECS_UNAVAILABLE", message: err?.message ?? String(err), preset: ECI_PRESET_CHOICES },
+      };
+    }
+  },
   "hook.webhook": async (ctx) => {
     const { app, path, body, event } = ctx;
     // hook.webhook 自己返回 { status, body }（200/401/503），不能再套 ok()：

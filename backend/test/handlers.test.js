@@ -36,6 +36,7 @@ test("入口模块可 import 不崩溃，且 CRUD 路由齐全", () => {
   assert.equal(routeToHandler("/api/pipelines/9/webhook-secret", "GET", null).handler, "api.getWebhookSecret");
   assert.equal(routeToHandler("/api/pipelines/9/webhook-secret/reset", "POST", {}).handler, "api.resetWebhookSecret");
   assert.equal(routeToHandler("/api/pipelines/9/webhook-probe", "GET", null).handler, "api.getWebhookProbe");
+  assert.equal(routeToHandler("/api/eci/specs/my-ak", "GET", null).handler, "api.eciSpecs");
   assert.equal(routeToHandler("/unknown", "GET", null).handler, "404");
 });
 
