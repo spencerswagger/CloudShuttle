@@ -27,6 +27,7 @@ test("buildCreateEciRequest 拼 CreateContainerGroup 参数（cpu/memory/timeout
   assert.equal(req.clientToken, "cloudshuttle-1-n1");
   assert.deepEqual(req.container[0].environmentVar, [{ key: "A", value: "1" }]);
   assert.deepEqual(req.container[0].image, "alpine");
+  assert.equal(req.container[0].name, "runner", "容器级 Name 必填：缺失将报 ParameterRequired: Name is required");
 });
 
 test("buildCreateEciRequest 未配置 cpu/memory/timeout 时不传对应字段", () => {

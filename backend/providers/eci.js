@@ -122,6 +122,8 @@ export function buildCreateEciRequest({ name, image, command, env, cpu, memory, 
     regionId,
     containerGroupName: name,
     container: [{
+      // 容器级 Name 必填：ECI 要求 Container 数组每个元素都有容器名，缺失报 ParameterRequired: Name is required
+      name: "runner",
       image,
       command: Array.isArray(command) ? command : [command ?? "sh", "-c", command ?? 'echo "no command"'],
       environmentVar: envVars,

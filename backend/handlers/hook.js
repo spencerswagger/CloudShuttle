@@ -40,22 +40,33 @@ export async function dingtalkCardCb(orchestrator, { token, secret, decision, bo
     `decision=${decision_ ?? "(none)"} -> ${decision_ === "reject" ? "REJECT" : "APPROVE"}`
   );
   const agreed = decision_ === "reject" ? false : true;
-  const out = await orchestrator.onApproval({
-    execId: Number(row.exec_id),
-    nodeId: row.node_id,
-    decision: agreed ? "approve" : "reject",
-  });
-  console.log(`[dingtalk-card] advance done exec=${row.exec_id} node=${row.node_id} out=${JSON.stringify(out ?? {})}`);
-  // 审批已推进，把卡片状态更新为已同意/已拒绝。必须 await 后再响应：
-  // FC 在请求返回后冻结容器，fire-and-forget 的更新会挂起直到下次唤起（用户表现为要点两次才显示已同意）。
-  // 更新失败仅告警，不影响审批推进结果。
-  if (typeof updateCard === "function") {
-    try {
-      await updateCard({ credential: row.credential, token: token_, status: agreed ? "agree" : "reject" });
-    } catch (e) {
-      console.warn("[dingtalk] update card status failed", e?.message);
+  // 先推进审批；无论推进成败都必须更新卡片（用户点同意后卡片要立刻变色，否则像没点到）。
+  // 推进抛错（如下游节点执行失败）时：卡片照常更新，错误如实抛出（500）便于前端/日志可见。
+  let out;
+  let advanceErr;
+  try {
+    out = await orchestrator.onApproval({
+      execId: Number(row.exec_id),
+      nodeId: row.node_id,
+      decision: agreed ? "approve" : "reject",
+    });
+    console.log(`[dingtalk-card] advance done exec=${row.exec_id} node=${row.node_id} out=${JSON.stringify(out ?? {})}`);
+  } catch (e) {
+    advanceErr = e;
+    console.error(`[dingtalk-card] advance FAILED exec=${row.exec_id} node=${row.node_id} err=${e?.message ?? e}`);
+  } finally {
+    // 审批已推进，把卡片状态更新为已同意/已拒绝。必须 await 后再响应：
+    // FC 在请求返回后冻结容器，fire-and-forget 的更新会挂起直到下次唤起（用户表现为要点两次才显示已同意）。
+    // 更新失败仅告警，不影响审批推进结果。
+    if (typeof updateCard === "function") {
+      try {
+        await updateCard({ credential: row.credential, token: token_, status: agreed ? "agree" : "reject" });
+      } catch (e) {
+        console.warn("[dingtalk] update card status failed", e?.message);
+      }
     }
   }
+  if (advanceErr) throw advanceErr;
   return { status: 200, body: out ?? {} };
 }
 

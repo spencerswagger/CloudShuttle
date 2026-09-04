@@ -62,6 +62,23 @@ test("审批回调返回前必须已完成卡片更新（FC 冻结下 fire-and-f
   assert.equal(cardUpdated, true, "响应返回时卡片更新必须已执行完成，而非挂成后台任务");
 });
 
+test("审批推进失败时卡片状态仍必须更新（旧实现会在 onApproval 抛错后跳过 updateCard）", async () => {
+  const { dingtalkCardCb } = await import("../handlers/hook.js");
+  let cardUpdated = false;
+  const ctx = {
+    token: "tk2",
+    body: { content: JSON.stringify({ cardPrivateData: { actionIds: ["agree"], params: { action: "agree" } } }) },
+    lookup: async () => ({ exec_id: 6, node_id: "n1", credential: "demo", secret: "s" }),
+    updateCard: async () => { cardUpdated = true; },
+  };
+  // orchestrator.onApproval 抛错（下游 ECI 创建失败）时，卡片更新仍必须发生
+  const orchestrator = {
+    onApproval: async () => { throw new Error("createContainerGroup failed"); },
+  };
+  await assert.rejects(dingtalkCardCb(orchestrator, ctx), /createContainerGroup failed/);
+  assert.equal(cardUpdated, true, "即使推进失败，卡片也必须先更新，用户点同意后卡片应立刻变色");
+});
+
 test("卡片更新失败不影响审批推进结果（仍返回 200）", async () => {
   const { dingtalkCardCb } = await import("../handlers/hook.js");
   const out = await dingtalkCardCb(
