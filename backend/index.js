@@ -4,8 +4,10 @@
 import { pool } from "./db/pg.js";
 import { redis } from "./db/redis.js";
 import { config } from "./config.js";
-import EciClient, { CreateContainerGroupRequest } from "@alicloud/eci20180808";
-import { createEciProvider, buildCreateEciRequest, describeEciSpecs, ECI_PRESET_CHOICES } from "./providers/eci.js";
+// `@alicloud/*` 为 CJS：ESM import 拿到 module.exports 整体，Client 类在 .default（见 providers/eci.js 注释）
+import EciModule from "@alicloud/eci20180808";
+const { default: EciClient, CreateContainerGroupRequest } = EciModule;
+import { createEciProvider, buildCreateEciRequest, describeEciSpecs, probeEciNetworks, ECI_PRESET_CHOICES } from "./providers/eci.js";
 import { createDingtalkCorpProvider } from "./providers/dingtalk-corp.js";
 import { createDingtalkTokenCache } from "./providers/dingtalk-token.js";
 import { createDingtalkEnroll } from "./providers/dingtalk-enroll.js";
@@ -57,6 +59,7 @@ const RE = {
   eciFail: /^\/_\/hook\/fail\/(\d+)/,
   job: /^\/_\/hook\/job\/([^/?]+)/,
   eciSpecs: /^\/api\/eci\/specs\/([^/]+)/,
+  eciProbeNetworks: /^\/api\/eci\/probe-networks$/,
 };
 
 export function routeToHandler(path, method, body) {
@@ -138,6 +141,9 @@ export function routeToHandler(path, method, body) {
   if (RE.eciFail.test(path)) return { handler: "internal.eciFail" };
   if (RE.job.test(path)) return { handler: "internal.getJob" };
   if (RE.eciSpecs.test(path)) return { handler: "api.eciSpecs" };
+  if (RE.eciProbeNetworks.test(path)) {
+    if (m === "POST") return { handler: "api.eciProbeNetworks" };
+  }
   return { handler: "404" };
 }
 
@@ -389,7 +395,7 @@ async function buildApp() {
   return {
     orchestrator, snapshotStore, mutex, getCredentialSecrets,
     dingtalkTokenCache, enroll: dingtalkEnroll, hydrateForRun,
-    getJob,
+    getEciConfig, getJob,
   };
 }
 
@@ -528,6 +534,21 @@ const DISPATCH = {
       return {
         status: 200,
         body: { ok: false, code: "ECI_SPECS_UNAVAILABLE", message: err?.message ?? String(err), preset: ECI_PRESET_CHOICES },
+      };
+    }
+  },
+  "api.eciProbeNetworks": async ({ body }) => {
+    try {
+      const out = await probeEciNetworks({
+        accessKeyId: body?.accessKeyId,
+        accessKeySecret: body?.accessKeySecret,
+        regionId: body?.regionId,
+      });
+      return ok({ ...out });
+    } catch (err) {
+      return {
+        status: 200,
+        body: { ok: false, code: "ECI_NETWORK_UNAVAILABLE", message: err?.message ?? String(err) },
       };
     }
   },

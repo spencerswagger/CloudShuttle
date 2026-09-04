@@ -1,4 +1,22 @@
 // 凭证类型元数据（列表页与表单页共用）
+// 阿里云 ECI 常用地域（下拉候选；仍可手动输入其他地域 ID）
+export const ECI_REGIONS = [
+  { id: "cn-hangzhou", label: "华东1（杭州）" },
+  { id: "cn-shanghai", label: "华东2（上海）" },
+  { id: "cn-beijing", label: "华北2（北京）" },
+  { id: "cn-zhangjiakou", label: "华北3（张家口）" },
+  { id: "cn-huhehaote", label: "华北5（呼和浩特）" },
+  { id: "cn-qingdao", label: "华北1（青岛）" },
+  { id: "cn-shenzhen", label: "华南1（深圳）" },
+  { id: "cn-guangzhou", label: "华南2（广州）" },
+  { id: "cn-chengdu", label: "西南1（成都）" },
+  { id: "cn-hongkong", label: "中国香港" },
+  { id: "ap-southeast-1", label: "新加坡" },
+  { id: "ap-northeast-1", label: "日本（东京）" },
+  { id: "us-west-1", label: "美国（硅谷）" },
+  { id: "us-east-1", label: "美国（弗吉尼亚）" },
+  { id: "eu-central-1", label: "德国（法兰克福）" },
+];
 export const CRED_KINDS = [
   {
     value: "eci",
@@ -11,11 +29,11 @@ export const CRED_KINDS = [
       { title: "准备交换机与安全组", text: "在目标地域创建 VPC → 交换机（VSwitch）与安全组（SecurityGroup），ECI 实例将部署在其中；安全组需放行容器出网（默认出站放行不足时配置）", url: "https://ecs.console.aliyun.com" },
     ],
     fields: [
-      { k: "accessKeyId", label: "AccessKey ID", ph: "LTAI5t…" },
-      { k: "accessKeySecret", label: "AccessKey Secret", ph: "AccessKey Secret", secret: true },
-      { k: "regionId", label: "地域 Region ID", ph: "cn-hangzhou", hint: "如 cn-hangzhou / cn-shanghai" },
-      { k: "vswitchId", label: "交换机 VSwitch ID", ph: "vsw-…" },
-      { k: "securityGroupId", label: "安全组 ID", ph: "sg-…", hint: "安全组需放行 runner 回调所需出网" },
+      { k: "accessKeyId", label: "AccessKey ID", ph: "阿里云账号的 AccessKey ID", required: true },
+      { k: "accessKeySecret", label: "AccessKey Secret", ph: "与 AccessKey ID 配对的 Secret", secret: true, required: true },
+      { k: "regionId", label: "地域 Region", ph: "选择地域", select: true, options: ECI_REGIONS, required: true, hint: "运行 Shell 节点所在的阿里云地域" },
+      { k: "vswitchId", label: "交换机 VSwitch ID", ph: "选择或输入 vsw-…", probe: "vswitch", hint: "填写 AK/SK/地域 后可自动探测该地域的交换机" },
+      { k: "securityGroupId", label: "安全组 ID", ph: "选择或输入 sg-…", probe: "securityGroup", hint: "决定 ECI 实例安全组；需放行 worker 出网回调" },
     ],
   },
   {

@@ -1,10 +1,10 @@
 <!-- 凭证新建/编辑页 -->
 <script setup>
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, reactive, onMounted, onBeforeUnmount, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { notify } from "../lib/notify.js";
 import ConfirmDialog from "../components/ConfirmDialog.vue";
-import { getCredential, createCredential, updateCredential, deleteCredential } from "../api/credential.js";
+import { getCredential, createCredential, updateCredential, deleteCredential, probeEciNetworks } from "../api/credential.js";
 import { CRED_KINDS, credKind, credKindLabel } from "../lib/kinds.js";
 
 const route = useRoute();
@@ -22,6 +22,64 @@ const pageTitle = computed(() => (isNew.value ? "新建凭证" : `编辑凭证${
 const kindMeta = computed(() => credKind(form.value.kind));
 const kindFields = computed(() => kindMeta.value?.fields ?? []);
 const isDingtalk = computed(() => form.value.kind === "dingtalk-corp");
+
+// ---- ECI：地域下拉 + 交换机/安全组自动探测（AK/SK/Region 齐全即查询，不落库） ----
+const isEci = computed(() => form.value.kind === "eci");
+const eciReady = computed(() =>
+  isEci.value &&
+  Boolean(form.value.secret?.accessKeyId?.trim()) &&
+  Boolean(form.value.secret?.accessKeySecret?.trim()) &&
+  Boolean(form.value.secret?.regionId?.trim())
+);
+const eciNet = reactive({ probing: false, searched: false, error: "", vswitches: [], securityGroups: [] });
+let probeTimer = null;
+
+const probeNetworks = async (manual = false) => {
+  if (!eciReady.value) {
+    if (manual) notify({ type: "error", message: "请先填写 AK / SK / 地域，再探测网络" });
+    return;
+  }
+  eciNet.probing = true;
+  eciNet.error = "";
+  try {
+    const res = await probeEciNetworks({
+      accessKeyId: form.value.secret.accessKeyId.trim(),
+      accessKeySecret: form.value.secret.accessKeySecret.trim(),
+      regionId: form.value.secret.regionId.trim(),
+    });
+    const d = res?.data ?? res;
+    if (d?.ok === false) throw new Error(d?.message || "探测失败");
+    eciNet.vswitches = d?.vswitches ?? [];
+    eciNet.securityGroups = d?.securityGroups ?? [];
+    eciNet.searched = true;
+  } catch (err) {
+    eciNet.error = err?.message || String(err);
+    eciNet.vswitches = [];
+    eciNet.securityGroups = [];
+  } finally {
+    eciNet.probing = false;
+  }
+};
+// AK/SK/地域 任一变化：防抖 600ms 自动探测
+watch(
+  () => [form.value.kind, form.value.secret?.accessKeyId, form.value.secret?.accessKeySecret, form.value.secret?.regionId],
+  () => {
+    clearTimeout(probeTimer);
+    if (eciReady.value) probeTimer = setTimeout(() => probeNetworks(false), 600);
+  }
+);
+onBeforeUnmount(() => clearTimeout(probeTimer));
+
+const createVswitchUrl = () => {
+  const r = form.value.secret?.regionId || "";
+  return r ? `https://vpc.console.aliyun.com/vpc/${encodeURIComponent(r)}/vswitches` : "https://vpc.console.aliyun.com";
+};
+const createSecurityGroupUrl = () => {
+  const r = form.value.secret?.regionId || "";
+  return r
+    ? `https://ecs.console.aliyun.com/securityGroup/region/${encodeURIComponent(r)}/securityGroups`
+    : "https://ecs.console.aliyun.com";
+};
 
 // 详情接口加载返显；失败（含 404/已被删除）统一提示
 async function loadForm() {
@@ -126,14 +184,47 @@ const doDelete = async () => {
         </section>
 
         <div class="field" v-for="f in kindFields" :key="f.k">
-          <label class="field-label">{{ f.label }}</label>
+          <label class="field-label">{{ f.label }}<span v-if="f.required" class="req">*</span></label>
+          <select v-if="f.select" class="select" v-model="form.secret[f.k]">
+            <option value="" disabled>{{ f.ph }}</option>
+            <option v-for="opt in f.options" :key="opt.id" :value="opt.id">{{ opt.label }}（{{ opt.id }}）</option>
+            <option v-if="form.secret[f.k] && !(f.options || []).some((o) => o.id === form.secret[f.k])" :value="form.secret[f.k]">其他：{{ form.secret[f.k] }}</option>
+          </select>
           <input
+            v-else
             class="input"
             :type="f.secret ? 'password' : 'text'"
             v-model="form.secret[f.k]"
+            :list="isEci && f.probe ? 'eci-dl-' + f.probe : undefined"
             :placeholder="isNew ? f.ph : (f.secret ? '留空则保持不变（仅展示一次）' : f.ph)"
           />
+          <datalist v-if="isEci && f.probe" :id="'eci-dl-' + f.probe">
+            <option v-for="opt in (f.probe === 'vswitch' ? eciNet.vswitches : eciNet.securityGroups)" :key="opt.id" :value="opt.id">
+              {{ opt.name || opt.id }}{{ opt.zoneId ? " · " + opt.zoneId : "" }}
+            </option>
+          </datalist>
+          <p v-if="f.hint" class="field-hint">{{ f.hint }}</p>
         </div>
+
+        <!-- ECI：网络探测状态卡（AK/SK/地域齐全后自动执行，也可手动刷新） -->
+        <section v-if="isEci" class="probe-card">
+          <div class="probe-head">
+            <span class="probe-title">交换机 / 安全组探测</span>
+            <div class="probe-acts">
+              <template v-if="eciReady">
+                <a :href="createSecurityGroupUrl()" target="_blank" rel="noreferrer" class="btn btn-sm btn-ghost">去创建安全组 ↗</a>
+                <a :href="createVswitchUrl()" target="_blank" rel="noreferrer" class="btn btn-sm btn-ghost">去创建交换机 ↗</a>
+                <button type="button" class="btn btn-sm btn-ghost" :disabled="eciNet.probing" @click="probeNetworks(true)">⟳ 刷新</button>
+              </template>
+              <span v-else class="muted probe-wait">填写 AK / SK / 地域后自动探测</span>
+            </div>
+          </div>
+          <p v-if="eciNet.probing" class="field-hint">正在查询该地域的交换机与安全组…</p>
+          <p v-else-if="eciNet.error" class="field-hint warn">探测失败：{{ eciNet.error }}（可手动输入 ID，或参考上方配置引导）</p>
+          <p v-else-if="eciNet.searched" class="field-hint">
+            已探测：{{ eciNet.vswitches.length }} 个交换机{{ eciNet.securityGroups.length ? "，" : "" }}{{ eciNet.securityGroups.length ? eciNet.securityGroups.length + " 个安全组" : "" }}，输入框下拉可选
+          </p>
+        </section>
 
         <div class="form-footer">
           <button v-if="!isNew" type="button" class="btn btn-danger" @click="confirmDel = true">删除此凭证</button>
@@ -180,4 +271,12 @@ const doDelete = async () => {
 .enroll-auto-row { display: flex; gap: 10px; align-items: baseline; padding: 5px 0; }
 .enroll-auto-label { width: 120px; flex: none; font-size: 12px; color: var(--text-2); }
 .enroll-auto-value { font-size: 12.5px; color: var(--text-1); }
+.req { color: var(--ember, #f59e0b); margin-left: 4px; }
+.field-hint { margin-top: 6px; font-size: 12px; color: var(--text-2); line-height: 1.5; }
+.field-hint.warn { color: var(--ember, #f59e0b); }
+.probe-card { margin: 2px 0 18px; border: 1px dashed var(--line-strong); border-radius: 12px; padding: 10px 14px; background: var(--bg-1); }
+.probe-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.probe-title { font-size: 12.5px; font-weight: 600; color: var(--text-1); }
+.probe-acts { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.probe-wait { font-size: 12px; }
 </style>

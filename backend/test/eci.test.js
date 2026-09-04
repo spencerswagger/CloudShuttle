@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { makeShellStep } from "../steps/shell.js";
-import { createEciProvider, buildCreateEciRequest, probeSpecsOf } from "../providers/eci.js";
+import { createEciProvider, buildCreateEciRequest, probeSpecsOf, collectNetworks } from "../providers/eci.js";
 
 test("buildCreateEciRequest 拼 CreateContainerGroup 参数（cpu/memory/timeout 结构化）", () => {
   const req = buildCreateEciRequest({
@@ -76,6 +76,32 @@ test("probeSpecsOf 全部失败抛可读错误", async () => {
     probeSpecsOf({ priceOf: async () => { throw new Error("SignatureDoesNotMatch"); }, combos: [{ cpu: 1, memory: 2 }] }),
     /无法从阿里云校验 ECI 规格.*SignatureDoesNotMatch/s
   );
+});
+
+test("collectNetworks 汇总交换机与安全组为轻量列表", async () => {
+  const out = await collectNetworks({
+    listVswitches: async () => ({
+      body: {
+        VSwitches: { VSwitch: [
+          { VSwitchId: "vsw-a", VSwitchName: "生产-交换机A", ZoneId: "cn-hangzhou-f" },
+          { VSwitchId: "vsw-b", VSwitchName: "生产-交换机B" },
+        ] },
+      },
+    }),
+    listSecurityGroups: async () => ({
+      body: { SecurityGroups: { SecurityGroup: [
+        { SecurityGroupId: "sg-1", SecurityGroupName: "默认安全组" },
+      ] } },
+    }),
+  });
+  assert.deepEqual(out.vswitches[0], { id: "vsw-a", name: "生产-交换机A", zoneId: "cn-hangzhou-f" });
+  assert.equal(out.vswitches.length, 2);
+  assert.deepEqual(out.securityGroups[0], { id: "sg-1", name: "默认安全组" });
+});
+
+test("probeEciNetworks 缺参时给出可读错误", async () => {
+  const { probeEciNetworks } = await import("../providers/eci.js");
+  await assert.rejects(probeEciNetworks({ accessKeyId: "", regionId: "cn-hangzhou" }), /请先填写 AccessKey ID/);
 });
 
 test("buildCreateEciRequest 缺 eci 配置时抛错", () => {

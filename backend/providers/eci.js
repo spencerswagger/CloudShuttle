@@ -1,6 +1,12 @@
 // 阿里云 ECI（弹性容器实例）派发：CreateContainerGroup 一次性跑命令后回调。
 // 为便于单测，pure 部分（解析/拼参）独立导出，SDK 调用通过注入的 create 函数完成。
-import EciClient, { DescribeContainerGroupPriceRequest } from "@alicloud/eci20180808";
+// CJS/ESM interop：`@alicloud/*` 的包用 __exportStar + exports.default 导出，
+// ESM `import` 拿到的是 module.exports 整体对象，Client 类在 .default，
+// 请求模型类（CreateContainerGroupRequest 等）也挂在同一个对象上。
+import EciModule from "@alicloud/eci20180808";
+import EcsModule from "@alicloud/ecs20140526";
+const { default: EciClient, CreateContainerGroupRequest, DescribeContainerGroupPriceRequest } = EciModule;
+const { default: EcsClient, DescribeVSwitchesRequest, DescribeSecurityGroupsRequest } = EcsModule;
 
 // 候选规格档位：主流 vCPU / 内存组合，覆盖常用档，供选中凭证后探测阿里云可购性
 export const ECI_PROBE_COMBOS = [
@@ -64,6 +70,31 @@ export const ECI_PRESET_CHOICES = {
   cpus: [0.5, 1, 2, 4, 8],
   mems: [1, 2, 4, 8, 16],
 };
+
+// 汇总 ECS 返回的交换机/安全组为轻量列表；listVswitches/listSecurityGroups 注入便于单测
+export async function collectNetworks({ listVswitches, listSecurityGroups }) {
+  const [vswResp, sgResp] = await Promise.all([listVswitches(), listSecurityGroups()]);
+  const vswitches = (vswResp?.body?.VSwitches?.VSwitch ?? []).map((s) => ({
+    id: s.VSwitchId, name: s.VSwitchName, zoneId: s.ZoneId,
+  }));
+  const securityGroups = (sgResp?.body?.SecurityGroups?.SecurityGroup ?? []).map((g) => ({
+    id: g.SecurityGroupId, name: g.SecurityGroupName,
+  }));
+  return { vswitches, securityGroups };
+}
+
+// 生产路径：用（表单输入的）AK/SK/Region 查该地域的交换机与安全组。
+// 用于创建 eci 凭证时提供下拉候选；AK/SK 仅本次请求使用，不落库。
+export async function probeEciNetworks({ accessKeyId, accessKeySecret, regionId }) {
+  if (!accessKeyId || !accessKeySecret || !regionId) {
+    throw new Error("请先填写 AccessKey ID / AccessKey Secret / 地域 后再探测网络");
+  }
+  const client = new EcsClient({ accessKeyId, accessKeySecret, regionId });
+  return collectNetworks({
+    listVswitches: async () => client.describeVSwitches(new DescribeVSwitchesRequest({ regionId })),
+    listSecurityGroups: async () => client.describeSecurityGroups(new DescribeSecurityGroupsRequest({ regionId })),
+  });
+}
 
 // 把 vCPU 数 / 内存 GiB 规范化：兼容字符串与数字输入
 function normCpu(cpu) {

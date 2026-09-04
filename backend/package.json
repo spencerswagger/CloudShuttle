@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@alicloud/eci20180808": "^2.1.2",
+    "@alicloud/ecs20140526": "^7.11.1",
     "axios": "^1.7.0",
     "ioredis": "^5.3.2",
     "jsonpath-plus": "^10.4.0",

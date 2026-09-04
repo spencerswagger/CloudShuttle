@@ -10,6 +10,25 @@ const props = defineProps({
 });
 
 const TYPES = ["string", "text", "number", "boolean", "enum"];
+// 类型下拉直接写明含义，避免用户对 string/text 等产生困惑
+const TYPE_LABELS = {
+  string: "string（单行文本）",
+  text: "text（多行文本）",
+  number: "number（数字）",
+  boolean: "boolean（布尔）",
+  enum: "enum（枚举，配合右侧选项列）",
+};
+// 列头 hover 解释（原生 title）
+const HEAD_TIPS = {
+  key: "变量名：小写字母/数字/下划线，脚本中用 ${name} 引用",
+  title: "变量标题：插入变量面板与运行表单中展示的名称",
+  type: "string 单行文本 / text 多行文本 / number 数字 / boolean 布尔 / enum 枚举",
+  default: "变量未提供取值时的默认值；留空表示无默认",
+  options: "仅 enum 类型需要，逗号分隔的候选值",
+  required: "勾选后运行前必须提供该变量",
+  description: "变量含义说明，方便后续节点理解",
+  jsonPath: "触发源为 Webhook 时，从请求体读取该变量的路径",
+};
 function addParam() {
   props.params.push({ key: "", title: "", type: "string", default: "", required: false, description: "", options: [], jsonPath: "" });
 }
@@ -36,48 +55,48 @@ const headCols = computed(() => {
   </div>
   <div v-else class="param-list">
     <div class="param-row param-head" :style="{ gridTemplateColumns: headCols }">
-      <span class="param-cell">key</span>
-      <span class="param-cell">标题</span>
-      <span class="param-cell">类型</span>
-      <span class="param-cell">默认值</span>
-      <span class="param-cell">选项</span>
-      <span v-if="showRequired" class="param-cell req-col">必填</span>
-      <span class="param-cell">说明</span>
-      <span v-if="showJson" class="param-cell">JSONPath</span>
+      <span class="param-cell" :title="HEAD_TIPS.key">key</span>
+      <span class="param-cell" :title="HEAD_TIPS.title">标题</span>
+      <span class="param-cell" :title="HEAD_TIPS.type">类型</span>
+      <span class="param-cell" :title="HEAD_TIPS.default">默认值</span>
+      <span class="param-cell" :title="HEAD_TIPS.options">选项</span>
+      <span v-if="showRequired" class="param-cell req-col" :title="HEAD_TIPS.required">必填</span>
+      <span class="param-cell" :title="HEAD_TIPS.description">说明</span>
+      <span v-if="showJson" class="param-cell" :title="HEAD_TIPS.jsonPath">JSONPath</span>
       <span class="param-cell del-col"> </span>
     </div>
     <div v-for="(p, i) in params" :key="i" class="param-row" :style="{ gridTemplateColumns: headCols }">
       <div class="param-cell">
-        <input class="input mono" v-model="p.key" placeholder="branch" />
+        <input class="input mono" v-model="p.key" :placeholder="showJson ? '变量名，脚本用 ${name} 引用' : '变量名，如输出变量名'" />
       </div>
       <div class="param-cell">
-        <input class="input" v-model="p.title" placeholder="分支" />
+        <input class="input" v-model="p.title" placeholder="变量标题，展示在插入变量列表" />
       </div>
       <div class="param-cell">
         <select class="select" v-model="p.type">
-          <option v-for="t in TYPES" :key="t" :value="t">{{ t }}</option>
+          <option v-for="t in TYPES" :key="t" :value="t">{{ TYPE_LABELS[t] }}</option>
         </select>
       </div>
       <div class="param-cell">
         <select v-if="p.type === 'boolean'" class="select" v-model="p.default">
-          <option value="">默认</option>
+          <option value="">默认（留空）</option>
           <option value="true">true</option>
           <option value="false">false</option>
         </select>
-        <input v-else class="input" v-model="p.default" placeholder="main" />
+        <input v-else class="input" v-model="p.default" placeholder="变量未提供时的取值，可留空" />
       </div>
       <div class="param-cell">
-        <input v-if="p.type === 'enum'" class="input mono" :value="optionsText(p)" @input="setOptions(p, $event)" placeholder="a, b, c（逗号分隔）" />
+        <input v-if="p.type === 'enum'" class="input mono" :value="optionsText(p)" @input="setOptions(p, $event)" placeholder="a, b, c（逗号分隔候选）" />
         <span v-else class="muted">—</span>
       </div>
       <div v-if="showRequired" class="param-cell req-col">
-        <input class="row-check" type="checkbox" v-model="p.required" title="必填" />
+        <input class="row-check" type="checkbox" v-model="p.required" title="运行前必须提供" />
       </div>
       <div class="param-cell">
-        <input class="input" v-model="p.description" placeholder="要发布的 Git 分支 / 输出含义" />
+        <input class="input" v-model="p.description" placeholder="说明变量含义，帮助后续节点理解，可留空" />
       </div>
       <div v-if="showJson" class="param-cell">
-        <input class="input mono" v-model="p.jsonPath" placeholder="$.ref（从 Webhook 请求体取值）" />
+        <input class="input mono" v-model="p.jsonPath" placeholder="从请求体取值，如 $.ref" />
       </div>
       <div class="param-cell del-col">
         <button type="button" class="btn btn-sm btn-danger" title="删除" @click="params.splice(i, 1)">×</button>

@@ -219,6 +219,9 @@ const isCorpRobot = (name) => {
 };
 // shell 节点只展示 eci 类型凭证作为运行载体
 const eciCreds = computed(() => (creds.value || []).filter((c) => c.kind === "eci"));
+// 审批节点只展示支持审批的凭证类型（钉钉企业机器人；未来可扩展其他审批渠道）
+const APPROVAL_CRED_KINDS = ["dingtalk-corp"];
+const robotCreds = computed(() => (creds.value || []).filter((c) => APPROVAL_CRED_KINDS.includes(c.kind)));
 
 // 高级机器人下拉：主标题取自凭证名，副标题拼接企业/应用元信息（display_meta），并展示应用图标
 const robotOpenId = ref(""); // 当前展开下拉的节点 id；空串表示全部收起
@@ -247,7 +250,35 @@ const DEFAULT_APPROVAL_BODY =
   "| 执行编号 | #${run_no} |\n" +
   "| 发起时间 | ${started_at} |\n\n" +
   "请审核该审批请求，确认无误后点击下方按钮通过。";
-function resetApprovalMsg(n) { n.params.message = DEFAULT_APPROVAL_BODY; nextTick(fitAll); }
+// 从 shell 命令中探测写回 CLOUDSHUTTLE_OUT_FILE 的 echo 输出 key，合并进输出变量列表
+function probeOutputKeysFromCommand(command) {
+  const keys = new Set();
+  const lines = String(command ?? "").split("\n");
+  for (const line of lines) {
+    if (!line.includes("CLOUDSHUTTLE_OUT_FILE")) continue;
+    const m = line.match(/echo\s+["']?([A-Za-z_][A-Za-z0-9_]*)["']?\s*=/);
+    if (m) keys.add(m[1]);
+  }
+  return [...keys];
+}
+function autoProbeOutputs(n) {
+  const keys = probeOutputKeysFromCommand(n.params?.command);
+  if (!keys.length) {
+    notify({ type: "info", message: "命令中未识别到写入 $CLOUDSHUTTLE_OUT_FILE 的 echo \"key=value\" 输出" });
+    return;
+  }
+  const outputs = n.params.outputs ?? (n.params.outputs = []);
+  const existing = new Set(outputs.map((o) => o?.key).filter(Boolean));
+  let added = 0;
+  for (const k of keys) {
+    if (!existing.has(k)) {
+      outputs.push({ key: k, title: "", type: "string", default: "", required: false, description: "", options: [] });
+      added++;
+    }
+  }
+  notify({ type: "success", message: added ? `已从命令提取 ${added} 个输出变量` : "命令中涉及的输出变量均已存在" });
+}
+const resetApprovalMsg = (n) => { n.params.message = DEFAULT_APPROVAL_BODY; nextTick(fitAll); };
 const approvalPreview = (n) => {
   const vars = {
     pipeline_name: "release-构建-发布", run_no: "12",
@@ -899,7 +930,10 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
                     </div>
                   </div>
                   <div class="field">
-                    <label class="field-label">输出变量（K=V 写回，供后继节点引用）</label>
+                    <div class="field-head">
+                      <label class="field-label">输出变量（K=V 写回，供后继节点引用）</label>
+                      <button type="button" class="btn btn-sm btn-ghost" title="从 Shell 命令中识别写回 $CLOUDSHUTTLE_OUT_FILE 的变量" @click="autoProbeOutputs(n)">↻ 从命令提取</button>
+                    </div>
                     <TriggerParamsEditor :params="n.params.outputs ?? (n.params.outputs = [])" :show-required="false" />
                     <p class="field-hint">脚本内可用 <code class="mono ph-code">echo "key=value" >> "$CLOUDSHUTTLE_OUT_FILE"</code> 写回；未声明 key 时默认输出单变量 <code class="mono ph-code">step_out</code>。</p>
                   </div>
@@ -955,7 +989,7 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
                           </button>
                           <div v-if="robotOpenId === n.id" class="cs-drop">
                             <div
-                              v-for="c in creds"
+                              v-for="c in robotCreds"
                               :key="c.id"
                               class="cs-opt"
                               :class="{ active: n.params.robot === c.name }"
@@ -969,12 +1003,12 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
                               </span>
                               <svg v-if="n.params.robot === c.name" class="cs-check" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
                             </div>
-                            <div v-if="!creds.length && !credsLoading" class="cs-empty">暂无机器人，点右侧刷新图标加载</div>
+                            <div v-if="!robotCreds.length && !credsLoading" class="cs-empty">暂无审批机器人，点右侧刷新图标加载</div>
                           </div>
                         </div>
                         <button type="button" class="btn btn-sm btn-ghost refresh-btn" title="加载/刷新机器人" @click="loadCreds" :disabled="credsLoading">⟳</button>
                       </div>
-                      <p v-if="!creds.length" class="field-hint">{{ credsLoading ? "加载中…" : "暂无机器人，点击右侧刷新图标加载" }}</p>
+                      <p v-if="!robotCreds.length" class="field-hint">{{ credsLoading ? "加载中…" : "暂无审批机器人，点击右侧刷新图标加载" }}</p>
                     </div>
                   </div>
 

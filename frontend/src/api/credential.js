@@ -10,3 +10,5 @@ export const listDepartments = (credential, deptId) => client.post("/dingtalk/de
 export const listDepartmentUsers = (credential, deptId) => client.post("/dingtalk/department-users", { credential, deptId });
 // 用 ECI 凭证探测阿里云可购规格（AK 在服务端解密使用）
 export const fetchEciSpecs = (credential) => client.get(`/eci/specs/${encodeURIComponent(credential)}`, { silent: true });
+// 用表单输入的 AK/SK/Region 探测该地域的交换机与安全组（创建凭证时提供下拉候选，不落库）
+export const probeEciNetworks = (d) => client.post("/eci/probe-networks", d, { silent: true, timeout: 8000 });
