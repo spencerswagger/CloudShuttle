@@ -5,31 +5,39 @@
 // 请求模型类（CreateContainerGroupRequest 等）也挂在同一个对象上。
 import EciModule from "@alicloud/eci20180808";
 import EcsModule from "@alicloud/ecs20140526";
+import VpcModule from "@alicloud/vpc20160428";
 const { default: EciClient, CreateContainerGroupRequest, DescribeContainerGroupPriceRequest } = EciModule;
-const { default: EcsClient, DescribeVSwitchesRequest, DescribeSecurityGroupsRequest } = EcsModule;
+const { default: EcsClient, DescribeSecurityGroupsRequest } = EcsModule;
+const { default: VpcClient, DescribeVSwitchesRequest } = VpcModule;
 
-// 候选规格档位：主流 vCPU / 内存组合，覆盖常用档，供选中凭证后探测阿里云可购性
-export const ECI_PROBE_COMBOS = [
-  { cpu: 0.5, memory: 1 },
-  { cpu: 1, memory: 1 },
-  { cpu: 1, memory: 2 },
-  { cpu: 2, memory: 2 },
-  { cpu: 2, memory: 4 },
-  { cpu: 2, memory: 8 },
-  { cpu: 4, memory: 8 },
-  { cpu: 4, memory: 16 },
-  { cpu: 8, memory: 16 },
+// ECI 规格矩阵：阿里云按「vCPU → 支持的内存 GiB」定义规格组合（核内比 1:1 ~ 1:8），
+// 不是任意 CPU × 任意内存。前端据此联动：先选 CPU，内存下拉只显示该 CPU 支持的档位并展示目录价。
+export const ECI_SPEC_MATRIX = [
+  { cpu: 0.5, memory: 1 }, { cpu: 0.5, memory: 2 },
+  { cpu: 1, memory: 1 }, { cpu: 1, memory: 2 }, { cpu: 1, memory: 4 }, { cpu: 1, memory: 8 },
+  { cpu: 2, memory: 2 }, { cpu: 2, memory: 4 }, { cpu: 2, memory: 8 }, { cpu: 2, memory: 16 },
+  { cpu: 4, memory: 4 }, { cpu: 4, memory: 8 }, { cpu: 4, memory: 16 }, { cpu: 4, memory: 32 },
+  { cpu: 8, memory: 8 }, { cpu: 8, memory: 16 }, { cpu: 8, memory: 32 }, { cpu: 8, memory: 64 },
 ];
 
-// 用 eci 凭证调 DescribeContainerGroupPrice 探测该 region 可购规格：
-// 对候选组合并发询价，出口 <unavailable> 组合，返回可用 vCPU/内存档位及单价。
-// 全部失败视为凭证/权限问题，抛可读错误；单个失败不影响其余。
+// 从 DescribeContainerGroupPrice 响应 body 提取目录价（原价）与币种；拿不到时返回空
+export function priceOfBody(body) {
+  const price = body?.PriceInfo?.Price;
+  if (!price) return null;
+  return {
+    originalPrice: typeof price.originalPrice === "number" ? price.originalPrice : null,
+    tradePrice: typeof price.tradePrice === "number" ? price.tradePrice : null,
+    currency: price.currency || "CNY",
+  };
+}
+
+// 并发询价后整理为按 CPU 分组的可用档位（含价格）；全部失败抛可读错误，单个失败不影响其余。
 // priceOf(cpu, memory) 由调用方注入，便于无 SDK 单测 probeSpecsOf。
-export async function probeSpecsOf({ priceOf, combos = ECI_PROBE_COMBOS }) {
+export async function probeSpecsOf({ priceOf, combos = ECI_SPEC_MATRIX }) {
   const results = await Promise.all(combos.map(async (c) => {
     try {
       const body = await priceOf(c.cpu, c.memory);
-      return { cpu: c.cpu, memory: c.memory, available: true, price: body };
+      return { cpu: c.cpu, memory: c.memory, available: true, price: priceOfBody(body) };
     } catch (err) {
       return { cpu: c.cpu, memory: c.memory, available: false, reason: String(err?.message ?? err).slice(0, 200) };
     }
@@ -40,15 +48,21 @@ export async function probeSpecsOf({ priceOf, combos = ECI_PROBE_COMBOS }) {
     throw new Error(`无法从阿里云校验 ECI 规格：${reason}（请确认凭证 AK/SK/Region 正确且已授权 AliyunECIFullAccess）`);
   }
   const cpus = [...new Set(ok.map((r) => r.cpu))];
-  const mems = [...new Set(ok.map((r) => r.memory))];
-  return { cpus, mems, combos: results };
+  const byCpu = {};
+  for (const r of ok) {
+    (byCpu[r.cpu] ??= []).push({ memory: r.memory, price: r.price });
+  }
+  for (const [cpu, list] of Object.entries(byCpu)) {
+    byCpu[cpu] = list.sort((a, b) => a.memory - b.memory);
+  }
+  return { cpus, byCpu, combos: results };
 }
 
-// 生产路径：用 eci 凭证构建真实 Client 后委托 probeSpecsOf
+// 生产路径：用 eci 凭证（AK/SK/Region）构建真实 Client 后委托 probeSpecsOf
 export async function describeEciSpecs({ eci }) {
   const { accessKeyId, accessKeySecret, regionId } = eci ?? {};
   if (!accessKeyId || !accessKeySecret || !regionId) {
-    throw new Error("ECI 凭证缺少 accessKeyId/accessKeySecret/regionId，请检查配置");
+    throw new Error("ECI 配置缺少 accessKeyId/accessKeySecret/regionId（凭证提供 AK/SK，地域在 Shell 节点配置）");
   }
   const client = new EciClient({
     accessKeyId,
@@ -65,13 +79,16 @@ export async function describeEciSpecs({ eci }) {
   });
 }
 
-// 返回 ECI 常用预设档位（前端在接口探测失败/未选凭证时回退）
+// 前端在接口探测失败/未选凭证时的预设规格（按 CPU 联动的内存档位；价格未知）
 export const ECI_PRESET_CHOICES = {
-  cpus: [0.5, 1, 2, 4, 8],
-  mems: [1, 2, 4, 8, 16],
+  0.5: [1, 2],
+  1: [1, 2, 4, 8],
+  2: [2, 4, 8, 16],
+  4: [4, 8, 16, 32],
+  8: [8, 16, 32, 64],
 };
 
-// 汇总 ECS 返回的交换机/安全组为轻量列表；listVswitches/listSecurityGroups 注入便于单测
+// 汇总响应为轻量列表；listVswitches/listSecurityGroups 注入便于单测
 export async function collectNetworks({ listVswitches, listSecurityGroups }) {
   const [vswResp, sgResp] = await Promise.all([listVswitches(), listSecurityGroups()]);
   const vswitches = (vswResp?.body?.VSwitches?.VSwitch ?? []).map((s) => ({
@@ -83,17 +100,42 @@ export async function collectNetworks({ listVswitches, listSecurityGroups }) {
   return { vswitches, securityGroups };
 }
 
-// 生产路径：用（表单输入的）AK/SK/Region 查该地域的交换机与安全组。
-// 用于创建 eci 凭证时提供下拉候选；AK/SK 仅本次请求使用，不落库。
+// 把阿里云错误转成可读诊断（权限问题给出所需策略提示）
+function networkErrorHint(err) {
+  const msg = String(err?.message ?? err);
+  const upper = msg.toUpperCase();
+  const permissionHints = [
+    [
+      "交换机查询需要阿里云 VPC 只读（AliyunVPCReadOnlyAccess）或 ECI 相关权限",
+      /FORBIDDEN|UNAUTHORIZED|NO_PERMISSION|ACCESSDENIED|NOT_AUTHORIZED/i,
+    ],
+    [
+      "安全组查询需要阿里云 ECS 只读（AliyunECSReadOnlyAccess）权限",
+      /FORBIDDEN|UNAUTHORIZED|NO_PERMISSION|ACCESSDENIED|NOT_AUTHORIZED/i,
+    ],
+  ];
+  for (const [hint, re] of permissionHints) {
+    if (re.test(upper)) return `${msg}；（${hint}，请在 RAM 中为该 AK 补充授权）`;
+  }
+  return msg;
+}
+
+// 生产路径：用 AK/SK/Region 查该地域的交换机（VPC 产品线）与安全组（ECS 产品线）。
+// AK/SK 仅本次请求使用，不落库；调用失败时在错误信息里带出权限诊断。
 export async function probeEciNetworks({ accessKeyId, accessKeySecret, regionId }) {
   if (!accessKeyId || !accessKeySecret || !regionId) {
     throw new Error("请先填写 AccessKey ID / AccessKey Secret / 地域 后再探测网络");
   }
-  const client = new EcsClient({ accessKeyId, accessKeySecret, regionId });
-  return collectNetworks({
-    listVswitches: async () => client.describeVSwitches(new DescribeVSwitchesRequest({ regionId })),
-    listSecurityGroups: async () => client.describeSecurityGroups(new DescribeSecurityGroupsRequest({ regionId })),
-  });
+  const ecsClient = new EcsClient({ accessKeyId, accessKeySecret, regionId });
+  const vpcClient = new VpcClient({ accessKeyId, accessKeySecret, regionId });
+  try {
+    return await collectNetworks({
+      listVswitches: async () => vpcClient.describeVSwitches(new DescribeVSwitchesRequest({ regionId })),
+      listSecurityGroups: async () => ecsClient.describeSecurityGroups(new DescribeSecurityGroupsRequest({ regionId })),
+    });
+  } catch (err) {
+    throw new Error(networkErrorHint(err));
+  }
 }
 
 // 把 vCPU 数 / 内存 GiB 规范化：兼容字符串与数字输入

@@ -22,18 +22,15 @@ export const CRED_KINDS = [
     value: "eci",
     label: "阿里云 ECI",
     icon: "M12 2l8 4v6a8 8 0 0 1-4.5 7.2L12 21l-3.5-1.8A8 8 0 0 1 4 12V6l8-4zm-2 11l2 2 4-5",
-    hint: "提供阿里云弹性容器实例（ECI）的调用凭据，供 Shell 节点在云端一次性运行命令。保存时不做在线校验；请确保 AK 具备 ECI 与 VPC 相关权限。",
+    hint: "仅保存阿里云 AccessKey（AK/SK）。地域、交换机与安全组属运行配置，在流水线 Shell 节点上选择（凭证不绑定地域，可跨地域复用）。",
     guide: [
       { title: "创建 AccessKey", text: "阿里云控制台 → 访问控制 RAM → 用户 → 为该用户建立专属 AK 并授予最小权限", url: "https://ram.console.aliyun.com" },
-      { title: "授权 RAM 权限", text: "给该 AK 用户授权系统策略 AliyunECIFullAccess（创建/管理 ECI 必需），可选加 AliyunVPCReadOnlyAccess（排查交换机/安全组）。ECI 底层调用由服务关联角色 AliyunServiceRoleForECI 完成，无需手动创建", url: "https://ram.console.aliyun.com" },
-      { title: "准备交换机与安全组", text: "在目标地域创建 VPC → 交换机（VSwitch）与安全组（SecurityGroup），ECI 实例将部署在其中；安全组需放行容器出网（默认出站放行不足时配置）", url: "https://ecs.console.aliyun.com" },
+      { title: "授权 RAM 权限", text: "运行 Shell 节点需 AliyunECIFullAccess（创建/管理 ECI 必需）；在节点上探测交换机/安全组另需 AliyunVPCReadOnlyAccess 与 AliyunECSReadOnlyAccess（或直接授予 AliyunVPCReadOnlyAccess + AliyunECSReadOnlyAccess）。ECI 底层资源由服务关联角色 AliyunServiceRoleForECI 访问，无需手动创建", url: "https://ram.console.aliyun.com" },
+      { title: "在 Shell 节点配置地域与网络", text: "创建凭证后，在流水线的 Shell 节点选择该凭证，并配置地域、交换机（VSwitch）与安全组（SecurityGroup）；填写后节点会提示已自动探测到可用网络/规格", url: "https://ecs.console.aliyun.com" },
     ],
     fields: [
       { k: "accessKeyId", label: "AccessKey ID", ph: "阿里云账号的 AccessKey ID", required: true },
       { k: "accessKeySecret", label: "AccessKey Secret", ph: "与 AccessKey ID 配对的 Secret", secret: true, required: true },
-      { k: "regionId", label: "地域 Region", ph: "选择地域", select: true, options: ECI_REGIONS, required: true, hint: "运行 Shell 节点所在的阿里云地域" },
-      { k: "vswitchId", label: "交换机 VSwitch ID", ph: "选择或输入 vsw-…", probe: "vswitch", hint: "填写 AK/SK/地域 后可自动探测该地域的交换机" },
-      { k: "securityGroupId", label: "安全组 ID", ph: "选择或输入 sg-…", probe: "securityGroup", hint: "决定 ECI 实例安全组；需放行 worker 出网回调" },
     ],
   },
   {

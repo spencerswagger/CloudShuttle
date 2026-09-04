@@ -395,11 +395,32 @@ export async function getExecution(id) {
   const { rows } = await pool.query(`SELECT * FROM execution WHERE id=$1`, [id]);
   if (!rows[0]) throw new HttpError(404, "EXECUTION_NOT_FOUND", "执行记录不存在");
   const { rows: steps } = await pool.query(
-    `SELECT node_id, type, status, output, logs FROM execution_node
+    `SELECT node_id, type, status, input, output, logs, started_at, finished_at FROM execution_node
       WHERE exec_id=$1 ORDER BY id`,
     [id]
   );
-  return { ...rows[0], steps };
+  // 附上节点配置快照：从所属 pipeline 最新 rev 的 spec 取 nodes，按 node_id 匹配把
+  // name/type/params（命令、镜像、审批标题等）并入步骤，供详情页展示「哪个节点/在干什么」。
+  const { rows: rev } = await pool.query(
+    `SELECT p.spec_json FROM execution e
+       JOIN pipeline_rev p ON p.pipeline_id = e.pipeline_id
+      WHERE e.id = $1 ORDER BY p.rev DESC LIMIT 1`,
+    [id]
+  );
+  const nodes = rev[0]?.spec_json?.nodes ?? [];
+  const nodeMap = new Map(nodes.map((n) => [n.id, n]));
+  const stepsWith = steps.map((s) => {
+    const node = nodeMap.get(s.node_id);
+    return node
+      ? { ...s, name: node.name ?? "", params: node.params ?? {}, stepType: node.type }
+      : s;
+  });
+  // 调度日志：非节点执行日志，按时间正序
+  const { rows: schedules } = await pool.query(
+    `SELECT ts, message FROM execution_log WHERE exec_id=$1 ORDER BY id`,
+    [id]
+  );
+  return { ...rows[0], steps: stepsWith, schedules };
 }
 
 export async function executionPipelineId(id) {

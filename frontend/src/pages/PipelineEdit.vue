@@ -8,7 +8,8 @@ import { notify } from "../lib/notify.js";
 import { buildMappingDraft } from "../lib/webhookDraft.js";
 import { getPipeline, createPipeline, updatePipeline, getPipelineHook, resetWebhookSecret, fetchWebhookProbe } from "../api/pipeline.js";
 import { fetchImages } from "../api/image.js";
-import { fetchCredentials, fetchEciSpecs, listDepartments, listDepartmentUsers } from "../api/credential.js";
+import { fetchCredentials, fetchEciSpecs, probeEciNetworks, listDepartments, listDepartmentUsers } from "../api/credential.js";
+import { ECI_REGIONS } from "../lib/kinds.js";
 import RunPipelineModal from "../components/RunPipelineModal.vue";
 import TriggerParamsEditor from "../components/TriggerParamsEditor.vue";
 
@@ -164,45 +165,115 @@ const NODE_KINDS = {
   shell:    { label: "Shell 执行",   accent: "var(--accent)",  icon: "M4 5l6 7-6 7m8 0h8" },
   approval: { label: "人工审批",     accent: "var(--ember)",   icon: "M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6zm-3.5 6.5L11 12l4-4.5" },
 };
-// Shell 节点运行规格（vCPU 数 / 内存 GiB）：预设档位，选中 ECI 凭证后用阿里云接口探测结果覆盖
-const ECI_PRESET_CPUS = ["0.5", "1", "2", "4", "8"];
-const ECI_PRESET_MEMS = ["1", "2", "4", "8", "16"];
-const ECI_CPUS = ref([...ECI_PRESET_CPUS]);
-const ECI_MEMS = ref([...ECI_PRESET_MEMS]);
+// Shell 节点运行规格：阿里云按「CPU → 内存」定义规格组合（核内比 1:1 ~ 1:8）。
+// 预设档位在未选中凭证/接口探测失败时兜底；选中凭证+地域后探测量接口返回真实可购组合与目录价。
+const ECI_PRESET_BY_CPU = {
+  0.5: [1, 2],
+  1: [1, 2, 4, 8],
+  2: [2, 4, 8, 16],
+  4: [4, 8, 16, 32],
+  8: [8, 16, 32, 64],
+};
+const specByCpu = ref(null); // { cpu: [{ memory, price: {originalPrice, tradePrice, currency}|null }] }
 const eciSpecLoading = ref(false);
 const eciSpecError = ref("");
-// 用 eci 凭证探测阿里云可购规格：成功则刷新 CPU/内存下拉，失败降级预设并提示原因
-function probeEciSpecs(name) {
-  if (!name) return;
+const cpuChoices = computed(() => {
+  const keys = specByCpu.value ? Object.keys(specByCpu.value) : Object.keys(ECI_PRESET_BY_CPU);
+  return keys.length ? keys : [1];
+});
+function memChoicesOf(cpu) {
+  const list = specByCpu.value?.[cpu] ?? null;
+  if (Array.isArray(list)) return list; // [{memory, price}]
+  return (ECI_PRESET_BY_CPU[cpu] || []).map((m) => ({ memory: m, price: null }));
+}
+function priceSuffix(choice) {
+  const p = choice?.price?.originalPrice;
+  return typeof p === "number" ? `（目录 ¥${p}/时）` : "";
+}
+// CPU 切换后把内存修正为该 CPU 支持档位的最小值（当前值不在新档位列表时）
+function normMemFor(n) {
+  const mems = memChoicesOf(n.params.cpu).map((mc) => String(mc.memory));
+  if (!mems.includes(String(n.params.memory))) n.params.memory = mems[0] ?? "";
+}
+// 用 eci 凭证 + Shell 节点地域探测可购规格：成功刷新 byCpu，失败降级预设并提示原因
+function probeEciSpecs(name, regionId) {
+  if (!name || !regionId) return;
   eciSpecLoading.value = true;
   eciSpecError.value = "";
-  fetchEciSpecs(name)
+  fetchEciSpecs(name, regionId)
     .then((res) => {
       const d = res?.data ?? res;
-      if (d?.ok === false || !d?.cpus) throw new Error(d?.message || "无法获取 ECI 规格");
-      const cpus = (d.cpus || []).map(String).filter(Boolean);
-      const mems = (d.mems || []).map(String).filter(Boolean);
-      if (cpus.length) ECI_CPUS.value = cpus;
-      if (mems.length) ECI_MEMS.value = mems;
+      if (d?.ok === false || !d?.byCpu) throw new Error(d?.message || "无法获取 ECI 规格");
+      specByCpu.value = d.byCpu;
     })
     .catch((err) => {
-      ECI_CPUS.value = [...ECI_PRESET_CPUS];
-      ECI_MEMS.value = [...ECI_PRESET_MEMS];
+      specByCpu.value = null;
       eciSpecError.value = err?.message || String(err);
     })
     .finally(() => { eciSpecLoading.value = false; });
 }
-// 每个 shell 节点的凭证变化时自动探测规格（含首次加载已配置凭证的节点）
-let prevEciCredential = {};
+
+// Shell 节点网络探测：选凭证+地域后，用服务端解密的 AK 查该地域交换机/安全组，供输入框 datalist 候选
+const netProbing = ref(false);
+const netError = ref("");
+const netSearched = ref(false);
+const netVswitches = ref([]);
+const netSecurityGroups = ref([]);
+function probeNodeNetworks(name, regionId) {
+  if (!name || !regionId) return;
+  netProbing.value = true;
+  netError.value = "";
+  probeEciNetworks({ credential: name, regionId })
+    .then((res) => {
+      const d = res?.data ?? res;
+      if (d?.ok === false) throw new Error(d?.message || "探测失败");
+      netVswitches.value = d?.vswitches ?? [];
+      netSecurityGroups.value = d?.securityGroups ?? [];
+      netSearched.value = true;
+    })
+    .catch((err) => {
+      netError.value = err?.message || String(err);
+      netVswitches.value = [];
+      netSecurityGroups.value = [];
+    })
+    .finally(() => { netProbing.value = false; });
+}
+const nodeCreateVswitchUrl = () => {
+  const r = currentShellRegion();
+  return r ? `https://vpc.console.aliyun.com/vpc/${encodeURIComponent(r)}/vswitches` : "https://vpc.console.aliyun.com";
+};
+const nodeCreateSecurityGroupUrl = () => {
+  const r = currentShellRegion();
+  return r
+    ? `https://ecs.console.aliyun.com/securityGroup/region/${encodeURIComponent(r)}/securityGroups`
+    : "https://ecs.console.aliyun.com";
+};
+function currentShellRegion() {
+  for (const n of nodes.value) {
+    if (n.type === "shell" && n.params?.regionId) {
+      const r = String(n.params.regionId).trim();
+      if (r) return r;
+    }
+  }
+  return "";
+}
+// 任一 shell 节点的「凭证 + 地域」组合变化时，自动探测规格与网络（含首次加载已配置的节点）
+let prevEciKey = {};
 watch(
-  () => nodes.value.filter((n) => n.type === "shell").map((n) => ({ id: n.id, c: n.params?.credential ?? "" })),
+  () => nodes.value.filter((n) => n.type === "shell").map((n) => ({
+    id: n.id, c: n.params?.credential ?? "", r: n.params?.regionId ?? "",
+  })),
   (list) => {
     const cur = {};
-    for (const { id, c } of list) {
-      cur[id] = c;
-      if (c && c !== prevEciCredential[id]) probeEciSpecs(c);
+    for (const { id, c, r } of list) {
+      const key = `${c}|${r}`;
+      cur[id] = key;
+      if (c && r && key !== prevEciKey[id]) {
+        probeEciSpecs(c, r);
+        probeNodeNetworks(c, r);
+      }
     }
-    prevEciCredential = cur;
+    prevEciKey = cur;
   }
 );
 
@@ -376,9 +447,10 @@ const addNode = (type) => {
     type,
     step: type,
     params:
-      type === "shell"
-        ? { image: images.value[0]?.image ?? "alpine", command: "", env: [], outputs: [{ key: "step_out" }], credential: "", cpu: "1", memory: "2", timeout: 300 }
-        : { robot: "", message: DEFAULT_APPROVAL_BODY, target: { type: "user", openIds: "", members: [] } },
+        type === "shell"
+          ? { image: images.value[0]?.image ?? "alpine", command: "", env: [], outputs: [{ key: "step_out" }], credential: "", regionId: "", vswitchId: "", securityGroupId: "", cpu: "1", memory: "2", timeout: 300 }
+          : { robot: "", message: DEFAULT_APPROVAL_BODY, target: { type: "user", openIds: "", members: [] } },
+    name: "",
   };
   current.value.spec_json.nodes.push(node);
 };
@@ -724,8 +796,8 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
       <div class="trig-head">
         <span class="mono-tag">触发源</span>
         <div class="seg-tabs">
-          <button type="button" class="seg-tab" :class="{ active: triggerTab === 'manual' }" @click="triggerTab = 'manual'">Manual 参数</button>
-          <button type="button" class="seg-tab" :class="{ active: triggerTab === 'webhook' }" @click="triggerTab = 'webhook'">Webhook</button>
+          <button type="button" class="seg-tab" :class="{ active: triggerTab === 'manual' }" @click="triggerTab = 'manual'">手动触发</button>
+          <button type="button" class="seg-tab" :class="{ active: triggerTab === 'webhook' }" @click="triggerTab = 'webhook'">Webhook 触发</button>
         </div>
       </div>
 
@@ -845,7 +917,12 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
                   </svg>
                 </span>
                 <div class="node-title">
-                  <span class="node-kind display">{{ NODE_KINDS[n.type].label }}</span>
+                  <input
+                    class="node-name-input"
+                    v-model="n.name"
+                    :placeholder="NODE_KINDS[n.type].label"
+                    title="节点名称（执行详情页展示用）"
+                  />
                   <span class="mono-tag">{{ drainId(n.id) }}</span>
                 </div>
                 <span class="node-step mono">STEP {{ String(i + 1).padStart(2, "0") }}</span>
@@ -868,8 +945,49 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
                       <option v-for="c in eciCreds" :key="c.name" :value="c.name">{{ c.name }}</option>
                     </select>
                     <p class="field-hint" v-if="!eciCreds.length">暂无 ECI 凭证，请先在「凭证」中创建阿里云 ECI 类型凭证</p>
-                    <p class="field-hint" v-else>Shell 节点将使用该凭证在阿里云 ECI 上创建一次性容器执行命令</p>
+                    <p class="field-hint" v-else>凭证只提供 AK/SK；地域与网络在下方节点内配置</p>
                   </div>
+                  <div class="field">
+                    <label class="field-label">地域 Region <span v-if="n.params.credential" class="req">*</span></label>
+                    <select class="select" v-model="n.params.regionId">
+                      <option value="" disabled>选择运行地域</option>
+                      <option v-for="reg in ECI_REGIONS" :key="reg.id" :value="reg.id">{{ reg.label }}（{{ reg.id }}）</option>
+                      <option v-if="n.params.regionId && !ECI_REGIONS.some((r) => r.id === n.params.regionId)" :value="n.params.regionId">其他：{{ n.params.regionId }}</option>
+                    </select>
+                    <p class="field-hint">选择 ECI 实例部署地域；选择凭证+地域后自动探测可用网络与规格</p>
+                  </div>
+                  <div class="field">
+                    <label class="field-label">交换机 VSwitch ID <span v-if="n.params.regionId" class="req">*</span></label>
+                    <input class="input mono" v-model="n.params.vswitchId" list="shell-vsw-dl" placeholder="选择或输入 vsw-…" />
+                    <datalist id="shell-vsw-dl">
+                      <option v-for="opt in netVswitches" :key="opt.id" :value="opt.id">{{ opt.name || opt.id }}{{ opt.zoneId ? " · " + opt.zoneId : "" }}</option>
+                    </datalist>
+                    <p class="field-hint">ECI 实例所在交换机，可下拉选择探测结果或手动输入</p>
+                  </div>
+                  <div class="field">
+                    <label class="field-label">安全组 ID <span v-if="n.params.regionId" class="req">*</span></label>
+                    <input class="input mono" v-model="n.params.securityGroupId" list="shell-sg-dl" placeholder="选择或输入 sg-…" />
+                    <datalist id="shell-sg-dl">
+                      <option v-for="opt in netSecurityGroups" :key="opt.id" :value="opt.id">{{ opt.name || opt.id }}</option>
+                    </datalist>
+                    <p class="field-hint">ECI 实例安全组，需放行出网以调用回调</p>
+                  </div>
+                  <section class="field net-card">
+                    <div class="net-head">
+                      <span class="net-title">网络 / 规格自动探测</span>
+                      <div class="net-acts">
+                        <template v-if="n.params.credential && n.params.regionId">
+                          <a :href="nodeCreateSecurityGroupUrl()" target="_blank" rel="noreferrer" class="btn btn-sm btn-ghost">去创建安全组 ↗</a>
+                          <a :href="nodeCreateVswitchUrl()" target="_blank" rel="noreferrer" class="btn btn-sm btn-ghost">去创建交换机 ↗</a>
+                          <button type="button" class="btn btn-sm btn-ghost" :disabled="netProbing" @click="probeNodeNetworks(n.params.credential, n.params.regionId)">⟳ 刷新</button>
+                        </template>
+                        <span v-else class="muted">选择凭证与地域后自动探测</span>
+                      </div>
+                    </div>
+                    <p v-if="netProbing" class="field-hint">正在查询该地域的交换机与安全组…</p>
+                    <p v-else-if="netError" class="field-hint warn">网络探测失败：{{ netError }}</p>
+                    <p v-else-if="netSearched" class="field-hint">已探测：{{ netVswitches.length }} 个交换机、{{ netSecurityGroups.length }} 个安全组（输入框可选）</p>
+                  </section>
                   <div class="field">
                     <label class="field-label">运行镜像</label>
                     <div class="group-row">
@@ -942,25 +1060,27 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
                     <div class="approval-grid">
                       <div class="sub-field">
                         <label class="sub-label">CPU（vCPU）</label>
-                        <select class="select" v-model="n.params.cpu">
-                          <option v-for="c in ECI_CPUS" :key="c" :value="c">{{ c }}</option>
+                        <select class="select" v-model="n.params.cpu" @change="normMemFor(n)">
+                          <option v-for="c in cpuChoices" :key="c" :value="c">{{ c }}</option>
                         </select>
                       </div>
                       <div class="sub-field">
                         <label class="sub-label">内存（GiB）</label>
                         <select class="select" v-model="n.params.memory">
-                          <option v-for="m in ECI_MEMS" :key="m" :value="m">{{ m }}</option>
+                          <template v-for="mc in memChoicesOf(n.params.cpu)" :key="mc.memory">
+                            <option :value="mc.memory">{{ mc.memory }} {{ priceSuffix(mc) }}</option>
+                          </template>
                         </select>
                       </div>
                     </div>
                     <p class="field-hint" :class="{ warn: eciSpecError }">
                       {{ eciSpecLoading
-                        ? "正在从阿里云探测可购规格…"
+                        ? "正在从阿里云探测可购规格与目录价…"
                         : (eciSpecError
                             ? `规格探测失败，已回退预设：${eciSpecError}`
-                            : n.params.credential
-                              ? "已加载该地域可购规格（来自阿里云接口）"
-                              : "选中 ECI 凭证后将自动加载该地域可购规格") }}
+                            : n.params.credential && n.params.regionId
+                              ? "已加载该地域可购规格与目录价（来自阿里云接口）；价格单位 ¥/小时"
+                              : "选择 ECI 凭证与地域后自动加载规格与目录价") }}
                     </p>
                   </div>
                   <div class="field">
@@ -1181,6 +1301,15 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
 }
 .node-title { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
 .node-kind { font-size: 14px; font-weight: 600; letter-spacing: .02em; }
+.node-name-input {
+  font-size: 14px; font-weight: 600; letter-spacing: .02em; color: var(--text-1);
+  background: transparent; border: 1px solid transparent; border-radius: 7px;
+  padding: 2px 6px; margin: -2px -6px; width: 100%; min-width: 0;
+  font-family: inherit;
+}
+.node-name-input:hover { border-color: var(--line); background: var(--bg-1); }
+.node-name-input:focus { outline: none; border-color: var(--accent); background: var(--bg-0); }
+.node-name-input::placeholder { color: var(--text-3); }
 .node-head-actions { display: flex; gap: 4px; }
 .drag-handle { cursor: grab; color: var(--text-3); background: transparent; border-color: transparent; }
 .drag-handle:hover { color: var(--text-2); background: var(--bg-3); border-color: var(--line); }
@@ -1190,6 +1319,10 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
 .approval-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .sub-field { display: flex; flex-direction: column; gap: 5px; }
 .sub-field .sub-label { font-size: 12px; color: var(--text-2); }
+.net-card { border: 1px dashed var(--line-strong); border-radius: 12px; padding: 10px 14px; background: var(--bg-1); }
+.net-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.net-title { font-size: 12.5px; font-weight: 600; color: var(--text-1); }
+.net-acts { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .kind-tabs.mini { display: flex; gap: 8px; }
 .kind-tabs.mini .kind-tab {
   flex: 1; justify-content: center; padding: 8px 6px;

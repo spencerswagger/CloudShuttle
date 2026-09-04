@@ -36,10 +36,10 @@ test("入口模块可 import 不崩溃，且 CRUD 路由齐全", () => {
   assert.equal(routeToHandler("/api/pipelines/9/webhook-secret", "GET", null).handler, "api.getWebhookSecret");
   assert.equal(routeToHandler("/api/pipelines/9/webhook-secret/reset", "POST", {}).handler, "api.resetWebhookSecret");
   assert.equal(routeToHandler("/api/pipelines/9/webhook-probe", "GET", null).handler, "api.getWebhookProbe");
-  assert.equal(routeToHandler("/api/eci/specs/my-ak", "GET", null).handler, "api.eciSpecs");
+  assert.equal(routeToHandler("/api/eci/specs", "POST", {}).handler, "api.eciSpecs");
+  assert.equal(routeToHandler("/api/eci/specs/old-style", "GET", null).handler, "404");
   assert.equal(routeToHandler("/api/eci/probe-networks", "POST", {}).handler, "api.eciProbeNetworks");
   assert.equal(routeToHandler("/api/eci/probe-networks", "GET", null).handler, "404");
-  assert.equal(routeToHandler("/unknown", "GET", null).handler, "404");
 });
 
 test("handler 冒烟：直接调用导入的 handler 模块函数不崩溃", async () => {

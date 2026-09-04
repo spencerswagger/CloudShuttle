@@ -25,6 +25,8 @@ const STATUS = {
 const meta = (s) => STATUS[s] || { label: s, cls: "badge-neutral", dot: "var(--text-3)" };
 
 const CANCELLABLE = ["queued", "running"];
+// 触发来源展示：数据库存英文，界面统一中文
+const TRIGGER_LABEL = { manual: "手动触发", webhook: "Webhook 触发", api: "API 触发", cron: "定时触发" };
 const fmtDate = (iso) =>
   iso ? new Date(iso).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }) : "—";
 
@@ -92,7 +94,7 @@ const doCancel = async () => {
               <td>
                 <div class="cell-main">
                   <span class="link-strong" @click="goDetail(e)">#{{ String(e.id).padStart(4, "0") }}</span>
-                  <span class="cell-sub">{{ (e.trigger?.trigger || e.trigger?.source || e.trigger?.via || "api") }}</span>
+                  <span class="cell-sub">{{ TRIGGER_LABEL[e.trigger?.trigger || e.trigger?.source || e.trigger?.via || "api"] || "API" }}</span>
                 </div>
               </td>
               <td>

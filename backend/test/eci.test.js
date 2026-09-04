@@ -56,20 +56,20 @@ test("createEciProvider.dispatch 透传 eci 配置并拼容器组名", async () 
   assert.equal(got.timeout, 60);
 });
 
-test("probeSpecsOf 只把询价成功的组合视为可购档位", async () => {
-  // 模拟 2/4 可购、1/1 报错（如地区无货/权限问题）
-  const { cpus, mems, combos } = await probeSpecsOf({
+test("probeSpecsOf 按 CPU 分组返回可购内存档位并提取目录价", async () => {
+  const { cpus, byCpu, combos } = await probeSpecsOf({
     priceOf: async (cpu, memory) => {
       if (cpu === 1 && memory === 1) throw new Error("no stock");
-      return { unitPrice: cpu + memory };
+      return { PriceInfo: { Price: { originalPrice: 0.1, tradePrice: 0.08, currency: "CNY" } } };
     },
     combos: [{ cpu: 1, memory: 1 }, { cpu: 2, memory: 4 }],
   });
   assert.deepEqual(cpus, [2]);
-  assert.deepEqual(mems, [4]);
+  assert.deepEqual(byCpu[2], [{ memory: 4, price: { originalPrice: 0.1, tradePrice: 0.08, currency: "CNY" } }]);
   assert.equal(combos.length, 2);
   assert.equal(combos[0].available, false);
   assert.equal(combos[1].available, true);
+  assert.equal(combos[1].price.originalPrice, 0.1);
 });
 
 test("probeSpecsOf 全部失败抛可读错误", async () => {

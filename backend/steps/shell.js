@@ -46,8 +46,16 @@ export function makeShellStep({ eciProvider, genToken, controlPlaneBase, getEci 
     ];
     // 最终 env = 引导变量 + 节点自身 p.env + environment 全部项（environment 在尾、同名覆盖优先，但不得盖过引导变量）
     const env = [...controlEnv, ...(Array.isArray(p.env) ? p.env : []), ...envToEntries(ctx.environment)];
-    // shell 节点 params.credential 引用 eci 凭证，解析得到完整阿里云配置
-    const eci = p.credential ? await getEci(p.credential) : null;
+    // shell 节点 params.credential 引用 eci 凭证（只含 AK/SK）；地域/交换机/安全组是节点运行配置，
+    // 由节点 params.regionId/vswitchId/securityGroupId 提供，派发前合并成完整 eci 配置。
+    const eci = p.credential
+      ? { ...(await getEci(p.credential)), regionId: p.regionId, vswitchId: p.vswitchId, securityGroupId: p.securityGroupId }
+      : null;
+    if (eci && (!eci.regionId || !eci.vswitchId || !eci.securityGroupId)) {
+      throw new Error(
+        "Shell 节点 ECI 运行配置不完整：地域、交换机、安全组需在节点上配置（凭证只提供 AK/SK，网络信息请在节点填写或探测选择）"
+      );
+    }
     const { jobRef } = await eciProvider.dispatch({
       execId: ctx.execId, nodeId: node.id,
       image: p.image, command: p.command, env,

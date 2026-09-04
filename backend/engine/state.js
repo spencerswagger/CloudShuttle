@@ -17,7 +17,7 @@ function fillEnv(env, src) {
 }
 
 // 深 walk 预渲染节点 params：见 variables.js 的 renderParams，返回全新副本，不改动原始 node。
-export function createAdvancer({ stepRun, snapshot, record, recordRegistry = async () => {}, complete = async () => {} }) {
+export function createAdvancer({ stepRun, snapshot, record, recordRegistry = async () => {}, complete = async () => {}, log = async () => {} }) {
   async function advanceOnce({ spec, snap, execId, environment }) {
     const graph = buildGraph(spec);
     const done = new Set(snap.done ?? []);
@@ -36,6 +36,8 @@ export function createAdvancer({ stepRun, snapshot, record, recordRegistry = asy
     }
 
     const ready = nextReady(graph, done);
+    const summary = `已结束 ${done.size}/${graph.nodes.size} 个节点，就绪节点=[${ready.join(",") || "无"}]`;
+    await log(execId, `推进一轮：${summary}`);
     console.log(
       `[advance] exec=${execId} 推进一轮：已结束节点 ${done.size}/${graph.nodes.size}，` +
       `等待=${waiting ?? "无"}，本次就绪可执行节点=[${ready.join(",") || "无"}]`
@@ -55,6 +57,7 @@ export function createAdvancer({ stepRun, snapshot, record, recordRegistry = asy
       const renderedNode = { ...node, params: renderParams(node.params, env) };
       console.log(`[advance] exec=${execId} ⟶ 开始执行就绪节点 node=${nodeId} type=${node.type}`);
       const ctx = { done: [...done], spec, execId, environment: env, recordRegistry };
+      await log(execId, `⟶ 开始执行节点 ${nodeId}（类型 ${node.type}）`);
       const res = await stepRun(renderedNode, ctx);
       if (res.kind === "done") {
         done.add(nodeId);
@@ -62,12 +65,14 @@ export function createAdvancer({ stepRun, snapshot, record, recordRegistry = asy
         fillEnv(env, res.output);
         console.log(`[advance] exec=${execId} ✔ 节点 ${nodeId} 就地完成，已写入节点记录`);
         await record({ execId, nodeId, status: "done", output: res.output });
+        await log(execId, `✔ 节点 ${nodeId} 完成`);
       } else {
         waiting = nodeId;
         console.log(
           `[advance] exec=${execId} ⏸ 节点 ${nodeId} 进入${res.kind === "wait" ? "外部等待" : "派发"}状态 ` +
           `ref=${res.ref ?? "-"}，本次推进到此为止，等待外部回调`);
         await record({ execId, nodeId, status: res.kind, ref: res.ref });
+        await log(execId, `⏸ 节点 ${nodeId} 进入${res.kind === "wait" ? "外部等待" : "派发"}状态，等待回调`);
         break; // 一次推进只发一个等待/派发
       }
     }

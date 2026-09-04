@@ -12,6 +12,10 @@ export function createOrchestrator({
   snapshotStore,
   advance,
   record,
+  schedLog = async () => {},
+  // 把 exec 落为失败终态（更新 execution 表）；拒绝/失败回调等场景使用，
+  // 否则 execution.status 会一直停留在 running（issue：审批不通过仍显示运行中）
+  failExecution = async () => {},
 }) {
   // 把扁平环境源（快照 environment 对象 + 可选外部 Map/对象）构造成内部 Map，值统一转字符串。
   // 语义与 state.js 保持一致：快照环境作基础值，外部显式传入的同名变量覆盖优先。
@@ -33,6 +37,7 @@ export function createOrchestrator({
     // 序列而被复用，redis 里同 id 残留的 snap 快照（7 天 TTL 不清）会被误读成旧 waiting，
     // 导致全新运行 BLOCKED-BY-WAIT。故每次新运行先清一次，保证各执行完全独立。
     await snapshotStore.clear(spec.execId);
+    await schedLog(spec.execId, "▶ 执行启动：清除旧快照，开始推进节点");
     console.log(`[run] exec=${spec.execId} 启动/续跑执行：已清除同 id 旧快照，开始推进节点`);
     const stored = (await snapshotStore.load(spec.execId)) ?? {};
     // 恢复快照 environment（扁平对象）为基础值，再叠写外部显式传入的 environment（同名覆盖优先）
@@ -51,6 +56,7 @@ export function createOrchestrator({
     if (snap.environment) next.environment = snap.environment;
     if (failed) next.status = "failed";
     await snapshotStore.save(execId, next);
+    await schedLog(execId, `节点 ${nodeId} 标记为${failed ? "失败" : "成功"}终态（已结束 ${done.size} 个节点）`);
     console.log(
       `[markDone] exec=${execId} 节点 ${nodeId} 标记为${failed ? "失败" : "成功"}终态，` +
       `已结束 ${done.size} 节点，执行状态=${failed ? "failed" : snap.status ?? "running"}`
@@ -76,6 +82,8 @@ export function createOrchestrator({
       console.log(`[orchestrator] exec=${execId} 收到 ECI 节点 ${nodeId} 失败回调 → 执行标记为 failed`);
       const next = await markDone(nodeId, execId, true);
       await record({ execId, nodeId, status: "failed", output: { kind: "eci", status: "failed" } });
+      await schedLog(execId, `✗ 收到 ECI 失败回调（节点 ${nodeId}），执行标记为失败`);
+      await failExecution(execId);
       return { status: "failed", done: next.done };
     },
     // 钉钉审批回调：approve 续跑；reject 终止该执行
@@ -84,11 +92,14 @@ export function createOrchestrator({
         console.log(`[orchestrator] exec=${execId} 审批节点 ${nodeId} 被拒绝 → 执行标记为 failed（拒绝即失败）`);
         const next = await markDone(nodeId, execId, true);
         await record({ execId, nodeId, status: "rejected", output: { decision: "reject" } });
+        await schedLog(execId, `✗ 审批被拒绝（节点 ${nodeId}），执行标记为失败`);
+        await failExecution(execId);
         return { status: "failed", done: next.done };
       }
       console.log(`[orchestrator] exec=${execId} 审批节点 ${nodeId} 已通过 → 标记完成并继续推进下一个节点`);
       const next = await markDone(nodeId, execId, false);
       await record({ execId, nodeId, status: "succeeded", output: { decision: "approve" } });
+      await schedLog(execId, `✆ 审批通过（节点 ${nodeId}），继续推进后续节点`);
       const spec = await loadSpecForExec(execId);
       // 续跑不丢 environment：从 markDone 透传回的快照 environment 重建 Map，供 state.advanceOnce 继续引用
       return advance({ spec, snap: next, execId, environment: buildEnv(next.environment, null) });

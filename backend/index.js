@@ -58,7 +58,7 @@ const RE = {
   eciDone: /^\/_\/hook\/ecidone\/(\d+)/,
   eciFail: /^\/_\/hook\/fail\/(\d+)/,
   job: /^\/_\/hook\/job\/([^/?]+)/,
-  eciSpecs: /^\/api\/eci\/specs\/([^/]+)/,
+  eciSpecs: /^\/api\/eci\/specs$/,
   eciProbeNetworks: /^\/api\/eci\/probe-networks$/,
 };
 
@@ -140,7 +140,9 @@ export function routeToHandler(path, method, body) {
   if (RE.eciDone.test(path)) return { handler: "internal.eciDone" };
   if (RE.eciFail.test(path)) return { handler: "internal.eciFail" };
   if (RE.job.test(path)) return { handler: "internal.getJob" };
-  if (RE.eciSpecs.test(path)) return { handler: "api.eciSpecs" };
+  if (RE.eciSpecs.test(path)) {
+    if (m === "POST") return { handler: "api.eciSpecs" };
+  }
   if (RE.eciProbeNetworks.test(path)) {
     if (m === "POST") return { handler: "api.eciProbeNetworks" };
   }
@@ -182,10 +184,23 @@ async function loadSpecForExec(execId) {
   return { ...(r[0]?.spec_json ?? {}), execId };
 }
 
+// 调度日志：非节点执行日志，记录流水线调度全过程（触发/推进/等待/回调/完成/失败）。
+// 写失败只告警，绝不影响主流程；也向控制台输出一行便于本地开发观察。
+async function schedLog(execId, message) {
+  const line = `[sched] exec=${execId} ${message}`;
+  console.log(line);
+  try {
+    await pool.query(`INSERT INTO execution_log(exec_id, message) VALUES($1,$2)`, [execId, message]);
+  } catch (err) {
+    console.warn(`[sched] log write failed exec=${execId}: ${err?.message ?? err}`);
+  }
+}
+
 async function writeNodeRecord({ execId, nodeId, status, output, ref, logs }) {
+  // 首次写入该节点时补 step/type 与 started_at；再次写入（回调终态）只更新状态/输出/结束时间
   await pool.query(
-    `INSERT INTO execution_node(exec_id, node_id, step, type, status, output, logs)
-     VALUES($1,$2,'','',$3,$4::jsonb,$5)
+    `INSERT INTO execution_node(exec_id, node_id, step, type, status, output, logs, started_at)
+     VALUES($1,$2,'','',$3,$4::jsonb,$5, now())
      ON CONFLICT (exec_id, node_id)
      DO UPDATE SET status=EXCLUDED.status, output=EXCLUDED.output, logs=EXCLUDED.logs, finished_at=now()`,
     [execId, nodeId, status, JSON.stringify(ref ? { ref } : output ?? {}), logs ?? null]
@@ -301,7 +316,9 @@ async function buildApp() {
       },
     };
   }
-  // ECI 凭证解析：shell 节点经 params.credential 引用 eci 凭证，返回解密的阿里云调用配置
+  // ECI 凭证解析：shell 节点经 params.credential 引用 eci 凭证，只返回解密的 AK/SK；
+  // 地域/交换机/安全组属于 Shell 节点运行配置（params.regionId/vswitchId/securityGroupId），
+  // 由 makeShellStep 在派发前与 AK/SK 合并成完整的 eci 配置。
   async function getEciConfig(name) {
     if (!name) return null;
     const kind = await getCredentialKind(name);
@@ -312,9 +329,6 @@ async function buildApp() {
     return {
       accessKeyId: secret.accessKeyId,
       accessKeySecret: secret.accessKeySecret,
-      regionId: secret.regionId,
-      vswitchId: secret.vswitchId,
-      securityGroupId: secret.securityGroupId,
     };
   }
   const steps = {
@@ -336,6 +350,7 @@ async function buildApp() {
         console.error(`[step] ERROR exec=${ctx.execId} node=${node.id} type=${node.type} err=${err?.message ?? err}`);
         // 步骤报错：把执行与当前节点标失败，避免执行卡死在 running、以及节点状态悬空
         try {
+          await schedLog(ctx.execId, `✗ 节点 ${node.id}（${node.type}）执行失败：${err?.message ?? err}`);
           await pool.query(
             `UPDATE execution SET status='failed', finished_at=now()
               WHERE id=$1 AND status IN ('queued','running')`,
@@ -357,8 +372,10 @@ async function buildApp() {
     snapshot: snapshotStore.save,
     record: writeNodeRecord,
     recordRegistry,
+    log: schedLog,
     // 所有节点完成时：把 execution 状态从 queued/running 更新为 completed，标记结束时间
     complete: async ({ execId, status }) => {
+      await schedLog(execId, `✓ 全部节点已完成 → 执行标记为 ${status}`);
       const { rowCount } = await pool.query(
         `UPDATE execution SET status=$2, finished_at = CASE WHEN finished_at IS NULL THEN now() ELSE finished_at END
           WHERE id=$1 AND status IN ('queued','running')`,
@@ -376,6 +393,15 @@ async function buildApp() {
     snapshotStore,
     advance: advancer.advanceOnce,
     record: writeNodeRecord,
+    schedLog,
+    // 审批拒绝 / ECI 失败回调等场景：把 execution 终态落为 failed（否则一直停在 running）
+    failExecution: async (execId) => {
+      await pool.query(
+        `UPDATE execution SET status='failed', finished_at=now()
+          WHERE id=$1 AND status IN ('queued','running')`,
+        [execId]
+      );
+    },
   });
   // 触发前装配：读取该 pipeline 最新 rev 的 spec 并开新执行（写入 execution.trigger 留痕），
   // 构造执行元信息 Map，再按组件 origin 叠写 manual/webhook 变量，返回可直接交给
@@ -388,6 +414,7 @@ async function buildApp() {
     // rerun 场景：把被重跑的原执行 id 一并留痕进新执行的 trigger，标识其 provenance
     if (rerunOf != null) trigger.rerunOf = rerunOf;
     const spec = await loadPipelineRev(pipelineId, trigger, authority ? { authority } : undefined);
+    await schedLog(spec.execId, `★ 触发执行（${kind}${rerunOf != null ? `，重跑自 #${rerunOf}` : ""}）`);
     const initEnv = await buildInitialEnvironment({ execId: spec.execId, pipelineId });
     const environment = assembleTriggerEnv({ spec, formValue, webhookBody, initEnv });
     return { spec, environment };
@@ -523,13 +550,17 @@ const DISPATCH = {
   },
   "api.getWebhookProbe": async ({ path }) => ok(api.getWebhookProbe(Number(m(path, RE.webhookProbe)))),
   "api.eciSpecs": async (ctx) => {
-    const { app, path } = ctx;
-    // 用 eci 凭证的 AK 探测该 region 可购规格档位；失败时返回预设 + 可读错误供前端降级展示
-    const name = decodePathSegment(m(path, RE.eciSpecs));
+    const { app, body } = ctx;
+    // 用 eci 凭证的 AK/SK + Shell 节点配置的地域，探测该 region 可购规格档位（含目录价）；
+    // 失败时返回预设 + 可读错误供前端降级展示
     try {
-      const eci = await app.getEciConfig(name);
+      const secret = await app.getEciConfig(body?.credential);
+      if (!secret) throw new Error("请先选择 ECI 凭证");
+      const regionId = body?.regionId;
+      if (!regionId) throw new Error("请先在 Shell 节点配置地域（Region）");
+      const eci = { ...secret, regionId };
       const out = await describeEciSpecs({ eci });
-      return ok({ name, ...out, preset: ECI_PRESET_CHOICES });
+      return ok({ name: body?.credential, ...out, preset: ECI_PRESET_CHOICES });
     } catch (err) {
       return {
         status: 200,
@@ -537,13 +568,14 @@ const DISPATCH = {
       };
     }
   },
-  "api.eciProbeNetworks": async ({ body }) => {
+  "api.eciProbeNetworks": async ({ app, body }) => {
     try {
-      const out = await probeEciNetworks({
-        accessKeyId: body?.accessKeyId,
-        accessKeySecret: body?.accessKeySecret,
-        regionId: body?.regionId,
-      });
+      // Shell 节点配置网络：凭证提供 AK/SK，地域在节点上选择；AK/SK 仅本次请求使用，不落库
+      const secret = await app.getEciConfig(body?.credential);
+      if (!secret) throw new Error("请先选择 ECI 凭证");
+      const regionId = body?.regionId;
+      if (!regionId) throw new Error("请先在 Shell 节点选择地域（Region）");
+      const out = await probeEciNetworks({ ...secret, regionId });
       return ok({ ...out });
     } catch (err) {
       return {
