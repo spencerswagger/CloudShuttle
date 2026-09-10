@@ -12,3 +12,5 @@ export const listDepartmentUsers = (credential, deptId) => client.post("/dingtal
 export const fetchEciSpecs = (credential, regionId) => client.post("/eci/specs", { credential, regionId }, { silent: true, timeout: 15000 });
 // 用表单输入的 AK/SK/Region 探测该地域的交换机与安全组（提供下拉候选，不落库）
 export const probeEciNetworks = (d) => client.post("/eci/probe-networks", d, { silent: true, timeout: 8000 });
+// 用草稿 secret 测试数据库连接连通性（不落库）；参照 eci 探测接口的降级返回
+export const testDbConnection = (d) => client.post("/credentials/test", d, { silent: true, timeout: 8000 });

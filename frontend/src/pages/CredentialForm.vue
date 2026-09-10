@@ -4,7 +4,7 @@ import { ref, computed, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { notify } from "../lib/notify.js";
 import ConfirmDialog from "../components/ConfirmDialog.vue";
-import { getCredential, createCredential, updateCredential, deleteCredential } from "../api/credential.js";
+import { getCredential, createCredential, updateCredential, deleteCredential, testDbConnection } from "../api/credential.js";
 import { CRED_KINDS, credKind, credKindLabel } from "../lib/kinds.js";
 
 const route = useRoute();
@@ -22,6 +22,54 @@ const pageTitle = computed(() => (isNew.value ? "新建凭证" : `编辑凭证${
 const kindMeta = computed(() => credKind(form.value.kind));
 const kindFields = computed(() => kindMeta.value?.fields ?? []);
 const isDingtalk = computed(() => form.value.kind === "dingtalk-corp");
+// 数据库类凭证（mysql/pg）才显示「测试连接」
+const isDbKind = computed(() => form.value.kind === "mysql" || form.value.kind === "pg");
+
+// ---- kvlist（额外连接参数）动态键=值列表 ----
+// 行模型 {key, value}，存放于 form.secret[f.k]（数组）；后端 buildDbConfig 会忽略空 key 行
+const addKvRow = (k) => {
+  if (!Array.isArray(form.value.secret[k])) form.value.secret[k] = [];
+  form.value.secret[k].push({ key: "", value: "" });
+};
+const removeKvRow = (k, i) => {
+  const rows = form.value.secret[k];
+  if (Array.isArray(rows)) rows.splice(i, 1);
+};
+// kvlist 键去重：返回 { 字段k: 首个重复键名 }，就地提示并阻止提交
+const kvDupKeys = computed(() => {
+  const dups = {};
+  for (const f of kindFields.value) {
+    if (f.type !== "kvlist") continue;
+    const seen = new Set();
+    for (const r of form.value.secret[f.k] || []) {
+      const k = (r?.key || "").trim();
+      if (!k) continue;
+      if (seen.has(k)) dups[f.k] = k;
+      seen.add(k);
+    }
+  }
+  return dups;
+});
+
+// ---- 测试连接（mysql/pg）----
+const testing = ref(false);
+const testResult = ref(null); // { ok, latencyMs } | { ok:false, message }
+const testConnection = async () => {
+  if (testing.value) return;
+  testing.value = true;
+  testResult.value = null;
+  try {
+    const res = await testDbConnection({ kind: form.value.kind, secret: form.value.secret });
+    const d = res?.data ?? res;
+    testResult.value = d?.ok === true
+      ? { ok: true, latencyMs: d.latencyMs }
+      : { ok: false, message: d?.message || "连接失败" };
+  } catch (e) {
+    testResult.value = { ok: false, message: e?.message || "连接失败" };
+  } finally {
+    testing.value = false;
+  }
+};
 
 // 详情接口加载返显；失败（含 404/已被删除）统一提示
 async function loadForm() {
@@ -42,6 +90,12 @@ onMounted(async () => {
 
 const save = async () => {
   if (!form.value.name.trim()) { notify({ type: "error", message: "请填写凭证名称" }); return; }
+  const dupKeys = kvDupKeys.value;
+  const dupField = Object.keys(dupKeys)[0];
+  if (dupField) {
+    notify({ type: "error", message: "额外连接参数存在重复的键（" + dupKeys[dupField] + "），请修改后再保存" });
+    return;
+  }
   saving.value = true;
   try {
     if (route.params.id) await updateCredential(+route.params.id, form.value);
@@ -125,15 +179,42 @@ const doDelete = async () => {
           </div>
         </section>
 
-        <div class="field" v-for="f in kindFields" :key="f.k">
-          <label class="field-label">{{ f.label }}<span v-if="f.required" class="req">*</span></label>
-          <input
-            class="input"
-            :type="f.secret ? 'password' : 'text'"
-            v-model="form.secret[f.k]"
-            :placeholder="isNew ? f.ph : (f.secret ? '留空则保持不变（仅展示一次）' : f.ph)"
-          />
-          <p v-if="f.hint" class="field-hint">{{ f.hint }}</p>
+        <template v-for="f in kindFields" :key="f.k">
+          <div v-if="f.type === 'kvlist'" class="field">
+            <label class="field-label">{{ f.label }}</label>
+            <div v-for="(row, i) in (form.secret[f.k] || [])" :key="i" class="kv-row">
+              <input class="input kv-key" v-model="row.key" placeholder="键（如 ssl）" />
+              <span class="kv-eq">=</span>
+              <input class="input kv-val" v-model="row.value" placeholder="值（如 true）" />
+              <button type="button" class="btn btn-sm btn-ghost" @click="removeKvRow(f.k, i)">删除</button>
+            </div>
+            <button type="button" class="btn btn-sm kv-add" @click="addKvRow(f.k)">＋ 添加一条</button>
+            <p v-if="kvDupKeys[f.k]" class="field-hint warn">键「{{ kvDupKeys[f.k] }}」重复，请修改后再保存</p>
+            <p v-if="f.hint" class="field-hint">{{ f.hint }}</p>
+          </div>
+          <div v-else class="field">
+            <label class="field-label">{{ f.label }}<span v-if="f.required" class="req">*</span></label>
+            <input
+              class="input"
+              :type="f.secret ? 'password' : 'text'"
+              v-model="form.secret[f.k]"
+              :placeholder="isNew ? f.ph : (f.secret ? '留空则保持不变（仅展示一次）' : f.ph)"
+            />
+            <p v-if="f.hint" class="field-hint">{{ f.hint }}</p>
+          </div>
+        </template>
+
+        <!-- 数据库凭证（mysql/pg）：草稿直连测试，不落库 -->
+        <div v-if="isDbKind" class="field">
+          <label class="field-label">连接测试</label>
+          <div class="test-conn-row">
+            <button type="button" class="btn" :disabled="testing" @click="testConnection">
+              {{ testing ? "测试中…" : "测试连接" }}
+            </button>
+            <p v-if="testResult" class="field-hint" :class="testResult.ok ? 'ok' : 'warn'">
+              {{ testResult.ok ? ("连接成功，耗时 " + testResult.latencyMs + "ms") : ("连接失败：" + testResult.message) }}
+            </p>
+          </div>
         </div>
 
         <div class="form-footer">
@@ -184,4 +265,12 @@ const doDelete = async () => {
 .req { color: var(--ember, #f59e0b); margin-left: 4px; }
 .field-hint { margin-top: 6px; font-size: 12px; color: var(--text-2); line-height: 1.5; }
 .field-hint.warn { color: var(--ember, #f59e0b); }
+.field-hint.ok { color: var(--ok, #38d2a3); }
+.kv-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.kv-key { flex: 1; min-width: 0; }
+.kv-eq { flex: none; color: var(--text-2); }
+.kv-val { flex: 1.4; min-width: 0; }
+.kv-add { margin-bottom: 8px; }
+.test-conn-row { display: flex; align-items: center; gap: 12px; }
+.test-conn-row .field-hint { margin-top: 0; }
 </style>
