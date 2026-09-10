@@ -54,9 +54,12 @@ const durText = (a, b) => {
 };
 
 // 节点类型：execution_node.type 可能为空（历史数据），用 stepType（后端并入）与 params 形状推断兜底
-const effType = (s) => s.type || s.stepType || (s.params ? (s.params.command ? "shell" : s.params.message || s.params.robot ? "approval" : "") : "");
-const KIND_LABEL = { shell: "Shell 执行", approval: "人工审批" };
-const KIND_ACCENT = { shell: "var(--accent)", approval: "var(--ember)" };
+const effType = (s) => {
+  if (s.type || s.stepType) return s.type || s.stepType;
+  return s.params ? (Array.isArray(s.params.statements) ? "sql" : s.params.command ? "shell" : (s.params.message || s.params.robot) ? "approval" : "") : "";
+};
+const KIND_LABEL = { shell: "Shell 执行", approval: "人工审批", sql: "SQL 执行" };
+const KIND_ACCENT = { shell: "var(--accent)", approval: "var(--ember)", sql: "var(--accent)" };
 const kindLabel = (s) => KIND_LABEL[effType(s)] || effType(s) || "节点";
 const kindAccent = (s) => KIND_ACCENT[effType(s)] || "var(--text-2)";
 
@@ -90,6 +93,10 @@ const stepSub = (s) => {
     if (p?.cpu || p?.memory) parts.push(`${p?.cpu || "?"} vCPU · ${p?.memory || "?"} GiB`);
     if (p?.regionId) parts.push(p.regionId);
     if (!parts.length) parts.push("运行 Shell 命令");
+  } else if (t === "sql") {
+    if (p?.credential) parts.push(`库 ${p.credential}`);
+    if (Array.isArray(p?.statements)) parts.push(`${p.statements.length} 条语句`);
+    if (!parts.length) parts.push("SQL 操作");
   } else if (t === "approval") {
     if (p?.robot) parts.push(`载体 ${p.robot}`);
     if (!parts.length) parts.push("人工审批请求");
@@ -241,6 +248,22 @@ const rerun = async () => {
                 </template>
               </template>
 
+              <!-- SQL：连接凭证 + 语句 + 日志 + 输出 -->
+              <template v-else-if="effType(s) === 'sql'">
+                <span class="stsub mono">SQL 配置</span>
+                <div class="cfg-grid">
+                  <span class="cfg-item"><span class="cfg-k">凭证</span><span class="cfg-v mono">{{ s.params?.credential || "—" }}</span></span>
+                  <span class="cfg-item cfg-wide"><span class="cfg-k">语句</span>
+                    <span class="cfg-v mono">{{ Array.isArray(s.params?.statements) ? s.params.statements.map((x, i) => `${i + 1}. ${x}`).join("\n") : "（无）" }}</span>
+                  </span>
+                  <span class="cfg-item"><span class="cfg-k">超时</span><span class="cfg-v mono">{{ s.params?.timeout ? `${s.params.timeout}s` : "—" }}</span></span>
+                </div>
+                <template v-if="s.logs">
+                  <span class="stsub mono">执行日志</span>
+                  <pre class="log-pre mono">{{ s.logs }}</pre>
+                </template>
+              </template>
+
               <!-- 审批：正文 + 接收人 -->
               <template v-else-if="effType(s) === 'approval'">
                 <span class="stsub mono">审批内容</span>
@@ -252,8 +275,8 @@ const rerun = async () => {
                 <p v-if="!s.logs && !hasOutput(s) && s.status === 'approve'" class="stempty dim">审批卡片已发出，等待审批人处理。</p>
               </template>
 
-              <!-- 通用：日志 / 输出 -->
-              <template v-if="s.logs && effType(s) !== 'shell'">
+              <!-- 通用：日志 / 输出（sql 的日志已在上方分支内展示，避免重复） -->
+              <template v-if="s.logs && effType(s) !== 'shell' && effType(s) !== 'sql'">
                 <span class="stsub mono">执行日志</span>
                 <pre class="log-pre mono">{{ s.logs }}</pre>
               </template>
@@ -261,7 +284,7 @@ const rerun = async () => {
                 <span class="stsub mono">节点输出</span>
                 <pre class="log-pre mono">{{ JSON.stringify(s.output, null, 2) }}</pre>
               </template>
-              <p v-if="!s.logs && !hasOutput(s) && s.kind !== 'trigger' && effType(s) !== 'approval'" class="stempty dim">
+              <p v-if="!s.logs && !hasOutput(s) && s.kind !== 'trigger' && effType(s) !== 'approval' && effType(s) !== 'sql'" class="stempty dim">
                 该步骤暂无日志（外部等待或未产生输出）。
               </p>
             </div>
