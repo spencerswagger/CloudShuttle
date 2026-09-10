@@ -5,6 +5,7 @@ import { pool } from "../db/pg.js";
 import { config } from "../config.js";
 import { sm4Encrypt, sm4Decrypt } from "../crypto/sm4.js";
 import { HttpError } from "../errors.js";
+import { buildDbConfig, createConnection } from "../providers/db.js";
 import { randomUUID } from "node:crypto";
 import { checkVars, resolveScope } from "../engine/variables.js";
 import { buildGraph, ancestors } from "../engine/dag.js";
@@ -240,6 +241,25 @@ export async function deleteCredential(id) {
   const { rows: r } = await pool.query(
     `DELETE FROM credential WHERE id=$1 RETURNING id,name`, [id]);
   return rows({ rows: r })[0];
+}
+
+// 测试数据库连接：用草稿 secret（含额外参数）建连并跑 SELECT 1，成功能返回耗时；
+// 失败抛可读错误（DISPATCH 捕获后降级为 200 + {ok:false,message}，参照 eciProbeNetworks）。
+export async function testCredentialConnection({ kind, secret }) {
+  if (kind !== "mysql" && kind !== "pg") {
+    throw new HttpError(400, "BAD_DB_KIND", `不支持的数据库类型：${kind || "未填写"}`);
+  }
+  const cfg = buildDbConfig(kind, secret);
+  // 测试连接限时：兜底防不可达主机挂住表单请求（与用户可配超时无关，属安全网）
+  if (cfg.connectTimeout == null) cfg.connectTimeout = 5000;
+  const start = Date.now();
+  const conn = await createConnection(kind, cfg);
+  try {
+    await conn.query("SELECT 1");
+    return { ok: true, latencyMs: Date.now() - start };
+  } finally {
+    try { await conn.end(); } catch { /* 忽略 */ }
+  }
 }
 
 // ---------- 凭证（不回显 secret_enc 明文） ----------
