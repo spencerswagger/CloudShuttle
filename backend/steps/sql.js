@@ -54,12 +54,20 @@ export function makeSqlStep({ getCredentialKind, getCredentialSecrets, createCon
     if (!statements.length) throw new Error("SQL 节点未填写任何可执行的 SQL 语句");
 
     const timeoutMs = coerceTimeout(p?.timeout);
-    const conn = await createConnection(kind, secret);
+    let conn;
+    try {
+      conn = await createConnection(kind, secret);
+    } catch (e) {
+      throw new Error(`SQL 节点连接数据库失败：${readableError(e)}`);
+    }
     const logs = [];
     let succeeded = 0;
     let lastResult = { rows: [], rowCount: 0, insertId: null };
+    let phase; // 失败阶段：begin / statement / commit，用于精准定位报错位置
     try {
+      phase = "begin";
       await withTimeout(conn.begin(), timeoutMs, "SQL 节点开启事务超时");
+      phase = "statement";
       for (const stmt of statements) {
         const r = await withTimeout(conn.query(stmt), timeoutMs, "SQL 节点执行语句超时");
         lastResult = r;
@@ -68,10 +76,19 @@ export function makeSqlStep({ getCredentialKind, getCredentialSecrets, createCon
           `✓ ${succeeded}. 执行成功（影响/返回 ${r.rowCount} 行${r.insertId != null ? `，自增 id=${r.insertId}` : ""}）`
         );
       }
+      phase = "commit";
       await withTimeout(conn.commit(), timeoutMs, "SQL 节点提交事务超时");
     } catch (err) {
-      try { await conn.rollback(); } catch { /* 回滚失败不掩盖原错误 */ }
-      const where = succeeded < statements.length ? `第 ${succeeded + 1} 条语句出错` : "提交事务出错";
+      const isTimeout = String(err?.message ?? "").includes("超时");
+      try {
+        // 超时：断连让服务端自动回滚事务（查询可能仍挂起，显式 ROLLBACK 会与之竞争）；非超时：显式回滚
+        if (isTimeout) await conn.destroy?.();
+        else await conn.rollback();
+      } catch { /* 回滚/断连失败不掩盖原错误 */ }
+      const where =
+        phase === "begin" ? "开启事务失败"
+        : phase === "commit" ? "提交事务出错"
+        : `第 ${succeeded + 1} 条语句出错`;
       const readback = logs.length ? `；已成功执行 ${succeeded} 条：\n` + logs.join("\n") : "；无已成功语句";
       throw new Error(`SQL 节点执行失败：${where}${readback}\n原因：${readableError(err)}`);
     } finally {

@@ -28,6 +28,9 @@ const SSL_MODE_MAP = {
   "verify-ca": { rejectUnauthorized: true },
 };
 
+// 固定字段与代码声明保留键：extra 不得覆盖（防止 extra 注入 host 劫持连接目标、multipleStatements 绕过逐条下发）。
+const RESERVED_CFG_KEYS = new Set(["host", "port", "user", "password", "database", "multipleStatements"]);
+
 // 纯函数：把解密后的凭证对象 → 驱动 config。
 // secret 形如 { host, port?, user, password, database, extra?: [{key,value}] }
 export function buildDbConfig(kind, secret) {
@@ -42,9 +45,13 @@ export function buildDbConfig(kind, secret) {
   for (const item of Array.isArray(secret?.extra) ? secret.extra : []) {
     const k = item?.key;
     const v = item?.value;
-    if (!k) continue;
+    if (!k || RESERVED_CFG_KEYS.has(k)) continue;
     if (k === "ssl") cfg.ssl = SSL_MODE_MAP[String(v).toLowerCase()] ?? coerceExtraValue(v);
     else cfg[k] = coerceExtraValue(v);
+  }
+  // 建连也受超时保护：pg 未显式配置连接超时则给默认 10s（mysql2 驱动自带 connectTimeout 默认）。
+  if (kind === "pg" && cfg.connectionTimeoutMillis === undefined) {
+    cfg.connectionTimeoutMillis = 10000;
   }
   return cfg;
 }
@@ -61,6 +68,7 @@ async function openPg(cfg) {
     async commit() { await client.query("COMMIT"); },
     async rollback() { await client.query("ROLLBACK"); },
     async end() { await client.end(); },
+    destroy() { try { client.connection?.stream?.destroy(); } catch { /* 忽略断连错误 */ } },
   };
 }
 
@@ -81,6 +89,7 @@ async function openMysql(cfg) {
     async commit() { await conn.commit(); },
     async rollback() { await conn.rollback(); },
     async end() { await conn.end(); },
+    destroy() { conn.destroy(); }, // mysql2 立即断连，同步即可
   };
 }
 
