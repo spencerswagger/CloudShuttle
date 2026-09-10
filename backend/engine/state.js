@@ -64,7 +64,7 @@ export function createAdvancer({ stepRun, snapshot, record, recordRegistry = asy
         // 节点输出（扁平 K=V）写入 environment，供后续节点 ${name} 引用
         fillEnv(env, res.output);
         console.log(`[advance] exec=${execId} ✔ 节点 ${nodeId} 就地完成，已写入节点记录`);
-        await record({ execId, nodeId, status: "done", output: res.output });
+        await record({ execId, nodeId, status: "done", output: res.output, logs: res.logs });
         await log(execId, `✔ 节点 ${nodeId} 完成`);
       } else {
         waiting = nodeId;
