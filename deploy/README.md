@@ -137,7 +137,23 @@ docker push registry.cn-hangzhou.aliyuncs.com/<ns>/cloudshuttle-runner:0.1
 
 ### B.6 审批机器人（可选）
 
-审批卡点用**钉钉群机器人**发送。先在 Web 画布的"凭证"页创建 `dingtalk-robot` 凭证（webhook 地址 + 可选加签密钥），再把凭证名填进管道 approval 节点的 `params.robot`。无需任何平台级环境变量。
+审批卡点用**钉钉**发送，支持两种凭证：
+
+1. **群自定义机器人（webhook）**：审批卡点用 `actionCard` 两个按钮，点击后在钉钉内置 webview 回调后端续跑。无需企业应用与额外权限。凭证页创建 `dingtalk` 凭证（webhook + 可选加签 secret），节点填 `params.robot`。
+2. **企业机器人（推荐，可后台回调）**：走官方互动卡片，按钮点击由**钉钉服务器后台回调**（不进浏览器）。凭证页创建 `dingtalk-corp` 凭证（企业应用 AppKey/AppSecret/AgentId/RobotCode）。审批节点可配置**发群**（填 `openConversationId`）或**发成员**（从通讯录按部门树勾选）。
+
+**企业机器人所需的企业应用权限**（在钉钉开发者后台「权限管理」发起/授予，未开通会导致对应接口报错）：
+
+| 权限代码 | 权限名 | 用途 |
+|---|---|---|
+| `qyapi_get_department_member` | 通讯录部门成员读权限 | 拉取部门内成员 userId/name（构建通讯录选择器） |
+| `qyapi_get_department_list` | 通讯录部门信息读权限 | 拉取部门列表（构建部门树） |
+
+相关 OpenAPI（oapi，用企业 accessToken 调用）：
+- `POST /topapi/v2/department/listsub` 查下一级部门
+- `POST /topapi/user/listsimple` 查部门内成员
+
+> 注意：审批/发成员选择器依赖以上两个权限；若只需 webhook 群机器人发卡可忽略。`openConversationId` 钉钉没有"列出全部群"接口，需在创建场景群时保存。
 
 ---
 
@@ -147,7 +163,8 @@ docker push registry.cn-hangzhou.aliyuncs.com/<ns>/cloudshuttle-runner:0.1
 
 - 用节点 `params.image` / `params.command` / `env` / `resource` / `timeout`；
 - 给容器注入环境：`IMAGE`、`COMMAND`、`CLOUDSHUTTLE_JOB_URL`、`CLOUDSHUTTLE_TOKEN`、`CLOUDSHUTTLE_EXEC_ID`、`CLOUDSHUTTLE_NODE_ID`、`CLOUDSHUTTLE_CB_BASE`（与 `runner/run.sh` 读取对应）；
-- 容器退出后回调 `/_/hook/ecidone/{execId}`（成功）或 `/_/hook/fail/{execId}`（失败）。
+- 容器退出后回调 `/_/hook/ecidone/{execId}`（成功）或 `/_/hook/fail/{execId}`（失败）；回调 URL 由控制面生成，
+  鉴权双因子走 query：`?token=<回调token>&secret=<回调密钥>`（与 `webhook_registry` 登记记录比对，且 `/_/` 仅内网可访问）。
 
 本地单测以 mock `create` 注入，不依赖真实云资源，因此不接入也可跑通单测。
 
@@ -155,10 +172,28 @@ docker push registry.cn-hangzhou.aliyuncs.com/<ns>/cloudshuttle-runner:0.1
 
 ## 端到端验收（demo-rollout）
 
-POST 一个 git webhook：
+### webhook 触发地址与管理端点
+
+触发地址**由后端生成**（管道名做百分号编码，中文/空格名都可用；后端消费时解码还原），在流水线编辑页直接复制即可：
+
 ```bash
-curl -X POST http://localhost:9000/hook/git/demo-rollout \
+# {管道名} 为百分号编码后的 name，secret 为该管道独立密钥
+curl -X POST 'http://localhost:9000/hook/webhook/demo-rollout?secret=<你的密钥>' \
   -H 'content-type: application/json' -d '{"ref":"refs/heads/main"}'
 ```
+
+**能力边界（务必按此对接第三方）**：
+
+- 请求体只支持 `Content-Type: application/json`；平台把 body 原样存入执行留痕，并按节点配置的 JSONPath 映射成变量；
+- 鉴权只支持 **URL query 携带 `?secret=`**，**不支持签名头 / HMAC 校验**（GitHub 的 `X-Hub-Signature-256` 之类一律不校验）；密钥按管道独立、创建时生成；
+- 返回码：`200` 触发成功、`401` 密钥不匹配、`503` 该管道密钥未配置、`404` 路由不存在、`500` 处理抛错；
+- **改名会使触发地址变化**（地址里带的是管道名），改名后需重新复制地址给第三方。
+
+| 管理端点 | 方法 | 用途与返回 |
+|---|---|---|
+| `/api/pipelines/:id/webhook-secret` | GET | 取该管道的密钥与完整触发地址 `{ ok, id, name, secret, url }`；密钥为空时懒生成。密钥**只能**经此接口与下面的 reset 显式获取，常规的管道 list/get/create/update 返显不含 `webhook_secret` |
+| `/api/pipelines/:id/webhook-secret/reset` | POST | 轮换密钥（泄露/定期换），返回新的 `{ ok, id, name, secret, url }`；拿到新地址后需到第三方同步更新 |
+| `/api/pipelines/:id/webhook-probe` | GET | 调试探针：该管道**最近一次**投递的 `{ ok, body, receivedAt, httpStatus }`。`body` 为第三方真实请求体（序列化超 256KB 时只存前 100KB 预览 `{"_truncated":true,"preview":"…"}`）；`httpStatus` 是那次投递的处理结果（200/401/503/500，`null`=尚无记录）。密钥错的投递也会记录，故 401 时仍能看到 body |
+
 期望流转：`running → (shell→ECI) → 发审批卡片 → (通过) → succeeded`。
 跑之前：确认已创建名为 `demo-robot` 的钉钉机器人凭证（approval 节点 `params.robot` 引用它）。

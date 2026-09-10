@@ -1,0 +1,306 @@
+<!-- 凭证新建/编辑页 -->
+<script setup>
+import { ref, computed, onMounted, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
+import { notify } from "../lib/notify.js";
+import ConfirmDialog from "../components/ConfirmDialog.vue";
+import { getCredential, createCredential, updateCredential, deleteCredential, testDbConnection } from "../api/credential.js";
+import { CRED_KINDS, credKind, credKindLabel } from "../lib/kinds.js";
+
+const route = useRoute();
+const router = useRouter();
+
+const form = ref({ name: "", kind: "dingtalk-corp", secret: {} });
+const loading = ref(false);
+const saving = ref(false);
+const deleting = ref(false);
+const confirmDel = ref(false);
+
+const isNew = computed(() => !route.params.id);
+const pageTitle = computed(() => (isNew.value ? "新建凭证" : `编辑凭证${form.value.name ? " · " + form.value.name : ""}`));
+
+const kindMeta = computed(() => credKind(form.value.kind));
+const kindFields = computed(() => kindMeta.value?.fields ?? []);
+const isDingtalk = computed(() => form.value.kind === "dingtalk-corp");
+// 数据库类凭证（mysql/pg）才显示「测试连接」
+const isDbKind = computed(() => form.value.kind === "mysql" || form.value.kind === "pg");
+
+// ---- kvlist（额外连接参数）动态键=值列表 ----
+// 行模型 {key, value}，存放于 form.secret[f.k]（数组）；后端 buildDbConfig 会忽略空 key 行
+const addKvRow = (k) => {
+  if (!Array.isArray(form.value.secret[k])) form.value.secret[k] = [];
+  form.value.secret[k].push({ key: "", value: "" });
+};
+const removeKvRow = (k, i) => {
+  const rows = form.value.secret[k];
+  if (Array.isArray(rows)) rows.splice(i, 1);
+};
+// kvlist 键去重：返回 { 字段k: 首个重复键名 }，就地提示并阻止提交
+const kvDupKeys = computed(() => {
+  const dups = {};
+  for (const f of kindFields.value) {
+    if (f.type !== "kvlist") continue;
+    const seen = new Set();
+    for (const r of form.value.secret[f.k] || []) {
+      const k = (r?.key || "").trim();
+      if (!k) continue;
+      if (seen.has(k)) dups[f.k] = k;
+      seen.add(k);
+    }
+  }
+  return dups;
+});
+
+// ---- 测试连接（mysql/pg）----
+const testing = ref(false);
+const testResult = ref(null); // { ok, latencyMs } | { ok:false, message }
+// 切类型后复位测试状态，避免旧类型结果残留/错位
+watch(() => form.value.kind, () => {
+  testing.value = false;
+  testResult.value = null;
+});
+const testConnection = async () => {
+  if (testing.value) return;
+  // 必填项缺失直接提示，不发起注定失败的建连
+  const missing = kindFields.value
+    .filter((f) => f.required && !f.type && !String(form.value.secret[f.k] ?? "").trim())
+    .map((f) => f.label);
+  if (missing.length) {
+    testResult.value = { ok: false, message: "请先填写：" + missing.join("、") };
+    return;
+  }
+  // 编辑态密码留空：后端不回显，测试会按空密码建连，先明确告知
+  const pwd = form.value.secret?.password;
+  if (!isNew.value && !String(pwd ?? "").trim()) {
+    testResult.value = { ok: false, message: "密码未填写（仅展示一次），测试将按空密码进行，可能失败" };
+    return;
+  }
+  testing.value = true;
+  testResult.value = null;
+  try {
+    const res = await testDbConnection({ kind: form.value.kind, secret: form.value.secret });
+    const d = res?.data ?? res;
+    testResult.value = d?.ok === true
+      ? { ok: true, latencyMs: d.latencyMs }
+      : { ok: false, message: d?.message || "连接失败" };
+  } catch (e) {
+    const msg = String(e?.message ?? "");
+    testResult.value = { ok: false, message: /timeout/i.test(msg) ? "连接超时，请检查地址/端口/网络，或在额外参数中调大 connectTimeout" : (e?.message || "连接失败") };
+  } finally {
+    testing.value = false;
+  }
+};
+
+// 详情接口加载返显；失败（含 404/已被删除）统一提示
+async function loadForm() {
+  const id = +route.params.id;
+  try {
+    const c = await getCredential(id);
+    form.value = { name: c.name, kind: c.kind, secret: {} };
+  } catch (e) {
+    notify({ type: "error", message: e?.status === 404 ? "未找到该凭证，可能已被删除" : (e?.message || "加载凭证失败") });
+  }
+}
+
+onMounted(async () => {
+  loading.value = true;
+  try { if (!isNew.value) await loadForm(); }
+  finally { loading.value = false; }
+});
+
+const save = async () => {
+  if (!form.value.name.trim()) { notify({ type: "error", message: "请填写凭证名称" }); return; }
+  const dupKeys = kvDupKeys.value;
+  const dupField = Object.keys(dupKeys)[0];
+  if (dupField) {
+    notify({ type: "error", message: "额外连接参数存在重复的键（" + dupKeys[dupField] + "），请修改后再保存" });
+    return;
+  }
+  saving.value = true;
+  try {
+    if (route.params.id) {
+      // 编辑模式：空值字段剔除，避免整包覆盖清空未重填的敏感项（后端仅在有字段时才重加密）
+      const payload = { ...form.value };
+      const s = {};
+      for (const [k, v] of Object.entries(payload.secret || {})) {
+        if (v !== "" && v !== undefined && v !== null) s[k] = v;
+      }
+      payload.secret = s;
+      await updateCredential(+route.params.id, payload);
+    } else {
+      await createCredential(form.value);
+    }
+    notify({ type: "success", message: "已保存凭证 ✓" });
+    router.push("/credentials");
+  } catch { /* 全局拦截器提示 */ }
+  finally { saving.value = false; }
+};
+
+const doDelete = async () => {
+  deleting.value = true;
+  try {
+    await deleteCredential(+route.params.id);
+    notify({ type: "success", message: "已删除凭证" });
+    router.push("/credentials");
+  } catch { /* 全局拦截器提示 */ }
+  finally { deleting.value = false; }
+};
+</script>
+
+<template>
+  <div class="form-page">
+    <header class="lp-head rise">
+      <div class="title-wrap">
+        <button class="btn btn-ghost" @click="router.push('/credentials')">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+          返回列表
+        </button>
+        <div>
+          <h1 class="lp-title display">{{ pageTitle }}</h1>
+          <p class="lp-sub muted">密钥以 SM4 加密后落库，敏感字段仅保存一次、不可回显。</p>
+        </div>
+      </div>
+    </header>
+
+    <section v-if="loading" class="card empty rise">
+      <p class="dim">加载中…</p>
+    </section>
+
+    <section v-else class="card form-sheet rise" style="animation-delay:.05s">
+      <form @submit.prevent="save">
+        <div class="form-grid">
+          <div class="field">
+            <label class="field-label">凭证名称</label>
+            <input class="input" v-model="form.name" placeholder="如 demo-robot / prod-registry" required />
+          </div>
+          <div class="field">
+            <label class="field-label">凭证类型</label>
+            <select class="select" v-model="form.kind">
+              <option v-for="k in CRED_KINDS" :key="k.value" :value="k.value">{{ k.label }}</option>
+            </select>
+          </div>
+        </div>
+
+        <p class="kind-hint">{{ kindMeta?.hint }}</p>
+
+        <!-- 钉钉：后台需手动完成的配置步骤 + 跳转链接 -->
+        <section v-if="kindMeta?.guide?.length" class="enroll-card">
+          <div class="enroll-title">钉钉后台需完成的配置</div>
+          <ol class="enroll-steps">
+            <li v-for="(g, i) in kindMeta.guide" :key="i" class="enroll-step">
+              <div class="enroll-step-head">
+                <span class="enroll-step-no">{{ i + 1 }}</span>
+                <a :href="g.url" target="_blank" rel="noreferrer" class="enroll-link">
+                  <span class="enroll-link-name">{{ g.title }}</span>
+                  <span class="enroll-go">去配置 ↗</span>
+                </a>
+              </div>
+              <p class="enroll-step-text">{{ g.text }}</p>
+            </li>
+          </ol>
+        </section>
+
+        <!-- 钉钉：后台自动生成/推导的参数说明 -->
+        <section v-if="kindMeta?.auto?.length" class="enroll-auto">
+          <div class="enroll-title">自动生成（无需填写）</div>
+          <div v-for="(a, i) in kindMeta.auto" :key="i" class="enroll-auto-row">
+            <span class="enroll-auto-label">{{ a.label }}</span>
+            <span class="enroll-auto-value">{{ a.value }}</span>
+          </div>
+        </section>
+
+        <template v-for="f in kindFields" :key="f.k">
+          <div v-if="f.type === 'kvlist'" class="field">
+            <label class="field-label">{{ f.label }}</label>
+            <div v-for="(row, i) in (form.secret[f.k] || [])" :key="i" class="kv-row">
+              <input class="input kv-key" v-model="row.key" placeholder="键（如 ssl）" />
+              <span class="kv-eq">=</span>
+              <input class="input kv-val" v-model="row.value" placeholder="值（如 true）" />
+              <button type="button" class="btn btn-sm btn-ghost" @click="removeKvRow(f.k, i)">删除</button>
+            </div>
+            <button type="button" class="btn btn-sm kv-add" @click="addKvRow(f.k)">＋ 添加一条</button>
+            <p v-if="kvDupKeys[f.k]" class="field-hint warn">键「{{ kvDupKeys[f.k] }}」重复，请修改后再保存</p>
+            <p v-if="f.hint" class="field-hint">{{ f.hint }}</p>
+          </div>
+          <div v-else class="field">
+            <label class="field-label">{{ f.label }}<span v-if="f.required" class="req">*</span></label>
+            <input
+              class="input"
+              :type="f.secret ? 'password' : 'text'"
+              v-model="form.secret[f.k]"
+              :placeholder="isNew ? f.ph : (f.secret ? '留空则保持不变（仅展示一次）' : f.ph)"
+            />
+            <p v-if="f.hint" class="field-hint">{{ f.hint }}</p>
+          </div>
+        </template>
+
+        <!-- 数据库凭证（mysql/pg）：草稿直连测试，不落库 -->
+        <div v-if="isDbKind" class="field">
+          <label class="field-label">连接测试</label>
+          <div class="test-conn-row">
+            <button type="button" class="btn" :disabled="testing" @click="testConnection">
+              {{ testing ? "测试中…" : "测试连接" }}
+            </button>
+            <p v-if="testResult" class="field-hint" :class="testResult.ok ? 'ok' : 'warn'">
+              {{ testResult.ok ? ("连接成功，耗时 " + testResult.latencyMs + "ms") : ("连接失败：" + testResult.message) }}
+            </p>
+          </div>
+        </div>
+
+        <div class="form-footer">
+          <button v-if="!isNew" type="button" class="btn btn-danger" @click="confirmDel = true">删除此凭证</button>
+          <span class="flex-spacer"></span>
+          <button type="button" class="btn" @click="router.push('/credentials')">取消</button>
+          <button type="submit" class="btn btn-accent" :disabled="saving">
+  {{ saving ? (isDingtalk ? "正在校验钉钉配置…" : "保存中…") : (isDingtalk ? "校验并保存" : "保存凭证") }}
+</button>
+        </div>
+      </form>
+    </section>
+
+    <ConfirmDialog
+      v-model:open="confirmDel"
+      title="删除凭证"
+      :message="`确定删除凭证「${form.name}」吗？`"
+      detail="引用该凭证的审批节点将无法再正常发送审批卡片。"
+      :loading="deleting"
+      @close="confirmDel = false"
+      @confirm="doDelete"
+    />
+  </div>
+</template>
+
+<style scoped>
+.title-wrap { display: flex; align-items: flex-end; gap: 14px; }
+.kind-hint {
+  margin: -4px 0 16px; font-size: 12.5px; line-height: 1.6;
+  color: var(--text-2); background: var(--bg-1);
+  border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
+}
+.form-footer { display: flex; align-items: center; gap: 10px; }
+.flex-spacer { flex: 1; }
+.enroll-card { margin: 0 0 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg-1); padding: 14px 16px; }
+.enroll-title { font-size: 12.5px; font-weight: 600; letter-spacing: .3px; margin-bottom: 10px; color: var(--text-1); }
+.enroll-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
+.enroll-step-head { display: flex; align-items: center; gap: 10px; }
+.enroll-step-no { width: 18px; height: 18px; border-radius: 50%; background: var(--accent); color: #04121a; font-size: 11px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; flex: none; }
+.enroll-link { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; color: var(--text-1); font-weight: 600; font-size: 13px; }
+.enroll-link:hover { color: var(--accent); }
+.enroll-go { margin-left: auto; font-size: 11.5px; color: var(--accent); flex: none; }
+.enroll-step-text { margin: 4px 0 0 28px; font-size: 12px; line-height: 1.6; color: var(--text-2); }
+.enroll-auto { border: 1px dashed var(--line); border-radius: 12px; padding: 10px 14px; margin: 0 0 18px; background: var(--bg-1); }
+.enroll-auto-row { display: flex; gap: 10px; align-items: baseline; padding: 5px 0; }
+.enroll-auto-label { width: 120px; flex: none; font-size: 12px; color: var(--text-2); }
+.enroll-auto-value { font-size: 12.5px; color: var(--text-1); }
+.req { color: var(--ember, #f59e0b); margin-left: 4px; }
+.field-hint { margin-top: 6px; font-size: 12px; color: var(--text-2); line-height: 1.5; }
+.field-hint.warn { color: var(--ember, #f59e0b); }
+.field-hint.ok { color: var(--ok, #38d2a3); }
+.kv-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.kv-key { flex: 1; min-width: 0; }
+.kv-eq { flex: none; color: var(--text-2); }
+.kv-val { flex: 1.4; min-width: 0; }
+.kv-add { margin-bottom: 8px; }
+.test-conn-row { display: flex; align-items: center; gap: 12px; }
+.test-conn-row .field-hint { margin-top: 0; }
+</style>

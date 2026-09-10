@@ -1,9 +1,13 @@
+-- 001_init.sql —— 初始表结构
+-- 全部使用 IF NOT EXISTS / ADD COLUMN IF NOT EXISTS，对存量库同样安全（首次应用为幂等即装成功）
+
 CREATE TABLE IF NOT EXISTS pipeline (
   id BIGSERIAL PRIMARY KEY,
   name TEXT NOT NULL UNIQUE,
   description TEXT,
   spec_json JSONB NOT NULL DEFAULT '{}',
   rev INT NOT NULL DEFAULT 1,
+  webhook_secret TEXT NOT NULL DEFAULT '',    -- webhook 触发访问密钥（创建时生成）
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -48,7 +52,24 @@ CREATE TABLE IF NOT EXISTS webhook_registry (
   exec_id BIGINT NOT NULL,
   node_id TEXT NOT NULL,
   kind TEXT NOT NULL,          -- eci | dingtalk
+  secret TEXT NOT NULL DEFAULT '',   -- 每个回调独立的访问密钥
   expires_at TIMESTAMPTZ NOT NULL
+);
+
+-- 存量库兼容：补充 secret 列（幂等，重复执行无害）
+ALTER TABLE webhook_registry ADD COLUMN IF NOT EXISTS secret TEXT NOT NULL DEFAULT '';
+-- 存量库兼容：补充 credential 列，回调更新卡片状态时据此反查机器人凭证刷新 accessToken
+ALTER TABLE webhook_registry ADD COLUMN IF NOT EXISTS credential TEXT NOT NULL DEFAULT '';
+
+-- webhook 触发调试探针：每个管道只留最近一次投递的原始 body 与本次处理结果。
+-- http_status 记录该次投递的最终处理结果（200=触发成功、401=密钥不匹配、503=密钥未配置、
+-- 500=处理抛错），避免用户只看到「已收到 body」却在鉴权/执行失败时误判链路已通。
+-- 不设外键，管道删除后残留行无害；pipeline_id 用 BIGINT 对齐 pipeline.id。
+CREATE TABLE IF NOT EXISTS webhook_probe (
+  pipeline_id BIGINT PRIMARY KEY,
+  body JSONB NOT NULL,
+  http_status INT,
+  received_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS credential (
@@ -58,6 +79,9 @@ CREATE TABLE IF NOT EXISTS credential (
   secret_enc TEXT NOT NULL,    -- SM4 加密后的 JSON（AK/SK/账号密码等）
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- 存量库兼容：credential 表补充 updated_at（updateCredential 依赖）
+ALTER TABLE credential ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
 
 CREATE TABLE IF NOT EXISTS exec_image (
   id BIGSERIAL PRIMARY KEY,
