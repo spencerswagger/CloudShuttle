@@ -78,6 +78,38 @@ test("非 mysql/pg 的 kind 由 handler 抛 400，不发起连接", async () => 
   );
 });
 
+test("buildTestConfig 保留 extra 合并键（ssl/charset）与 5s 兜底超时并存", () => {
+  const cfg = buildTestConfig("mysql", {
+    ...SECRET,
+    extra: [{ key: "ssl", value: "verify-ca" }, { key: "charset", value: "utf8mb4" }],
+  });
+  assert.deepEqual(cfg.ssl, { rejectUnauthorized: true });
+  assert.equal(cfg.charset, "utf8mb4");
+  assert.equal(cfg.connectTimeout, 5000);
+});
+
+test("testCredentialConnection 以 raw 方式原样透传 cfg（ssl/charset 不二次丢失）且正常关闭连接", async () => {
+  const { makeTestCredentialConnection } = await import("./api.js");
+  const seen = [];
+  const testConn = makeTestCredentialConnection({
+    createConnection: async (kind, cfg, opts) => {
+      seen.push({ kind, cfg, opts });
+      return { async query() { return { rows: [], rowCount: 1 }; }, async end() { seen.push("END"); } };
+    },
+  });
+  const out = await testConn({
+    kind: "mysql",
+    secret: { ...SECRET, extra: [{ key: "ssl", value: "true" }, { key: "charset", value: "utf8mb4" }] },
+  });
+  assert.equal(out.ok, true);
+  assert.equal(seen.length, 2); // 建连 + END
+  assert.equal(seen[0].kind, "mysql");
+  assert.equal(seen[0].opts.raw, true, "必须 raw 透传，二次 buildDbConfig 会丢 ssl/charset");
+  assert.equal(seen[0].cfg.ssl, true);
+  assert.equal(seen[0].cfg.charset, "utf8mb4");
+  assert.equal(seen[0].cfg.connectTimeout, 5000);
+});
+
 test("steps 类型注册表包含 sql（buildApp 装配来源，启动时校验一致）", async () => {
   const { STEP_TYPES } = await import("../index.js");
   assert.ok(STEP_TYPES.includes("sql"));

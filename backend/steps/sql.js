@@ -6,7 +6,7 @@ export function coerceTimeout(v) {
 }
 
 function withTimeout(promise, ms, message) {
-  if (!ms) return promise;
+  if (ms == null) return promise; // 未配置超时；0 表示预算已耗尽，立即判超时
   return new Promise((resolve, reject) => {
     const t = setTimeout(() => reject(new Error(message)), ms);
     promise.then(
@@ -16,8 +16,22 @@ function withTimeout(promise, ms, message) {
   });
 }
 
+// 执行阶段总预算：begin + 全部语句 + commit 共享 params.timeout，防 N 条 × timeout 超 FC 请求时限。
+function makeDeadline(ms) {
+  if (ms == null) return () => undefined;
+  const end = Date.now() + ms;
+  return () => Math.max(0, end - Date.now());
+}
+
+// 错误脱敏：驱动首行可能带内网 IP:port（ECONNREFUSED）与账号（Access denied for user），
+// 规格要求不泄露主机/账号，剥掉后保留可读错误码。
 function readableError(err) {
-  return String(err?.message ?? err).split("\n")[0].slice(0, 300);
+  let msg = String(err?.message ?? err).split("\n")[0].slice(0, 300);
+  msg = msg
+    .replace(/(\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?/g, "<host>")       // IPv4[:port]
+    .replace(/user ['"]?[^'"]+['"]?/gi, "user <account>")           // mysql: user 'x'@'...'
+    .replace(/for user ["']?[^"']+["']?/gi, "for user <account>");  // pg: ... for user "x"
+  return msg;
 }
 
 // 输出绑定：无 column → 最后一条语句的受影响/返回行数；有 column → 最后结果集首行该列。
@@ -54,6 +68,7 @@ export function makeSqlStep({ getCredentialKind, getCredentialSecrets, createCon
     if (!statements.length) throw new Error("SQL 节点未填写任何可执行的 SQL 语句");
 
     const timeoutMs = coerceTimeout(p?.timeout);
+    const remaining = makeDeadline(timeoutMs);
     let conn;
     try {
       conn = await createConnection(kind, secret);
@@ -64,12 +79,13 @@ export function makeSqlStep({ getCredentialKind, getCredentialSecrets, createCon
     let succeeded = 0;
     let lastResult = { rows: [], rowCount: 0, insertId: null };
     let phase; // 失败阶段：begin / statement / commit，用于精准定位报错位置
+    let destroyed = false; // 超时已 destroy 断连时不再 end()（pg 对已断连连接 end 会挂起）
     try {
       phase = "begin";
-      await withTimeout(conn.begin(), timeoutMs, "SQL 节点开启事务超时");
+      await withTimeout(conn.begin(), remaining(), "SQL 节点开启事务超时");
       phase = "statement";
       for (const stmt of statements) {
-        const r = await withTimeout(conn.query(stmt), timeoutMs, "SQL 节点执行语句超时");
+        const r = await withTimeout(conn.query(stmt), remaining(), "SQL 节点执行语句超时");
         lastResult = r;
         succeeded++;
         logs.push(
@@ -77,13 +93,17 @@ export function makeSqlStep({ getCredentialKind, getCredentialSecrets, createCon
         );
       }
       phase = "commit";
-      await withTimeout(conn.commit(), timeoutMs, "SQL 节点提交事务超时");
+      await withTimeout(conn.commit(), remaining(), "SQL 节点提交事务超时");
     } catch (err) {
       const isTimeout = String(err?.message ?? "").includes("超时");
       try {
         // 超时：断连让服务端自动回滚事务（查询可能仍挂起，显式 ROLLBACK 会与之竞争）；非超时：显式回滚
-        if (isTimeout) await conn.destroy?.();
-        else await conn.rollback();
+        if (isTimeout) {
+          if (typeof conn.destroy === "function") { await conn.destroy(); destroyed = true; }
+          else await conn.rollback();
+        } else {
+          await conn.rollback();
+        }
       } catch { /* 回滚/断连失败不掩盖原错误 */ }
       const where =
         phase === "begin" ? "开启事务失败"
@@ -92,7 +112,7 @@ export function makeSqlStep({ getCredentialKind, getCredentialSecrets, createCon
       const readback = logs.length ? `；已成功执行 ${succeeded} 条：\n` + logs.join("\n") : "；无已成功语句";
       throw new Error(`SQL 节点执行失败：${where}${readback}\n原因：${readableError(err)}`);
     } finally {
-      try { await conn.end(); } catch { /* 忽略关闭错误 */ }
+      try { if (!destroyed) await conn.end(); } catch { /* 忽略关闭错误 */ }
     }
     return { kind: "done", output: buildOutput(p?.outputs, lastResult), logs: logs.join("\n") };
   };

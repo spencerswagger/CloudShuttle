@@ -265,20 +265,25 @@ export function buildTestConfig(kind, secret) {
 
 // 测试数据库连接：用草稿 secret（含额外参数）建连并跑 SELECT 1，成功能返回耗时；
 // 失败抛可读错误（DISPATCH 捕获后降级为 200 + {ok:false,message}，参照 eciProbeNetworks）。
-export async function testCredentialConnection({ kind, secret }) {
-  if (kind !== "mysql" && kind !== "pg") {
-    throw new HttpError(400, "BAD_DB_KIND", `不支持的数据库类型：${kind || "未填写"}`);
-  }
-  const cfg = buildTestConfig(kind, secret);
-  const start = Date.now();
-  const conn = await createConnection(kind, cfg);
-  try {
-    await conn.query("SELECT 1");
-    return { ok: true, latencyMs: Date.now() - start };
-  } finally {
-    try { await conn.end(); } catch { /* 忽略 */ }
-  }
+// 工厂注入 createConnection 便于单测验证「cfg 原样透传」；opts.raw 让建连层跳过二次合并（否则 ssl 等丢失）。
+export function makeTestCredentialConnection({ createConnection: open }) {
+  return async function testCredentialConnection({ kind, secret }) {
+    if (kind !== "mysql" && kind !== "pg") {
+      throw new HttpError(400, "BAD_DB_KIND", `不支持的数据库类型：${kind || "未填写"}`);
+    }
+    const cfg = buildTestConfig(kind, secret);
+    const start = Date.now();
+    const conn = await open(kind, cfg, { raw: true });
+    try {
+      await conn.query("SELECT 1");
+      return { ok: true, latencyMs: Date.now() - start };
+    } finally {
+      try { await conn.end(); } catch { /* 忽略 */ }
+    }
+  };
 }
+
+export const testCredentialConnection = makeTestCredentialConnection({ createConnection });
 
 // ---------- 凭证（不回显 secret_enc 明文） ----------
 export async function listCredentials() {

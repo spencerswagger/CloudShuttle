@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { makeSqlStep, buildOutput, coerceTimeout } from "./sql.js";
-import { buildDbConfig, coerceExtraValue } from "../providers/db.js";
+import { buildDbConfig, coerceExtraValue, resolveDbConfig } from "../providers/db.js";
 import { renderParams } from "../engine/variables.js";
 
 // 内存 fake 连接：记录语句、行数；可注入失败点（begin/语句/commit）、回滚抛错、destroy 记录
@@ -102,16 +102,16 @@ test("回滚失败不掩盖原语句错误", async () => {
   assert.ok(conn.calls.includes("END"));
 });
 
-test("建连失败 → 错误含「连接数据库失败」与可读原因", async () => {
+test("建连失败 → 错误含「连接数据库失败」与可读原因、不泄露主机 IP:port", async () => {
   const s = makeSqlStep({
     getCredentialKind: async () => "mysql",
     getCredentialSecrets: async () => ({ host: "h", user: "u", password: "p", database: "d" }),
-    createConnection: async () => { throw new Error("ECONNREFUSED 127.0.0.1:3306"); },
+    createConnection: async () => { throw new Error("connect ECONNREFUSED 127.0.0.1:3306"); },
   });
-  await assert.rejects(
-    s({ params: { credential: "c", statements: ["SELECT 1"], outputs: [] } }, { environment: new Map() }),
-    /连接数据库失败.*ECONNREFUSED/s
-  );
+  const err = await s({ params: { credential: "c", statements: ["SELECT 1"], outputs: [] } }, { environment: new Map() })
+    .then(() => null, (e) => e);
+  assert.match(err.message, /连接数据库失败.*ECONNREFUSED/s);
+  assert.ok(!err.message.includes("127.0.0.1"), "驱动错误中的内网 IP 不应泄露");
 });
 
 test("输出绑定：无 column → affectedRows；有 column → 首行该列；缺列 → 空串", async () => {
@@ -155,7 +155,35 @@ test("超时兜底：执行超过 timeout → destroy 断连（而非 rollback�
   );
   assert.ok(conn.calls.includes("DESTROY"));
   assert.ok(!conn.calls.includes("ROLLBACK"));
-  assert.ok(conn.calls.includes("END"));
+  assert.ok(!conn.calls.includes("END"), "超时 destroy 断连后不应再 end()（pg 对已断连连接 end 会挂起）");
+});
+
+test("超时是执行总预算：多条语句共享 timeout，第二条超出剩余预算即失败（能抓到旧实现单条各自计时）", async () => {
+  const conn = {
+    calls: [],
+    async begin() { this.calls.push("BEGIN"); },
+    async query() { await new Promise((r) => setTimeout(r, 25)); return { rows: [], rowCount: 1 }; },
+    async commit() { this.calls.push("COMMIT"); },
+    async rollback() { this.calls.push("ROLLBACK"); },
+    async destroy() { this.calls.push("DESTROY"); },
+    async end() { this.calls.push("END"); },
+  };
+  await assert.rejects(
+    step(conn, { credential: "c", timeout: 0.04, statements: ["SELECT 1", "SELECT 2"], outputs: [] }),
+    /第 2 条语句出错|超时/s
+  );
+  assert.ok(conn.calls.includes("DESTROY"), "总预算耗尽应 destroy 断连而非提交");
+  assert.ok(!conn.calls.includes("COMMIT"));
+});
+
+test("resolveDbConfig：raw 模式原样透传（ssl/charset 等已合并键不二次丢弃）；非 raw 走 buildDbConfig", () => {
+  const built = { host: "h", user: "u", password: "p", database: "d", ssl: true, charset: "utf8mb4", connectTimeout: 5000 };
+  assert.equal(resolveDbConfig("mysql", built, { raw: true }), built);
+  const merged = resolveDbConfig("mysql", {
+    host: "h", user: "u", password: "p", database: "d",
+    extra: [{ key: "ssl", value: "true" }],
+  });
+  assert.equal(merged.ssl, true);
 });
 
 test("buildDbConfig：固定字段直映射 + extra 类型化 + ssl 语义映射", () => {

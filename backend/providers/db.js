@@ -105,8 +105,14 @@ async function openMysql(cfg) {
 }
 
 // 按 kind 打开一条连接；不支持的 kind 抛可读错误。
-export async function createConnection(kind, secret) {
-  const cfg = buildDbConfig(kind, secret);
+// opts.raw=true 表示 secret 已是构建好的驱动 config（如 testCredentialConnection 的 buildTestConfig 产物），
+// 直接使用，避免二次 buildDbConfig 丢弃已合并的 ssl/charset 等 extra 键。
+export function resolveDbConfig(kind, secret, opts = {}) {
+  return opts?.raw ? secret : buildDbConfig(kind, secret);
+}
+
+export async function createConnection(kind, secret, opts = {}) {
+  const cfg = resolveDbConfig(kind, secret, opts);
   if (kind === "pg") return openPg(cfg);
   if (kind === "mysql") return openMysql(cfg);
   throw new Error(`不支持的数据库类型：${kind}`);
