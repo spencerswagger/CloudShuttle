@@ -16,6 +16,8 @@ import { createMutex } from "./engine/mutex.js";
 import { createAdvancer } from "./engine/state.js";
 import { makeShellStep } from "./steps/shell.js";
 import { makeApprovalStep } from "./steps/approval.js";
+import { makeSqlStep } from "./steps/sql.js";
+import { createConnection as createDbConnection } from "./providers/db.js";
 import { createOrchestrator } from "./engine/orchestrator.js";
 import { assembleTriggerEnv } from "./engine/trigger.js";
 import { randomUUID } from "node:crypto";
@@ -37,6 +39,7 @@ const RE = {
   pipelineScope: /^\/api\/pipelines\/(\d+)\/scope$/,
   credentials: /^\/api\/credentials$/,
   credentialOne: /^\/api\/credentials\/(\d+)$/,
+  credentialTest: /^\/api\/credentials\/test$/,
   images: /^\/api\/images$/,
   imageOne: /^\/api\/images\/(\d+)$/,
   executions: /^\/api\/executions$/,
@@ -69,6 +72,9 @@ export function routeToHandler(path, method, body) {
   if (RE.credentials.test(path)) {
     if (m === "GET") return { handler: "api.listCredentials" };
     if (m === "POST") return { handler: "api.createCredential" };
+  }
+  if (RE.credentialTest.test(path)) {
+    if (m === "POST") return { handler: "api.testCredentialConnection" };
   }
   if (RE.credentialOne.test(path)) {
     if (m === "GET") return { handler: "api.getCredential" };
@@ -340,6 +346,7 @@ async function buildApp() {
       dingtalkCorpProvider, getCredentialKind, getCredentialSecrets,
       genToken: randomUUID, controlPlaneBase: resolveControlBase,
     }),
+    sql: makeSqlStep({ getCredentialKind, getCredentialSecrets, createConnection: createDbConnection }),
   };
   const advancer = createAdvancer({
     stepRun: async (node, ctx) => {
@@ -495,6 +502,14 @@ const DISPATCH = {
   "api.updateCredential": async ({ app, path, body, event }) =>
     ok(api.updateCredential(Number(m(path, RE.credentialOne)), body, { enroll: app.enroll, base: resolveCallbackBase(event) })),
   "api.getCredential": async ({ path }) => ok(api.getCredential(Number(m(path, RE.credentialOne)))),
+  "api.testCredentialConnection": async ({ body }) => {
+    try {
+      const out = await api.testCredentialConnection(body);
+      return ok(out);
+    } catch (err) {
+      return { status: 200, body: { ok: false, message: err?.message ?? String(err) } };
+    }
+  },
   "api.updateImage": async ({ path, body }) => ok(api.updateImage(Number(m(path, RE.imageOne)), body)),
   "api.deleteImage": async ({ path }) => ok(api.deleteImage(Number(m(path, RE.imageOne)))),
   "api.getImage": async ({ path }) => ok(api.getImage(Number(m(path, RE.imageOne)))),
