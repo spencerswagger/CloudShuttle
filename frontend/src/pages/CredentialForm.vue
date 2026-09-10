@@ -1,6 +1,6 @@
 <!-- 凭证新建/编辑页 -->
 <script setup>
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, onMounted, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { notify } from "../lib/notify.js";
 import ConfirmDialog from "../components/ConfirmDialog.vue";
@@ -54,8 +54,27 @@ const kvDupKeys = computed(() => {
 // ---- 测试连接（mysql/pg）----
 const testing = ref(false);
 const testResult = ref(null); // { ok, latencyMs } | { ok:false, message }
+// 切类型后复位测试状态，避免旧类型结果残留/错位
+watch(() => form.value.kind, () => {
+  testing.value = false;
+  testResult.value = null;
+});
 const testConnection = async () => {
   if (testing.value) return;
+  // 必填项缺失直接提示，不发起注定失败的建连
+  const missing = kindFields.value
+    .filter((f) => f.required && !f.type && !String(form.value.secret[f.k] ?? "").trim())
+    .map((f) => f.label);
+  if (missing.length) {
+    testResult.value = { ok: false, message: "请先填写：" + missing.join("、") };
+    return;
+  }
+  // 编辑态密码留空：后端不回显，测试会按空密码建连，先明确告知
+  const pwd = form.value.secret?.password;
+  if (!isNew.value && !String(pwd ?? "").trim()) {
+    testResult.value = { ok: false, message: "密码未填写（仅展示一次），测试将按空密码进行，可能失败" };
+    return;
+  }
   testing.value = true;
   testResult.value = null;
   try {
@@ -65,7 +84,8 @@ const testConnection = async () => {
       ? { ok: true, latencyMs: d.latencyMs }
       : { ok: false, message: d?.message || "连接失败" };
   } catch (e) {
-    testResult.value = { ok: false, message: e?.message || "连接失败" };
+    const msg = String(e?.message ?? "");
+    testResult.value = { ok: false, message: /timeout/i.test(msg) ? "连接超时，请检查地址/端口/网络，或在额外参数中调大 connectTimeout" : (e?.message || "连接失败") };
   } finally {
     testing.value = false;
   }
@@ -98,8 +118,18 @@ const save = async () => {
   }
   saving.value = true;
   try {
-    if (route.params.id) await updateCredential(+route.params.id, form.value);
-    else await createCredential(form.value);
+    if (route.params.id) {
+      // 编辑模式：空值字段剔除，避免整包覆盖清空未重填的敏感项（后端仅在有字段时才重加密）
+      const payload = { ...form.value };
+      const s = {};
+      for (const [k, v] of Object.entries(payload.secret || {})) {
+        if (v !== "" && v !== undefined && v !== null) s[k] = v;
+      }
+      payload.secret = s;
+      await updateCredential(+route.params.id, payload);
+    } else {
+      await createCredential(form.value);
+    }
     notify({ type: "success", message: "已保存凭证 ✓" });
     router.push("/credentials");
   } catch { /* 全局拦截器提示 */ }
