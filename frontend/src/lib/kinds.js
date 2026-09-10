@@ -79,6 +79,34 @@ export const CRED_KINDS = [
       { k: "sk", label: "SecretKey", ph: "SK", secret: true },
     ],
   },
+  {
+    value: "mysql",
+    label: "MySQL 数据库",
+    icon: "M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3zm0 0v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6",
+    hint: "数据库连接凭证（SQL 节点后端直连执行）。固定字段见下；其余驱动连接参数（ssl / charset / connectTimeout 等）在「额外连接参数」按需添加，可多条。",
+    fields: [
+      { k: "host", label: "主机地址", ph: "数据库主机地址", required: true },
+      { k: "port", label: "端口", ph: "3306" },
+      { k: "user", label: "用户名", ph: "数据库用户名", required: true },
+      { k: "password", label: "密码", ph: "数据库密码", secret: true, required: true },
+      { k: "database", label: "数据库名", ph: "默认连接的数据库", required: true },
+      { k: "extra", type: "kvlist", label: "额外连接参数", hint: "键=值，可添加多条；如 ssl=true / charset=utf8mb4 / connectTimeout=10000" },
+    ],
+  },
+  {
+    value: "pg",
+    label: "PostgreSQL 数据库",
+    icon: "M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3zm0 0v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3",
+    hint: "数据库连接凭证（SQL 节点后端直连执行）。固定字段见下；其余驱动连接参数（ssl / application_name / statement_timeout 等）在「额外连接参数」按需添加，可多条。",
+    fields: [
+      { k: "host", label: "主机地址", ph: "数据库主机地址", required: true },
+      { k: "port", label: "端口", ph: "5432" },
+      { k: "user", label: "用户名", ph: "postgres", required: true },
+      { k: "password", label: "密码", ph: "数据库密码", secret: true, required: true },
+      { k: "database", label: "数据库名", ph: "默认连接的数据库", required: true },
+      { k: "extra", type: "kvlist", label: "额外连接参数", hint: "键=值，可添加多条；如 ssl=true / application_name=my-app / statement_timeout=5000" },
+    ],
+  },
 ];
 export const credKind = (v) => CRED_KINDS.find((k) => k.value === v);
 export const credKindLabel = (v) => credKind(v)?.label ?? v;
