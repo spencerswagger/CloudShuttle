@@ -1133,7 +1133,7 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
                   </div>
                   <div class="field">
                     <label class="field-label">超时（秒，可选）</label>
-                    <input class="input mono" type="number" v-model="n.params.timeout" placeholder="如 60" />
+                    <input class="input mono" type="number" v-model.number="n.params.timeout" placeholder="如 60" />
                     <p class="field-hint">后端直连执行；超出视为失败并回滚，防止长 SQL 阻塞请求</p>
                   </div>
                 </template>
