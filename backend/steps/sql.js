@@ -68,13 +68,14 @@ export function makeSqlStep({ getCredentialKind, getCredentialSecrets, createCon
     if (!statements.length) throw new Error("SQL 节点未填写任何可执行的 SQL 语句");
 
     const timeoutMs = coerceTimeout(p?.timeout);
-    const remaining = makeDeadline(timeoutMs);
     let conn;
     try {
       conn = await createConnection(kind, secret);
     } catch (e) {
       throw new Error(`SQL 节点连接数据库失败：${readableError(e)}`);
     }
+    // 总预算从建连完成开始计时：begin + 全部语句 + commit 共享 params.timeout
+    const remaining = makeDeadline(timeoutMs);
     const logs = [];
     let succeeded = 0;
     let lastResult = { rows: [], rowCount: 0, insertId: null };
