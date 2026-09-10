@@ -181,6 +181,11 @@ test("buildDbConfig：固定字段直映射 + extra 类型化 + ssl 语义映射
   assert.equal(pg.connectionTimeoutMillis, 10000); // pg 默认建连超时
   const pgCustom = buildDbConfig("pg", { host: "h", user: "u", password: "p", database: "d", extra: [{ key: "connectionTimeoutMillis", value: "5000" }] });
   assert.equal(pgCustom.connectionTimeoutMillis, 5000); // 显式配置优先于默认
+  // secret 顶层透传：驱动级连接超时键保留（cfg 作 secret 二次建连幂等）
+  const passthrough = buildDbConfig("mysql", { host: "h", user: "u", password: "p", database: "d", connectTimeout: 5000 });
+  assert.equal(passthrough.connectTimeout, 5000);
+  const passthroughPg = buildDbConfig("pg", { host: "h", user: "u", password: "p", database: "d", connectionTimeoutMillis: 30000 });
+  assert.equal(passthroughPg.connectionTimeoutMillis, 30000); // 显式透传优先于 pg 默认 10000
 });
 
 test("buildDbConfig：extra 不得覆盖保留键（host/port/user/password/database/multipleStatements）", () => {

@@ -250,8 +250,10 @@ export async function testCredentialConnection({ kind, secret }) {
     throw new HttpError(400, "BAD_DB_KIND", `不支持的数据库类型：${kind || "未填写"}`);
   }
   const cfg = buildDbConfig(kind, secret);
-  // 测试连接限时：兜底防不可达主机挂住表单请求（与用户可配超时无关，属安全网）
-  if (cfg.connectTimeout == null) cfg.connectTimeout = 5000;
+  // 测试连接限时：兜底防不可达主机挂住表单请求（与用户可配超时无关，属安全网）；
+  // 按驱动键名设置：pg 用 connectionTimeoutMillis，mysql 用 connectTimeout。
+  const timeoutKey = kind === "pg" ? "connectionTimeoutMillis" : "connectTimeout";
+  if (cfg[timeoutKey] == null) cfg[timeoutKey] = 5000;
   const start = Date.now();
   const conn = await createConnection(kind, cfg);
   try {

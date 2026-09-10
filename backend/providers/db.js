@@ -53,6 +53,10 @@ export function buildDbConfig(kind, secret) {
   if (kind === "pg" && cfg.connectionTimeoutMillis === undefined) {
     cfg.connectionTimeoutMillis = 10000;
   }
+  // secret 顶层若已含驱动级连接超时键则保留（显式值优先于默认），
+  // 使「cfg 作为 secret 透传」场景（如 testCredentialConnection 二次建连）幂等安全。
+  if (secret?.connectTimeout != null) cfg.connectTimeout = Number(secret.connectTimeout);
+  if (secret?.connectionTimeoutMillis != null) cfg.connectionTimeoutMillis = Number(secret.connectionTimeoutMillis);
   return cfg;
 }
 
