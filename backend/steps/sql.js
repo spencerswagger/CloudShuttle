@@ -61,7 +61,7 @@ export function makeSqlStep({ getCredentialKind, getCredentialSecrets, createCon
     try {
       await withTimeout(conn.begin(), timeoutMs, "SQL 节点开启事务超时");
       for (const stmt of statements) {
-        const r = await conn.query(stmt);
+        const r = await withTimeout(conn.query(stmt), timeoutMs, "SQL 节点执行语句超时");
         lastResult = r;
         succeeded++;
         logs.push(
