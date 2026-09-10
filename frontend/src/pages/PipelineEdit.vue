@@ -55,7 +55,7 @@ async function hydrate() {
     resetHookSession(); // 切换流水线：丢弃后端下发的触发地址与调试接收态，避免跨 /pipelines/:id 残留
     // 下拉数据懒加载：仅当节点实际用到镜像/凭证才请求，避免挂载即连拉 3 个接口
     const ns = current.value.spec_json?.nodes ?? [];
-    if (ns.some((n) => n.type === "shell" || n.type === "approval")) loadCreds();
+    if (ns.some((n) => n.type === "shell" || n.type === "approval" || n.type === "sql")) loadCreds();
     if (ns.some((n) => n.type === "shell")) loadImages();
     nextTick(fitAll); // 回填内容后按内容重算各正文/命令输入框高度
   } catch (e) {
@@ -164,6 +164,7 @@ function fitAll() { document.querySelectorAll("textarea.autofit").forEach(fit); 
 const NODE_KINDS = {
   shell:    { label: "Shell 执行",   accent: "var(--accent)",  icon: "M4 5l6 7-6 7m8 0h8" },
   approval: { label: "人工审批",     accent: "var(--ember)",   icon: "M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6zm-3.5 6.5L11 12l4-4.5" },
+  sql:      { label: "SQL 执行",     accent: "var(--accent)",  icon: "M4 5h16M7 3l2 2-2 2M12 3l2 2-2 2M7 12H4v3h3zM4 21h7M6 15v6M15 8l5 5M15 13h2a2 2 0 0 1 2 2v0a2 2 0 0 1-2 2h-2" },
 };
 // Shell 节点运行规格：阿里云按「CPU → 内存」定义规格组合（核内比 1:1 ~ 1:8）。
 // 预设档位在未选中凭证/接口探测失败时兜底；选中凭证+地域后探测量接口返回真实可购组合与目录价。
@@ -293,6 +294,9 @@ const eciCreds = computed(() => (creds.value || []).filter((c) => c.kind === "ec
 // 审批节点只展示支持审批的凭证类型（钉钉企业机器人；未来可扩展其他审批渠道）
 const APPROVAL_CRED_KINDS = ["dingtalk-corp"];
 const robotCreds = computed(() => (creds.value || []).filter((c) => APPROVAL_CRED_KINDS.includes(c.kind)));
+// sql 节点只展示 mysql / pg 类型凭证作为连接目标（secret 后端不回显，前端仅做下拉过滤）
+const SQL_CRED_KINDS = ["mysql", "pg"];
+const sqlCreds = computed(() => (creds.value || []).filter((c) => SQL_CRED_KINDS.includes(c.kind)));
 
 // 高级机器人下拉：主标题取自凭证名，副标题拼接企业/应用元信息（display_meta），并展示应用图标
 const robotOpenId = ref(""); // 当前展开下拉的节点 id；空串表示全部收起
@@ -440,7 +444,7 @@ const nodeTarget = (n) =>
 
 const addNode = (type) => {
   // 添加节点后会用到对应下拉，此时再按需加载其数据
-  if (type === "shell" || type === "approval") loadCreds();
+  if (type === "shell" || type === "approval" || type === "sql") loadCreds();
   if (type === "shell") loadImages();
   const node = {
     id: `n${Date.now()}`,
@@ -449,7 +453,9 @@ const addNode = (type) => {
     params:
         type === "shell"
           ? { image: images.value[0]?.image ?? "alpine", command: "", env: [], outputs: [{ key: "step_out" }], credential: "", regionId: "", vswitchId: "", securityGroupId: "", cpu: "1", memory: "2", timeout: 300 }
-          : { robot: "", message: DEFAULT_APPROVAL_BODY, target: { type: "user", openIds: "", members: [] } },
+          : type === "sql"
+            ? { credential: "", statements: [""], outputs: [{ key: "affected_rows" }], timeout: 60 }
+            : { robot: "", message: DEFAULT_APPROVAL_BODY, target: { type: "user", openIds: "", members: [] } },
     name: "",
   };
   current.value.spec_json.nodes.push(node);
@@ -789,6 +795,10 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
         <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6z"/><path d="M8.5 12l2.5 2.5 4.5-4.5"/></svg>
         人工审批
       </button>
+      <button class="btn node-add sql" @click="addNode('sql')">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16M7 3l2 2-2 2M12 3l2 2-2 2M7 12H4v3h3zM4 21h7M6 15v6M15 8l5 5M15 13h2a2 2 0 0 1 2 2v0a2 2 0 0 1-2 2h-2"/></svg>
+        SQL 执行
+      </button>
     </section>
 
     <!-- 触发源配置 -->
@@ -1089,6 +1099,44 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
                     <p class="field-hint">容器运行超时上限，到期未完成会被强制终止，单位秒</p>
                   </div>
                 </template>
+                <template v-else-if="n.type === 'sql'">
+                  <div class="field">
+                    <label class="field-label">数据库凭证 <span class="req">*</span></label>
+                    <select class="select" v-model="n.params.credential">
+                      <option value="">选择数据库连接凭证…</option>
+                      <option v-for="c in sqlCreds" :key="c.name" :value="c.name">{{ c.name }}</option>
+                    </select>
+                    <p class="field-hint" v-if="!sqlCreds.length">暂无数据库凭证，请先在「凭证」中创建 MySQL 或 PostgreSQL 类型凭证</p>
+                    <p class="field-hint" v-else>凭证提供连接信息；TLS/字符集等额外参数在凭证里配置</p>
+                  </div>
+                  <div class="field">
+                    <label class="field-label">SQL 语句（在一个事务内逐条执行）<span class="req">*</span></label>
+                    <div v-for="(stmt, i) in n.params.statements" :key="i" class="sql-stmt-row">
+                      <textarea class="textarea mono" v-model="n.params.statements[i]" rows="3" placeholder="支持 ${变量}，引用前驱节点输出或触发参数"></textarea>
+                      <button type="button" class="btn btn-sm btn-danger" @click="n.params.statements.splice(i, 1)">删</button>
+                    </div>
+                    <div class="sql-actions">
+                      <button type="button" class="btn btn-sm btn-ghost" @click="n.params.statements.push('')">＋添加一条语句</button>
+                    </div>
+                  </div>
+                  <div class="field">
+                    <label class="field-label">输出变量</label>
+                    <div v-for="(o, i) in n.params.outputs" :key="i" class="sql-out-row">
+                      <input class="input mono" v-model="o.key" placeholder="变量 key" />
+                      <input class="input mono" v-model="o.column" placeholder="列名（可选，绑最后结果集首行）" />
+                      <button type="button" class="btn btn-sm btn-danger" @click="n.params.outputs.splice(i, 1)">删</button>
+                    </div>
+                    <div class="sql-actions">
+                      <button type="button" class="btn btn-sm btn-ghost" @click="n.params.outputs.push({ key: '', column: '' })">＋添加输出</button>
+                    </div>
+                    <p class="field-hint">填写列名时按该列取值；不填列名则输出最后一条语句的影响/返回行数</p>
+                  </div>
+                  <div class="field">
+                    <label class="field-label">超时（秒，可选）</label>
+                    <input class="input mono" type="number" v-model="n.params.timeout" placeholder="如 60" />
+                    <p class="field-hint">后端直连执行；超出视为失败并回滚，防止长 SQL 阻塞请求</p>
+                  </div>
+                </template>
                 <template v-else>
                   <div class="approval-grid">
                     <div class="field">
@@ -1261,6 +1309,8 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
 .node-add.shell:hover { background: rgba(84,208,198,.2); }
 .node-add.approval { color: var(--ember); background: var(--warn-soft); border-color: transparent; }
 .node-add.approval:hover { background: rgba(255,192,77,.22); }
+.node-add.sql { color: var(--accent); background: var(--accent-soft); border-color: transparent; }
+.node-add.sql:hover { background: rgba(84,208,198,.2); }
 
 .canvas { position: relative; padding: 26px 26px 30px; overflow: hidden; }
 .canvas-grd {
@@ -1387,6 +1437,14 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
 .kv-key { width: 220px; flex: 0 0 auto; }
 .kv-val { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .kv-val > .input { width: 100%; }
+/* sql 节点：语句/输出动态列表 */
+.sql-stmt-row { display: flex; align-items: flex-start; gap: 6px; margin-bottom: 8px; }
+.sql-stmt-row .textarea { flex: 1; min-width: 0; }
+.sql-stmt-row .btn-danger { flex: 0 0 auto; margin-top: 2px; }
+.sql-out-row { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+.sql-out-row .input { flex: 1; min-width: 0; }
+.sql-out-row .btn-danger { flex: 0 0 auto; }
+.sql-actions { margin: 2px 0 10px; }
 /* 插入变量：按钮 + 明细下拉面板（变量名/标题/说明，信息对齐触发源表） */
 .var-insert { margin: 8px 0 2px; }
 .vi-wrap { position: relative; display: inline-block; }
