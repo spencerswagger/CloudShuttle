@@ -251,7 +251,10 @@ export function buildTestConfig(kind, secret) {
   const timeoutKey = kind === "pg" ? "connectionTimeoutMillis" : "connectTimeout";
   const cfg = buildDbConfig(kind, secret);
   // 判定用户是否显式配置了「合法」的驱动超时：值必须可解析为有限数值，否则视为未配置
-  const validNum = (v) => v != null && Number.isFinite(Number(v));
+  const validNum = (v) => {
+    if (typeof v === "string" && v.trim() === "") return false;
+    return v != null && Number.isFinite(Number(v));
+  };
   const hasUserTimeout =
     validNum(secret?.[timeoutKey]) ||
     (Array.isArray(secret?.extra) && secret.extra.some((x) => x?.key === timeoutKey && validNum(x?.value)));

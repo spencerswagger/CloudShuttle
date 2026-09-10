@@ -55,6 +55,16 @@ test("mysql extra 配置非法 connectTimeout 'abc' → 兜底 5000", () => {
   assert.equal(cfg.connectTimeout, 5000);
 });
 
+test("mysql 顶层空串 connectTimeout '' → 兜底 5000（空串不得视为显式 0）", () => {
+  const cfg = buildTestConfig("mysql", { ...SECRET, connectTimeout: "" });
+  assert.equal(cfg.connectTimeout, 5000);
+});
+
+test("pg 顶层空白串 connectionTimeoutMillis '  ' → 兜底 5000（不得覆盖默认 10000 成 0）", () => {
+  const cfg = buildTestConfig("pg", { ...SECRET, connectionTimeoutMillis: "  " });
+  assert.equal(cfg.connectionTimeoutMillis, 5000);
+});
+
 test("buildTestConfig 不校验 kind（纯配置函数），非 mysql/pg 仅按非 pg 键名兜底", () => {
   const cfg = buildTestConfig("oracle", SECRET);
   assert.equal(cfg.connectTimeout, 5000);
