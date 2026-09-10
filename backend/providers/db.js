@@ -55,8 +55,12 @@ export function buildDbConfig(kind, secret) {
   }
   // secret 顶层若已含驱动级连接超时键则保留（显式值优先于默认），
   // 使「cfg 作为 secret 透传」场景（如 testCredentialConnection 二次建连）幂等安全。
-  if (secret?.connectTimeout != null) cfg.connectTimeout = Number(secret.connectTimeout);
-  if (secret?.connectionTimeoutMillis != null) cfg.connectionTimeoutMillis = Number(secret.connectionTimeoutMillis);
+  // 非法值（非有限数值）忽略不写入，防止驱动收到 NaN 超时（如 "abc" 被 Number() 成 NaN）。
+  const numOr = (v) => (Number.isFinite(Number(v)) ? Number(v) : undefined);
+  const ct = numOr(secret?.connectTimeout);
+  if (ct != null) cfg.connectTimeout = ct;
+  const cm = numOr(secret?.connectionTimeoutMillis);
+  if (cm != null) cfg.connectionTimeoutMillis = cm;
   return cfg;
 }
 

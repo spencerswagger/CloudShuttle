@@ -259,6 +259,11 @@ async function createEciGroup(params) {
 }
 
 // 完整装配（真实部署时在 FC 初始化阶段调用一次；本文件顶部不强制执行）
+
+// 步骤类型注册表：buildApp 的 steps 装配与单测共用同一来源。
+// 新增步骤类型必须在 buildApp 的 steps 中实现，并在此登记（buildApp 启动时校验一致）。
+export const STEP_TYPES = ["shell", "approval", "sql"];
+
 async function buildApp() {
   const snapshotStore = createSnapshotStore(redis);
   const mutex = createMutex(redis);
@@ -348,6 +353,11 @@ async function buildApp() {
     }),
     sql: makeSqlStep({ getCredentialKind, getCredentialSecrets, createConnection: createDbConnection }),
   };
+  // 防漂移：steps 实现集合必须与 STEP_TYPES 注册表一致（新增/删除步骤类型时两处同步，
+  // 否则已登记的步骤类型缺失会在启动装配阶段即暴露，而不是运行期 404/无步骤可跑）。
+  for (const t of STEP_TYPES) {
+    if (!steps[t]) throw new Error(`步骤类型 ${t} 已登记 STEP_TYPES 但未在 buildApp.steps 中装配`);
+  }
   const advancer = createAdvancer({
     stepRun: async (node, ctx) => {
       console.log(`[step] exec=${ctx.execId} node=${node.id} type=${node.type}`);
@@ -507,7 +517,9 @@ const DISPATCH = {
       const out = await api.testCredentialConnection(body);
       return ok(out);
     } catch (err) {
-      return { status: 200, body: { ok: false, message: err?.message ?? String(err) } };
+      // 驱动错误可能携带连接参数等细节：仅回显首行并截断 300 字符
+      const msg = String(err?.message ?? err).split("\n")[0].slice(0, 300);
+      return { status: 200, body: { ok: false, message: msg } };
     }
   },
   "api.updateImage": async ({ path, body }) => ok(api.updateImage(Number(m(path, RE.imageOne)), body)),

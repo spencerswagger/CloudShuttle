@@ -243,17 +243,30 @@ export async function deleteCredential(id) {
   return rows({ rows: r })[0];
 }
 
+// 测试连接 config 纯函数：在 buildDbConfig 基础上叠加「5s 限时安全网」。
+// 仅当用户未显式配置合法的驱动连接超时（顶层键或 extra 自定义项）时兜底为 5000ms，
+// 防不可达主机挂住表单请求；用户显式配置则尊重其值，非法值（如 "abc"）不得绕过安全网。
+// 注意：该端点允许对任意 host 建连探测（内网数据库即特性目标），SSRF 面依赖网关隔离。
+export function buildTestConfig(kind, secret) {
+  const timeoutKey = kind === "pg" ? "connectionTimeoutMillis" : "connectTimeout";
+  const cfg = buildDbConfig(kind, secret);
+  // 判定用户是否显式配置了「合法」的驱动超时：值必须可解析为有限数值，否则视为未配置
+  const validNum = (v) => v != null && Number.isFinite(Number(v));
+  const hasUserTimeout =
+    validNum(secret?.[timeoutKey]) ||
+    (Array.isArray(secret?.extra) && secret.extra.some((x) => x?.key === timeoutKey && validNum(x?.value)));
+  // 测试连接 5s 限时安全网：仅当用户未显式配置驱动超时时兜底（防不可达主机挂住表单请求）
+  if (!hasUserTimeout) cfg[timeoutKey] = 5000;
+  return cfg;
+}
+
 // 测试数据库连接：用草稿 secret（含额外参数）建连并跑 SELECT 1，成功能返回耗时；
 // 失败抛可读错误（DISPATCH 捕获后降级为 200 + {ok:false,message}，参照 eciProbeNetworks）。
 export async function testCredentialConnection({ kind, secret }) {
   if (kind !== "mysql" && kind !== "pg") {
     throw new HttpError(400, "BAD_DB_KIND", `不支持的数据库类型：${kind || "未填写"}`);
   }
-  const cfg = buildDbConfig(kind, secret);
-  // 测试连接限时：兜底防不可达主机挂住表单请求（与用户可配超时无关，属安全网）；
-  // 按驱动键名设置：pg 用 connectionTimeoutMillis，mysql 用 connectTimeout。
-  const timeoutKey = kind === "pg" ? "connectionTimeoutMillis" : "connectTimeout";
-  if (cfg[timeoutKey] == null) cfg[timeoutKey] = 5000;
+  const cfg = buildTestConfig(kind, secret);
   const start = Date.now();
   const conn = await createConnection(kind, cfg);
   try {
