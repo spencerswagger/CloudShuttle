@@ -380,6 +380,7 @@ test("R5 getWebhookSecret 仍显式回密钥（去敏只针对返显列，不改
 test("routeToHandler 命中的处理器在 DISPATCH 中都有登记（双注册，缺一必 404）", () => {
   const routes = [
     ["/hook/webhook/svcA", "POST"],
+    ["/api/credentials/test", "POST"],
     ["/api/pipelines/9/webhook-secret", "GET"],
     ["/api/pipelines/9/webhook-secret/reset", "POST"],
     ["/api/pipelines/9/webhook-probe", "GET"],
