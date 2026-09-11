@@ -63,7 +63,7 @@ test("串行链路回归：a→b 前一完成才执行后一（无重叠）", as
   assert.equal(isOverlap(), false);
 });
 
-test("同轮多个 shell（dispatch）节点仅派发一个，其余后续轮再执行", async () => {
+test("同轮多个 shell（dispatch）节点都派发且都进 waiting（多 ECI 并行）", async () => {
   const order = [];
   const stepRun = async (node) => {
     order.push(node.id);
@@ -75,19 +75,19 @@ test("同轮多个 shell（dispatch）节点仅派发一个，其余后续轮再
     snapshot: async () => {}, record: async (r) => { recorded.push(r); },
     complete: async () => {}, log: async () => {},
   });
-  // a、b 均为根节点（无边），同轮就绪；都属 dispatch 类（shell）→ 本轮应只派发一个
+  // a、b 均为根节点（无边），同轮就绪；都属 dispatch 类（shell）→ 本轮应全部派发、全部进 waiting
   const spec = {
     nodes: [{ id: "a", type: "shell", params: {} }, { id: "b", type: "shell", params: {} }],
     edges: [],
   };
   const res = await adv.advanceOnce({ spec, snap: { done: [], environment: {} }, execId: 4, environment: new Map() });
-  assert.deepEqual(order, ["a"], "同轮 dispatch 类节点应只派发一个（a），b 本轮不应被调用");
-  assert.equal(res.waiting, "a", "第一个被派发的 dispatch 节点成为 waiting");
+  assert.deepEqual(order, ["a", "b"], "同轮 dispatch 类节点应全部派发（a、b 各自独立 ECI 容器）");
+  assert.deepEqual(res.waiting, ["a", "b"], "两个已派发节点都进 waiting 集合");
   assert.ok(!res.snap.done.has("a") && !res.snap.done.has("b"), "dispatch 节点未 done");
-  assert.deepEqual(recorded.map((x) => x.nodeId), ["a"], "仅 a 进入 dispatch/wait 记录");
+  assert.deepEqual(recorded.map((x) => x.nodeId), ["a", "b"], "a、b 都进入 dispatch 记录");
 });
 
-test("同轮多个 approval（wait 类）节点仅派发一个，其余后续轮再执行", async () => {
+test("同轮多个 approval（wait 类）节点都派发且都进 waiting", async () => {
   const order = [];
   const stepRun = async (node) => {
     order.push(node.id);
@@ -99,15 +99,15 @@ test("同轮多个 approval（wait 类）节点仅派发一个，其余后续轮
     snapshot: async () => {}, record: async (r) => { recorded.push(r); },
     complete: async () => {}, log: async () => {},
   });
-  // a、b 均为根节点（无边），同轮就绪；都属 wait 类（approval，返回 kind:'wait'）→ 本轮应只发一个
+  // a、b 均为根节点（无边），同轮就绪；都属 wait 类（approval，返回 kind:'wait'）→ 本轮应全部派发
   const spec = {
     nodes: [{ id: "a", type: "approval", params: {} }, { id: "b", type: "approval", params: {} }],
     edges: [],
   };
   const res = await adv.advanceOnce({ spec, snap: { done: [], environment: {} }, execId: 5, environment: new Map() });
-  assert.deepEqual(order, ["a"], "同轮 wait 类节点应只派发一个（a），b 本轮不应被调用");
-  assert.equal(res.waiting, "a", "第一个派发的 wait 节点成为 waiting");
-  assert.deepEqual(recorded.map((x) => x.nodeId), ["a"], "仅 a 进入 wait 记录");
+  assert.deepEqual(order, ["a", "b"], "同轮 wait 类节点应全部派发（a、b 各自独立审批卡片）");
+  assert.deepEqual(res.waiting, ["a", "b"], "两个已派发 wait 节点都进 waiting 集合");
+  assert.deepEqual(recorded.map((x) => x.nodeId), ["a", "b"], "a、b 都进入 wait 记录");
 });
 
 test("dispatch 节点：本轮结束等待回调，后续节点不推进", async () => {
@@ -123,6 +123,20 @@ test("dispatch 节点：本轮结束等待回调，后续节点不推进", async
   });
   const spec = { nodes: [{ id: "a", type: "shell", params: {} }, { id: "b", type: "sql", params: {} }], edges: [{ from: "a", to: "b" }] };
   const res = await adv.advanceOnce({ spec, snap: { done: [], environment: {} }, execId: 3, environment: new Map() });
-  assert.equal(res.waiting, "a");
+  assert.deepEqual(res.waiting, ["a"], "a 派发等待则 b 不应执行");
   assert.deepEqual(order, ["a"], "b 依赖 a，a 派发等待则 b 不应执行");
+});
+
+test("旧快照 waiting 为单值字符串时兼容归一为数组", async () => {
+  const stepRun = async (node) => ({ kind: "done", output: {}, logs: node.id });
+  const saved = [];
+  const adv = createAdvancer({
+    stepRun, mutex: localMutex(),
+    snapshot: async (_id, s) => { saved.push(s); }, record: async () => {}, complete: async () => {}, log: async () => {},
+  });
+  const spec = { nodes: [{ id: "a", type: "shell", params: {} }, { id: "b", type: "sql", params: {} }], edges: [{ from: "a", to: "b" }] };
+  // 旧快照 waiting="a"（字符串）：advanceOnce 顶部应识别为有等待 → 本轮不推进
+  const res = await adv.advanceOnce({ spec, snap: { done: [], waiting: "a", environment: {} }, execId: 6, environment: new Map() });
+  assert.deepEqual(res.waiting, ["a"], "字符串 waiting 归一为数组");
+  assert.equal(saved.length, 0, "有等待时本轮不推进也不写快照");
 });

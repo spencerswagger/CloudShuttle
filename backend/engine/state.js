@@ -16,12 +16,23 @@ function fillEnv(env, src) {
   }
 }
 
+// waiting 集合化归一：快照 waiting 从「单值字符串」扩展为「数组」（多 ECI 同时等待）。
+// 读取时兼容两种格式：null/空 → null（无等待）；字符串（旧快照）→ [该节点]；数组 → 拷贝去重。
+export function normalizeWaiting(w) {
+  if (w == null) return null;
+  const arr = Array.isArray(w) ? [...w] : [String(w)];
+  return arr.length ? [...new Set(arr)] : null;
+}
+
 // 深 walk 预渲染节点 params：见 variables.js 的 renderParams，返回全新副本，不改动原始 node。
+// 注：mutex 参数保留注入位（单测沿用），但 advanceOnce 内部不再自行 acquire——续跑互斥由
+// orchestrator 层统一持有（同一把 key "exec-callback"），避免非可重入锁嵌套自锁（死锁）。
 export function createAdvancer({ stepRun, snapshot, record, recordRegistry = async () => {}, complete = async () => {}, log = async () => {}, mutex }) {
   async function advanceOnce({ spec, snap, execId, environment }) {
     const graph = buildGraph(spec);
     const done = new Set(snap.done ?? []);
-    let waiting = snap.waiting ?? null;
+    // waiting 集合化：兼容旧快照字符串格式（normalizeWaiting 归一为数组/null）
+    let waiting = normalizeWaiting(snap.waiting);
 
     // environment 恢复：先用 snap.environment（扁平对象）填充基础值，若外部又显式传入同名则外部优先（覆盖）。
     const env = new Map();
@@ -30,8 +41,10 @@ export function createAdvancer({ stepRun, snapshot, record, recordRegistry = asy
     const toFlat = () => Object.fromEntries(env);
 
     if (waiting) {
-      // 有正在等待的节点：内部回调续跑场景由回调后再次注入，本次仅返回现状，不再推进
-      console.log(`[advance] exec=${execId} 存在等待回调的节点 node=${waiting}，本次不推进，已结束节点数=${done.size}`);
+      // 有正在等待的节点（可能多个，多 ECI 并行）：回调续跑由 orchestrator 层 mutex 串行化，
+      // 且每个回调只移除自己的 nodeId；只要还有节点在等，本轮的推进就应让位（屏障语义），
+      // 否则仍等着的节点会被当作 ready 重复派发（Task 2 收窄针对的重复派发隐患）。
+      console.log(`[advance] exec=${execId} 存在等待回调的节点 node=${JSON.stringify(waiting)}，本次不推进，已结束节点数=${done.size}`);
       return { spec, snap: { done, waiting, environment: toFlat() }, waiting };
     }
 
@@ -54,15 +67,11 @@ export function createAdvancer({ stepRun, snapshot, record, recordRegistry = asy
     // 同轮就绪节点真并发派发：Promise.allSettled 并发执行，各自 try/catch 把失败包进
     // fulfilled 的 {nodeId, error} 结构（allSettled 的 rejected 项不含 nodeId，必须内联捕获）。
     //
-    // dispatch 类节点收窄为「每轮仅派发一个」：并发执行前无法预知 stepRun 究竟返回 done 还是
-    // dispatch/wait，故以「会返回 dispatch/wait 的节点类型」作为判定（当前为 shell + approval，
-    // 见 steps/shell.js 返回 dispatch、steps/approval.js 返回 wait；sql 等返回 done 不属于此类）。
-    // 该类节点本轮只取第一个参与并发，其余留待后续轮，以免同轮多 dispatch 节点并发派发
-    // （ECI 建组 / 审批发卡）却只登记一个 waiting，续跑时未追踪节点重复派发（副作用漂移）。
-    const WAIT_NODE_TYPES = new Set(["shell", "approval"]);
-    const readyDispatch = ready.filter((id) => WAIT_NODE_TYPES.has(graph.nodes.get(id).type));
-    const toRun = ready.filter((id) => !WAIT_NODE_TYPES.has(graph.nodes.get(id).type));
-    if (readyDispatch[0]) toRun.push(readyDispatch[0]); // dispatch 类同一轮只派发第一个，其余留待后续轮
+    // dispatch 类节点不再收窄（Task 2 曾「每轮仅派发一个」防重复派发，现由两条机制取代）：
+    //   1) 派发后立即把 nodeId 追加进 waiting 集合并持久化到快照——已派发节点不再是 ready 可重复派发源；
+    //   2) 回调续跑由 orchestrator 层 mutex 串行化，且每个回调只移除自己的 waiting 节点。
+    // 故 shell/approval 等所有就绪节点同轮全部派发（各自独立 ECI 容器 + 独立回调 token），多 ECI 并行跑。
+    const toRun = ready;
 
     const results = await Promise.allSettled(
       toRun.map(async (nodeId) => {
@@ -78,7 +87,7 @@ export function createAdvancer({ stepRun, snapshot, record, recordRegistry = asy
         }
       })
     );
-    let firstWaiting = null;
+    const waitingNodes = [];
     for (const r of results) {
       const { nodeId, res, error } = r.value;
       if (error) {
@@ -94,8 +103,8 @@ export function createAdvancer({ stepRun, snapshot, record, recordRegistry = asy
         await record({ execId, nodeId, status: "done", output: res.output, logs: res.logs });
         await log(execId, `✔ 节点 ${nodeId} 完成`);
       } else {
-        // dispatch/wait：登记等待（firstWaiting 保证一次推进只设一个 waiting）
-        if (!firstWaiting) firstWaiting = nodeId;
+        // dispatch/wait：多节点可同时等待 → 全部追加进 waiting 集合（数组），每个回调各自移除自己的
+        waitingNodes.push(nodeId);
         console.log(
           `[advance] exec=${execId} ⏸ 节点 ${nodeId} 进入${res.kind === "wait" ? "外部等待" : "派发"}状态 ` +
           `ref=${res.ref ?? "-"}，等待外部回调`);
@@ -103,7 +112,7 @@ export function createAdvancer({ stepRun, snapshot, record, recordRegistry = asy
         await log(execId, `⏸ 节点 ${nodeId} 进入${res.kind === "wait" ? "外部等待" : "派发"}状态，等待回调`);
       }
     }
-    if (firstWaiting) waiting = firstWaiting;
+    if (waitingNodes.length) waiting = waitingNodes;
 
     // 所有节点均已完成任务：标记执行整体完成，并更新流水线的运行状态为 completed
     if (done.size === graph.nodes.size && !waiting) {
