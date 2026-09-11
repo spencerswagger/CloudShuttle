@@ -411,6 +411,9 @@ async function buildApp() {
     advance: advancer.advanceOnce,
     record: writeNodeRecord,
     schedLog,
+    // 回调续跑互斥锁（与 state.js 同一把 key）：多 ECI 并发回调到达时串行化
+    // 「markDone + 续跑」临界区，防止推进重复/快照 lost-update
+    mutex,
     // 审批拒绝 / ECI 失败回调等场景：把 execution 终态落为 failed（否则一直停在 running）
     failExecution: async (execId) => {
       await pool.query(
