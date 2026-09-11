@@ -2,8 +2,10 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount, watch, nextTick } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import draggable from "vuedraggable";
+import { VueFlow, Handle, Position, useVueFlow, MarkerType, BaseEdge, EdgeLabelRenderer, getBezierPath } from "@vue-flow/core";
+import "@vue-flow/core/dist/style.css";
 import MarkdownIt from "markdown-it";
+import { layoutDag, wouldCycle } from "../lib/dagLayout.js";
 import { notify } from "../lib/notify.js";
 import { buildMappingDraft } from "../lib/webhookDraft.js";
 import { getPipeline, createPipeline, updatePipeline, getPipelineHook, resetWebhookSecret, fetchWebhookProbe } from "../api/pipeline.js";
@@ -42,6 +44,159 @@ const newPipeline = () => ({
 const current = ref(newPipeline());
 const nodes = computed({ get: () => current.value.spec_json.nodes, set: (v) => (current.value.spec_json.nodes = v) });
 
+// ---------- DAG 自由画布：spec.nodes / spec.edges 是唯一数据源，VueFlow 视图由它们派生 ----------
+const { fitView, screenToFlowCoordinate } = useVueFlow();
+const spec = computed(() => current.value.spec_json);
+// 右侧配置面板选中节点（画布点击驱动；会话态，不入库）
+const selectedId = ref("");
+const selected = computed(() => nodes.value.find((x) => x.id === selectedId.value) ?? null);
+function selectNode(id) { selectedId.value = id; }
+
+// 节点没有 position（老数据）时的兜底排布；新节点用 defaultNodePosition 级联放置
+function ensurePositions() {
+  nodes.value.forEach((n, i) => {
+    if (!n.position || !Number.isFinite(n.position?.x) || !Number.isFinite(n.position?.y)) {
+      n.position = { x: 60 + (i % 4) * 250, y: 60 + Math.floor(i / 4) * 130 };
+    }
+  });
+}
+function defaultNodePosition() {
+  const n = nodes.value.length;
+  return { x: 60 + (n % 4) * 250, y: 60 + Math.floor(n / 4) * 130 };
+}
+
+// spec → VueFlow 元素（edges 由后端 {from,to} 转 vf {id,source,target}；渲染完成即按拖拽/布局写回 spec）
+const vfNodes = computed(() => nodes.value.map((n, i) => ({
+  id: n.id,
+  type: "dag-node", // 统一节点类型，卡片由 #node-dag-node 单槽渲染（配色取 NODE_KINDS）
+  position: n.position ?? { x: 60 + (i % 4) * 250, y: 60 + Math.floor(i / 4) * 130 },
+  data: { n },
+})));
+const edgeIdOf = (e) => `e${e.from}>${e.to}`;
+const vfEdges = computed(() => (spec.value.edges ?? []).map((e) => ({
+  id: edgeIdOf(e),
+  source: e.from,
+  target: e.to,
+  type: "default",
+  data: { from: e.from, to: e.to },
+  markerEnd: { type: MarkerType.ArrowClosed, color: "#54d0c6" },
+  style: { stroke: "var(--line-strong)", strokeWidth: 1.6 },
+})));
+
+// 画布事件：拖动/删除节点 → 写回 spec；删边 → 写回 spec.edges；新建边 → 判环后 push
+function onNodesChange(changes) {
+  for (const ch of changes) {
+    if (ch.type === "position" && ch.position) {
+      const n = nodes.value.find((x) => x.id === ch.id);
+      if (!n) continue;
+      const cur = n.position;
+      if (!cur || cur.x !== ch.position.x || cur.y !== ch.position.y) n.position = { x: ch.position.x, y: ch.position.y };
+    } else if (ch.type === "remove") {
+      removeNodeById(ch.id);
+    }
+  }
+}
+function onEdgesChange(changes) {
+  for (const ch of changes) {
+    if (ch.type !== "remove") continue;
+    const i = vfEdges.value.findIndex((e) => e.id === ch.id);
+    if (i >= 0) spec.value.edges.splice(i, 1);
+  }
+}
+function onConnect(conn) {
+  const { source, target } = conn;
+  if (!source || !target || source === target) {
+    notify({ type: "error", message: "不能把节点连接到自己" });
+    return;
+  }
+  const edges = spec.value.edges;
+  if (edges.some((e) => e.from === source && e.to === target)) {
+    notify({ type: "error", message: "两点之间已存在连线" });
+    return;
+  }
+  if (wouldCycle(edges, source, target)) {
+    notify({ type: "error", message: "该连线会形成环，已取消连接" });
+    return;
+  }
+  edges.push({ from: source, to: target });
+}
+// 删除节点：同步清掉关联边；若正在编辑该节点则收起右侧面板
+function removeNodeById(id) {
+  const i = nodes.value.findIndex((x) => x.id === id);
+  if (i < 0) return;
+  nodes.value.splice(i, 1);
+  const edges = spec.value.edges;
+  for (let j = edges.length - 1; j >= 0; j--) {
+    if (edges[j].from === id || edges[j].to === id) edges.splice(j, 1);
+  }
+  if (selectedId.value === id) selectedId.value = "";
+}
+function removeEdgeByData({ from, to }) {
+  const i = spec.value.edges.findIndex((e) => e.from === from && e.to === to);
+  if (i >= 0) spec.value.edges.splice(i, 1);
+}
+function onNodeClick({ event, node }) {
+  if (event.target?.closest?.(".vue-flow__handle")) return; // 拖手柄连线时不弹出面板
+  selectNode(node.id);
+}
+function onPaneClick() { selectedId.value = ""; }
+
+// 边的悬停删除键：hover 边时显示（移入按钮有小延迟，保证能点到）
+const hoverEdgeId = ref("");
+let hideEdgeTimer = null;
+function onEdgeMouseEnter({ edge }) { clearTimeout(hideEdgeTimer); hoverEdgeId.value = edge.id; }
+function onEdgeMouseLeave({ edge }) {
+  clearTimeout(hideEdgeTimer);
+  hideEdgeTimer = setTimeout(() => { if (hoverEdgeId.value === edge.id) hoverEdgeId.value = ""; }, 240);
+}
+function onEdgeDelMouseEnter(id) { clearTimeout(hideEdgeTimer); hoverEdgeId.value = id; }
+
+function edgePath(ep) {
+  const [path] = getBezierPath({
+    sourceX: ep.sourceX, sourceY: ep.sourceY, sourcePosition: ep.sourcePosition,
+    targetX: ep.targetX, targetY: ep.targetY, targetPosition: ep.targetPosition,
+  });
+  return path;
+}
+function edgeDelStyle(ep) {
+  const [, x, y] = getBezierPath({
+    sourceX: ep.sourceX, sourceY: ep.sourceY, sourcePosition: ep.sourcePosition,
+    targetX: ep.targetX, targetY: ep.targetY, targetPosition: ep.targetPosition,
+  });
+  return { left: x + "px", top: y + "px", transform: "translate(-50%, -50%)" };
+}
+
+// 自动布局：layoutDag 算坐标写回各 node.position，再 fitView
+function autoLayout() {
+  const ns = nodes.value;
+  if (!ns.length) { notify({ type: "info", message: "画布为空，请先添加节点" }); return; }
+  const laid = layoutDag(ns, spec.value.edges, { w: 200, h: 60, gapX: 48, gapY: 96 });
+  const x0 = Math.min(...laid.map((p) => p.x));
+  const y0 = Math.min(...laid.map((p) => p.y));
+  const byId = Object.fromEntries(laid.map((p) => [p.id, p]));
+  for (const n of ns) {
+    const p = byId[n.id];
+    if (p) n.position = { x: p.x - x0 + 40, y: p.y - y0 + 40 };
+  }
+  nextTick(() => { fitView({ padding: 0.25, duration: 250 }).catch(() => {}); });
+  notify({ type: "success", message: "已按依赖关系自动布局" });
+}
+
+// 节点库卡片：点击即添加；拖入画布可指定落点（HTML5 DnD，落点经 viewport 换算成画布坐标）
+function onLibDragStart(ev, type) {
+  ev.dataTransfer?.setData("application/x-cloudshuttle-node", type);
+  ev.dataTransfer.effectAllowed = "copy";
+}
+function onCanvasDragOver(ev) { ev.preventDefault(); }
+function onCanvasDrop(ev) {
+  const type = ev.dataTransfer?.getData("application/x-cloudshuttle-node");
+  if (!type || !NODE_KINDS[type]) return;
+  ev.preventDefault();
+  let at = null;
+  try { at = screenToFlowCoordinate({ x: ev.clientX, y: ev.clientY }); } catch { /* 未就绪时回落级联位置 */ }
+  addNode(type, at);
+}
+
 // 由路由参数判定是否编辑态：新建/编辑不再依赖返显是否成功
 const editingId = computed(() => (route.params.id ? +route.params.id : null));
 const isNew = computed(() => !editingId.value);
@@ -53,11 +208,14 @@ async function hydrate() {
     const p = await getPipeline(editingId.value);
     current.value = JSON.parse(JSON.stringify(p));
     resetHookSession(); // 切换流水线：丢弃后端下发的触发地址与调试接收态，避免跨 /pipelines/:id 残留
+    selectedId.value = ""; // 收起画布右侧配置面板
+    if (!current.value.spec_json?.edges) current.value.spec_json.edges = [];
+    ensurePositions(); // 老数据节点补 position，保证画布可拖
     // 下拉数据懒加载：仅当节点实际用到镜像/凭证才请求，避免挂载即连拉 3 个接口
     const ns = current.value.spec_json?.nodes ?? [];
     if (ns.some((n) => n.type === "shell" || n.type === "approval" || n.type === "sql")) loadCreds();
     if (ns.some((n) => n.type === "shell")) loadImages();
-    nextTick(fitAll); // 回填内容后按内容重算各正文/命令输入框高度
+    nextTick(() => { fitAll(); fitView({ padding: 0.2, duration: 0 }).catch(() => {}); }); // 回填后重算输入框高度，并缩放画布到全部节点
   } catch (e) {
     if (e?.status === 404) notify({ type: "error", message: "未找到该流水线，可能已被删除" });
     else notify({ type: "error", message: e?.message || "加载流水线失败" });
@@ -442,7 +600,8 @@ function removeMember(n, i) {
 const nodeTarget = (n) =>
   n.params.target ?? (n.params.target = { type: "user", openConversationId: "", openIds: "", members: [] });
 
-const addNode = (type) => {
+// 添加节点：at 指定画布落点（拖入），否则级联排布；新节点自动选中进入右侧配置面板
+const addNode = (type, at) => {
   // 添加节点后会用到对应下拉，此时再按需加载其数据
   if (type === "shell" || type === "approval" || type === "sql") loadCreds();
   if (type === "shell") loadImages();
@@ -457,8 +616,11 @@ const addNode = (type) => {
             ? { credential: "", statements: [""], outputs: [{ key: "affected_rows" }], timeout: 60 }
             : { robot: "", message: DEFAULT_APPROVAL_BODY, target: { type: "user", openIds: "", members: [] } },
     name: "",
+    position: at ?? defaultNodePosition(),
   };
   current.value.spec_json.nodes.push(node);
+  selectedId.value = node.id; // 新节点选中即编辑
+  nextTick(() => { fitView({ padding: 0.3, duration: 300 }).catch(() => {}); });
 };
 
 const save = async ({ stay = false } = {}) => {
@@ -784,20 +946,26 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
       </div>
     </section>
 
-    <!-- 工具箱 -->
+    <!-- 工具箱：节点库（点击添加 / 拖入画布）+ 自动布局 -->
     <section class="toolbox rise" style="animation-delay:.07s">
-      <span class="mono-tag">添加节点</span>
-      <button class="btn node-add shell" @click="addNode('shell')">
+      <span class="mono-tag">节点库</span>
+      <button class="btn node-add shell" draggable="true" title="点击添加，或拖到画布上指定位置" @dragstart="onLibDragStart($event, 'shell')" @click="addNode('shell')">
         <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5l6 7-6 7m8 0h8"/></svg>
         Shell 执行
       </button>
-      <button class="btn node-add approval" @click="addNode('approval')">
+      <button class="btn node-add approval" draggable="true" title="点击添加，或拖到画布上指定位置" @dragstart="onLibDragStart($event, 'approval')" @click="addNode('approval')">
         <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6z"/><path d="M8.5 12l2.5 2.5 4.5-4.5"/></svg>
         人工审批
       </button>
-      <button class="btn node-add sql" @click="addNode('sql')">
+      <button class="btn node-add sql" draggable="true" title="点击添加，或拖到画布上指定位置" @dragstart="onLibDragStart($event, 'sql')" @click="addNode('sql')">
         <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16M7 3l2 2-2 2M12 3l2 2-2 2M7 12H4v3h3zM4 21h7M6 15v6M15 8l5 5M15 13h2a2 2 0 0 1 2 2v0a2 2 0 0 1-2 2h-2"/></svg>
         SQL 执行
+      </button>
+      <span class="toolbox-hint muted">点击添加，或拖入画布指定位置；节点右侧手柄拖到目标节点左侧手柄建立依赖</span>
+      <span class="toolbox-spacer"></span>
+      <button class="btn btn-ghost" title="按依赖关系重新排布所有节点" @click="autoLayout">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9a2 2 0 1 0 0-.01M12 9a2 2 0 1 0 0-.01M20 9a2 2 0 1 0 0-.01M4 15a2 2 0 1 0 0-.01M12 15a2 2 0 1 0 0-.01M20 15a2 2 0 1 0 0-.01M4 21a2 2 0 1 0 0-.01M12 21a2 2 0 1 0 0-.01M20 21a2 2 0 1 0 0-.01"/></svg>
+        自动布局
       </button>
     </section>
 
@@ -892,61 +1060,74 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
       </template>
     </section>
 
-    <!-- 画布 -->
-    <section class="canvas card rise" style="animation-delay:.1s">
-      <div class="canvas-grd"></div>
+    <!-- 画布 + 节点配置：左自由画布 / 右选中节点参数抽屉 -->
+    <section class="dag-shell rise" style="animation-delay:.1s">
+      <div class="canvas card" @dragover.prevent="onCanvasDragOver" @drop.prevent="onCanvasDrop">
+        <div class="canvas-grd"></div>
 
-      <div v-if="!current.spec_json.nodes.length" class="empty">
-        <svg viewBox="0 0 24 24" width="42" height="42" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M3 6h11M14 6a2.5 2.5 0 1 0 5 0 2.5 2.5 0 0 0-5 0zM3 12h11M14 12a2.5 2.5 0 1 0 5 0 2.5 2.5 0 0 0-5 0zM3 18h11M14 18a2.5 2.5 0 1 0 5 0 2.5 2.5 0 0 0-5 0z"/>
-        </svg>
-        <p class="display" style="font-size:15px;color:var(--text-2);margin:0 0 6px">画布为空</p>
-        <p>从上方「添加节点」开始搭建你的第一个工作流。</p>
+        <VueFlow
+          :nodes="vfNodes"
+          :edges="vfEdges"
+          :no-drag-class-name="'nodrag'"
+          class="cflow"
+          @nodes-change="onNodesChange"
+          @edges-change="onEdgesChange"
+          @connect="onConnect"
+          @node-click="onNodeClick"
+          @pane-click="onPaneClick"
+          @edge-mouse-enter="onEdgeMouseEnter"
+          @edge-mouse-leave="onEdgeMouseLeave"
+        >
+          <template #node-dag-node="{ data }">
+            <div class="canvas-node" :data-type="data.n.type">
+              <Handle type="target" :position="Position.Left" />
+              <span class="cn-ico" :style="{ color: NODE_KINDS[data.n.type].accent }">
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path :d="NODE_KINDS[data.n.type].icon" /></svg>
+              </span>
+              <div class="cn-main">
+                <span class="cn-name" :title="data.n.name || NODE_KINDS[data.n.type].label">{{ data.n.name || NODE_KINDS[data.n.type].label }}</span>
+                <span class="cn-id mono">{{ drainId(data.n.id) }}</span>
+              </div>
+              <button class="cn-del nodrag" title="删除节点" @mousedown.stop.prevent @click.stop="removeNodeById(data.n.id)">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+              </button>
+              <Handle type="source" :position="Position.Right" />
+            </div>
+          </template>
+
+          <template #edge-default="slot">
+            <BaseEdge :id="slot.id" :path="edgePath(slot)" :style="slot.style"
+              :marker-start="slot.markerStart" :marker-end="slot.markerEnd"
+              :label-x="slot.labelX" :label-y="slot.labelY" />
+            <EdgeLabelRenderer>
+              <div v-if="hoverEdgeId === slot.id" class="edge-del nodrag" :style="edgeDelStyle(slot)"
+                title="删除连线" @mousedown.prevent.stop @click.stop="removeEdgeByData(slot.data)">
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+              </div>
+            </EdgeLabelRenderer>
+          </template>
+        </VueFlow>
+
+        <div v-if="!current.spec_json.nodes.length" class="empty">
+          <svg viewBox="0 0 24 24" width="42" height="42" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 6h11M14 6a2.5 2.5 0 1 0 5 0 2.5 2.5 0 0 0-5 0zM3 12h11M14 12a2.5 2.5 0 1 0 5 0 2.5 2.5 0 0 0-5 0zM3 18h11M14 18a2.5 2.5 0 1 0 5 0 2.5 2.5 0 0 0-5 0z"/>
+          </svg>
+          <p class="display" style="font-size:15px;color:var(--text-2);margin:0 0 6px">画布为空</p>
+          <p>从节点库点击添加（可拖入画布指定落点），再拖拽节点右侧手柄到目标建立依赖。</p>
+        </div>
       </div>
 
-      <draggable
-        v-else
-        v-model="nodes"
-        item-key="id"
-        handle=".drag-handle"
-        class="node-list stagger"
-        ghost-class="node-ghost"
-      >
-        <template #item="{ element: n, index: i }">
-          <div class="node-row">
-            <div class="rail">
-              <div class="rail-dot" :style="{ background: NODE_KINDS[n.type].accent }"></div>
-              <div class="rail-line" :class="{ fade: i === current.spec_json.nodes.length - 1 }"></div>
-            </div>
+      <!-- 右侧节点配置抽屉 -->
+      <div class="config card" :class="{ on: !!selected }">
+        <div v-if="selected" class="cfg-inner">
+          <div class="cfg-head">
+            <span class="cfg-kind" :style="{ backgroundColor: NODE_KINDS[selected.type].accent }">{{ NODE_KINDS[selected.type].label }}</span>
+            <input class="cfg-name-input" v-model="selected.name" :placeholder="NODE_KINDS[selected.type].label" title="节点名称（执行详情页展示用）" />
+            <span class="cfg-id mono">{{ drainId(selected.id) }}</span>
+            <button type="button" class="btn btn-sm btn-ghost" title="收起面板" @click="selectedId = ''">×</button>
+          </div>
 
-            <div class="node-card" :style="{ '--node-accent': NODE_KINDS[n.type].accent }">
-              <div class="node-head">
-                <span class="node-ico" :style="{ color: NODE_KINDS[n.type].accent, borderColor: 'currentColor' }">
-                  <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                    <path :d="NODE_KINDS[n.type].icon" />
-                  </svg>
-                </span>
-                <div class="node-title">
-                  <input
-                    class="node-name-input"
-                    v-model="n.name"
-                    :placeholder="NODE_KINDS[n.type].label"
-                    title="节点名称（执行详情页展示用）"
-                  />
-                  <span class="mono-tag">{{ drainId(n.id) }}</span>
-                </div>
-                <span class="node-step mono">STEP {{ String(i + 1).padStart(2, "0") }}</span>
-                <div class="node-head-actions">
-                  <button class="btn btn-sm drag-handle" title="拖拽排序" aria-label="拖拽排序">
-                    <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor"><path d="M9 6a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3zm6 0a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3zM9 13.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3zm6 0a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3zM9 21a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3zm6 0a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3z"/></svg>
-                  </button>
-                  <button class="btn btn-sm btn-danger" @click="current.spec_json.nodes.splice(i, 1)" aria-label="删除节点">
-                    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
-                  </button>
-                </div>
-              </div>
-
-              <div class="node-body">
+          <div class="node-body" v-for="n in [selected]" :key="n.id">
                 <template v-if="n.type === 'shell'">
                   <div class="field">
                     <label class="field-label">ECI 凭证 <span class="req">*</span></label>
@@ -1237,10 +1418,12 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
                   </div>
                 </template>
               </div>
-            </div>
-          </div>
-        </template>
-      </draggable>
+        </div>
+        <div v-else class="cfg-ph muted">
+          <svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v13M9 8l3 3 3-3M4 21h16"/></svg>
+          <p>点击画布节点，在右侧编辑该节点的参数</p>
+        </div>
+      </div>
     </section>
 
     <!-- 通讯录成员选择器 -->
@@ -1312,13 +1495,89 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
 .node-add.sql { color: var(--accent); background: var(--accent-soft); border-color: transparent; }
 .node-add.sql:hover { background: rgba(84,208,198,.2); }
 
-.canvas { position: relative; padding: 26px 26px 30px; overflow: hidden; }
+.dag-shell { display: flex; gap: 16px; align-items: stretch; }
+.canvas { position: relative; flex: 1; min-width: 0; height: 640px; padding: 0; overflow: hidden; }
 .canvas-grd {
   position: absolute; inset: 0; pointer-events: none; opacity: .7;
   background-image:
     linear-gradient(rgba(122,160,240,0.05) 1px, transparent 1px),
     linear-gradient(90deg, rgba(122,160,240,0.05) 1px, transparent 1px);
   background-size: 26px 26px;
+}
+.cflow { position: absolute; inset: 0; }
+.cflow .vue-flow__node { cursor: grab; }
+.cflow .vue-flow__node.dragging { cursor: grabbing; }
+
+/* 画布节点卡片（渲染于 Vue Flow 画布） */
+.canvas-node {
+  position: relative; display: flex; align-items: center; gap: 8px;
+  min-width: 150px; max-width: 230px; padding: 8px 10px;
+  background: linear-gradient(180deg, var(--bg-2), var(--bg-1));
+  border: 1.5px solid var(--line-strong); border-left: 3px solid var(--accent);
+  border-radius: 10px; box-shadow: var(--shadow);
+  transition: border-color .16s var(--ease), box-shadow .16s var(--ease);
+}
+.canvas-node[data-type="approval"] { border-left-color: var(--ember); }
+.canvas-node:hover { border-color: var(--accent); }
+.canvas-node[data-type="approval"]:hover { border-color: var(--ember); }
+.cn-ico {
+  width: 26px; height: 26px; flex: 0 0 26px; display: grid; place-items: center;
+  border: 1px solid currentColor; border-radius: 7px;
+  background: color-mix(in srgb, currentColor 12%, transparent);
+}
+.cn-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.cn-name { font-size: 12.5px; font-weight: 600; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cn-id { font-size: 9.5px; color: var(--text-3); }
+.cn-del {
+  flex: 0 0 auto; display: grid; place-items: center; width: 22px; height: 22px;
+  color: var(--text-3); background: transparent; border: 1px solid transparent; border-radius: 6px;
+  cursor: pointer; opacity: 0; transition: opacity .14s var(--ease);
+}
+.canvas-node:hover .cn-del { opacity: 1; }
+.cn-del:hover { color: #ff6b6b; background: var(--bg-3); border-color: var(--line); }
+.canvas-node :deep(.vue-flow__handle) {
+  width: 11px; height: 11px; background: var(--bg-2); border: 2px solid var(--accent); border-radius: 50%;
+}
+.canvas-node :deep(.vue-flow__handle-left) { left: -6px; }
+.canvas-node :deep(.vue-flow__handle-right) { right: -6px; }
+.canvas-node :deep(.vue-flow__handle:hover) { background: var(--accent); }
+
+/* 边的悬停删除键（渲染于 edge-labels 层，flow 坐标系定位） */
+.edge-del {
+  position: absolute; width: 26px; height: 26px; display: grid; place-items: center;
+  color: var(--text-1); background: var(--bg-2); border: 1px solid var(--line-strong);
+  border-radius: 8px; cursor: pointer; box-shadow: 0 4px 14px rgba(0,0,0,.3); z-index: 5;
+}
+.edge-del:hover { color: #ff6b6b; background: var(--bg-3); }
+
+/* 右侧节点配置抽屉 */
+.config {
+  flex: 0 0 400px; min-width: 0; max-height: 640px; display: flex; flex-direction: column;
+  overflow: hidden; position: relative;
+}
+.cfg-inner { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+.cfg-head {
+  display: flex; align-items: center; gap: 10px; flex: 0 0 auto;
+  padding: 12px 14px; border-bottom: 1px solid var(--line);
+}
+.cfg-kind {
+  flex: 0 0 auto; font-size: 11px; font-weight: 700; letter-spacing: .04em; color: #fff;
+  padding: 3px 9px; border-radius: 999px; white-space: nowrap;
+}
+.cfg-name-input {
+  flex: 1; min-width: 0; font-size: 14px; font-weight: 600; color: var(--text-1);
+  background: transparent; border: 1px solid transparent; border-radius: 7px;
+  padding: 2px 6px; font-family: inherit;
+}
+.cfg-name-input:hover { border-color: var(--line); background: var(--bg-1); }
+.cfg-name-input:focus { outline: none; border-color: var(--accent); background: var(--bg-0); }
+.cfg-name-input::placeholder { color: var(--text-3); }
+.cfg-id { flex: 0 0 auto; }
+.config .node-body { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 14px; }
+.cfg-ph {
+  flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 8px; padding: 32px; text-align: center; font-size: 13px; color: var(--text-3);
+  opacity: .7;
 }
 .node-list { position: relative; display: flex; flex-direction: column; }
 

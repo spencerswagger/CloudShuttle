@@ -31,3 +31,22 @@ export function layoutDag(nodes, edges, { w = 180, h = 40, gapX = 40, gapY = 70 
   }
   return out;
 }
+
+// DAG 环检测：已有边集上新增 from→to 是否会成环（含自环）。
+// 新增 from→to 成环 ⇔ `to` 已能从既有边走到 `from`（to 是 from 的祖先）。
+// 从 `to` 出发 DFS，若遇到 `from` 则成环。
+export function wouldCycle(edges, from, to) {
+  if (from === to) return true;
+  const adjacency = {};
+  for (const e of edges) (adjacency[e.from] ??= []).push(e.to);
+  const stack = [to];
+  const seen = new Set();
+  while (stack.length) {
+    const cur = stack.pop();
+    for (const next of adjacency[cur] ?? []) {
+      if (next === from) return true;
+      if (!seen.has(next)) { seen.add(next); stack.push(next); }
+    }
+  }
+  return false;
+}
