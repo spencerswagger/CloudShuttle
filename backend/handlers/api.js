@@ -452,18 +452,21 @@ export async function getExecution(id) {
   );
   const nodes = rev[0]?.spec_json?.nodes ?? [];
   const nodeMap = new Map(nodes.map((n) => [n.id, n]));
+  // 并入节点在 spec 里的 position（画布优先用，没有则前端 layoutDag 自动布局；只读透出，不改库）
   const stepsWith = steps.map((s) => {
     const node = nodeMap.get(s.node_id);
     return node
-      ? { ...s, name: node.name ?? "", params: node.params ?? {}, stepType: node.type }
+      ? { ...s, name: node.name ?? "", params: node.params ?? {}, stepType: node.type, position: node.position }
       : s;
   });
+  // 画布边：节点依赖边规约直通（{from,to} → 前端转 vf {source,target}）。rev 已在上方查出，不重复查库。
+  const edges = rev[0]?.spec_json?.edges ?? [];
   // 调度日志：非节点执行日志，按时间正序
   const { rows: schedules } = await pool.query(
     `SELECT ts, message FROM execution_log WHERE exec_id=$1 ORDER BY id`,
     [id]
   );
-  return { ...rows[0], steps: stepsWith, schedules };
+  return { ...rows[0], steps: stepsWith, schedules, edges };
 }
 
 export async function executionPipelineId(id) {
