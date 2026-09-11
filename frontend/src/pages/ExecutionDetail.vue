@@ -19,6 +19,7 @@ const STATUS = {
   running:   { label: "运行中", cls: "badge-info",     dot: "var(--info)" },
   succeeded: { label: "成功",   cls: "badge-ok",       dot: "var(--ok)" },
   done:      { label: "完成",   cls: "badge-ok",       dot: "var(--ok)" },
+  completed: { label: "已完成", cls: "badge-ok",       dot: "var(--ok)" },
   failed:    { label: "失败",   cls: "badge-err",      dot: "var(--err)" },
   rejected:  { label: "已拒绝", cls: "badge-err",      dot: "var(--err)" },
   cancelled: { label: "已取消", cls: "badge-neutral",  dot: "var(--text-3)" },
