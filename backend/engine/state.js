@@ -17,7 +17,7 @@ function fillEnv(env, src) {
 }
 
 // 深 walk 预渲染节点 params：见 variables.js 的 renderParams，返回全新副本，不改动原始 node。
-export function createAdvancer({ stepRun, snapshot, record, recordRegistry = async () => {}, complete = async () => {}, log = async () => {} }) {
+export function createAdvancer({ stepRun, snapshot, record, recordRegistry = async () => {}, complete = async () => {}, log = async () => {}, mutex }) {
   async function advanceOnce({ spec, snap, execId, environment }) {
     const graph = buildGraph(spec);
     const done = new Set(snap.done ?? []);
@@ -51,31 +51,48 @@ export function createAdvancer({ stepRun, snapshot, record, recordRegistry = asy
       );
     }
 
-    for (const nodeId of ready) {
-      const node = graph.nodes.get(nodeId);
-      // 预渲染：把当前 environment 的 ${name} 替换进节点字符串参数（及 env[].v），传给 stepRun 的为渲染后副本
-      const renderedNode = { ...node, params: renderParams(node.params, env) };
-      console.log(`[advance] exec=${execId} ⟶ 开始执行就绪节点 node=${nodeId} type=${node.type}`);
-      const ctx = { done: [...done], spec, execId, environment: env, recordRegistry };
-      await log(execId, `⟶ 开始执行节点 ${nodeId}（类型 ${node.type}）`);
-      const res = await stepRun(renderedNode, ctx);
+    // 同轮就绪节点真并发派发：Promise.allSettled 并发执行，各自 try/catch 把失败包进
+    // fulfilled 的 {nodeId, error} 结构（allSettled 的 rejected 项不含 nodeId，必须内联捕获）。
+    const results = await Promise.allSettled(
+      ready.map(async (nodeId) => {
+        try {
+          const node = graph.nodes.get(nodeId);
+          const renderedNode = { ...node, params: renderParams(node.params, env) };
+          const ctx = { done: [...done], spec, execId, environment: env, recordRegistry };
+          await log(execId, `⟶ 开始执行节点 ${nodeId}（类型 ${node.type}）`);
+          const res = await stepRun(renderedNode, ctx);
+          return { nodeId, res };
+        } catch (err) {
+          return { nodeId, error: err };
+        }
+      })
+    );
+    let firstWaiting = null;
+    for (const r of results) {
+      const { nodeId, res, error } = r.value;
+      if (error) {
+        // 失败节点标记为 failed，但不中断同轮其他成功节点
+        console.error(`[advance] exec=${execId} 节点 ${nodeId} 并发执行失败: ${error?.message ?? error}`);
+        await record({ execId, nodeId, status: "failed", output: { error: error?.message ?? String(error) } });
+        continue;
+      }
       if (res.kind === "done") {
         done.add(nodeId);
-        // 节点输出（扁平 K=V）写入 environment，供后续节点 ${name} 引用
         fillEnv(env, res.output);
         console.log(`[advance] exec=${execId} ✔ 节点 ${nodeId} 就地完成，已写入节点记录`);
         await record({ execId, nodeId, status: "done", output: res.output, logs: res.logs });
         await log(execId, `✔ 节点 ${nodeId} 完成`);
       } else {
-        waiting = nodeId;
+        // dispatch/wait：登记等待（firstWaiting 保证一次推进只设一个 waiting）
+        if (!firstWaiting) firstWaiting = nodeId;
         console.log(
           `[advance] exec=${execId} ⏸ 节点 ${nodeId} 进入${res.kind === "wait" ? "外部等待" : "派发"}状态 ` +
-          `ref=${res.ref ?? "-"}，本次推进到此为止，等待外部回调`);
+          `ref=${res.ref ?? "-"}，等待外部回调`);
         await record({ execId, nodeId, status: res.kind, ref: res.ref });
         await log(execId, `⏸ 节点 ${nodeId} 进入${res.kind === "wait" ? "外部等待" : "派发"}状态，等待回调`);
-        break; // 一次推进只发一个等待/派发
       }
     }
+    if (firstWaiting) waiting = firstWaiting;
 
     // 所有节点均已完成任务：标记执行整体完成，并更新流水线的运行状态为 completed
     if (done.size === graph.nodes.size && !waiting) {
