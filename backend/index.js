@@ -19,6 +19,7 @@ import { makeApprovalStep } from "./steps/approval.js";
 import { makeSqlStep } from "./steps/sql.js";
 import { createConnection as createDbConnection } from "./providers/db.js";
 import { createOrchestrator } from "./engine/orchestrator.js";
+import { validateSpec } from "./engine/dag.js";
 import { assembleTriggerEnv } from "./engine/trigger.js";
 import { randomUUID } from "node:crypto";
 import axios from "axios";
@@ -359,6 +360,7 @@ async function buildApp() {
     if (!steps[t]) throw new Error(`步骤类型 ${t} 已登记 STEP_TYPES 但未在 buildApp.steps 中装配`);
   }
   const advancer = createAdvancer({
+    mutex,
     stepRun: async (node, ctx) => {
       console.log(`[step] exec=${ctx.execId} node=${node.id} type=${node.type}`);
       try {
@@ -434,6 +436,10 @@ async function buildApp() {
     // rerun 场景：把被重跑的原执行 id 一并留痕进新执行的 trigger，标识其 provenance
     if (rerunOf != null) trigger.rerunOf = rerunOf;
     const spec = await loadPipelineRev(pipelineId, trigger, authority ? { authority } : undefined);
+    // 统一校验点：manual / rerun / webhook 三条触发路径都经 hydrateForRun 组装 spec，
+    // 运行前先做 DAG 校验（节点 id 唯一、边端点存在、无环），有错直接拒跑并给出人读错误。
+    const checked = validateSpec(spec);
+    if (!checked.ok) throw new Error("DAG 校验失败：" + checked.errors.join("；"));
     await schedLog(spec.execId, `★ 触发执行（${kind}${rerunOf != null ? `，重跑自 #${rerunOf}` : ""}）`);
     const initEnv = await buildInitialEnvironment({ execId: spec.execId, pipelineId });
     const environment = assembleTriggerEnv({ spec, formValue, webhookBody, initEnv });
