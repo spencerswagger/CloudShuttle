@@ -76,8 +76,11 @@ export function createOrchestrator({
     });
   }
 
-  // 把某节点标记为终态、从 waiting 集合移除（只移除自己的 nodeId，不误清其他等待节点），写快照（供续跑）
-  async function markDone(nodeId, execId, failed) {
+  // 把某节点标记为终态、从 waiting 集合移除（只移除自己的 nodeId，不误清其他等待节点），写快照（供续跑）。
+  // output（可选）：本回调解析出的 K=V 输出，合并进快照 environment 一并落库。多 ECI 并行回调时这是
+  // 「中间回调输出持久化」的关键——若只透传旧 environment，中间回调 advance 因 waiting 非空早退不写快照，
+  // 后到回调的 markDone 读回旧快照会把先前回调的输出丢光（下游拿到未解析的 ${var}）。
+  async function markDone(nodeId, execId, failed, output) {
     const snap = (await snapshotStore.load(execId)) ?? {};
     const done = new Set(snap.done ?? []);
     done.add(nodeId);
@@ -85,8 +88,11 @@ export function createOrchestrator({
     const waiting = normalizeWaiting(snap.waiting);
     const rest = waiting ? waiting.filter((id) => id !== nodeId) : null;
     const next = { done: [...done], waiting: rest?.length ? rest : null };
-    // 透传快照 environment，确保续跑写回不丢变量地图
-    if (snap.environment) next.environment = snap.environment;
+    // 合并快照 environment：透传旧变量 + 本次回调新输出，确保后续 advance/回调读到完整累积变量；
+    // 两者皆空时省略该字段（与历史快照形态保持一致，避免多余写）
+    if (snap.environment || (output && Object.keys(output).length)) {
+      next.environment = { ...(snap.environment ?? {}), ...(output ?? {}) };
+    }
     if (failed) next.status = "failed";
     await snapshotStore.save(execId, next);
     await schedLog(execId, `节点 ${nodeId} 标记为${failed ? "失败" : "成功"}终态（已结束 ${done.size} 个节点）`);
@@ -106,7 +112,10 @@ export function createOrchestrator({
       return withExclusive(async () => {
         console.log(`[orchestrator] exec=${execId} 收到 ECI 节点 ${nodeId} 成功回调，解析输出并继续推进`);
         const parsed = parseOutput(output);
-        const next = await markDone(nodeId, execId, false);
+        // 把本次输出合并进快照 environment 一并落库（markDone 内完成）：
+        // 多 ECI 并行时中间回调的 advance 会因 waiting 非空早退不写快照，若不在此落库，
+        // 后到回调读回旧快照 → 先前回调输出丢失，下游拿到未解析的 ${var}。
+        const next = await markDone(nodeId, execId, false, parsed);
         await record({ execId, nodeId, status: "succeeded", output: parsed, logs });
         const spec = await loadSpecForExec(execId);
         // 把解析出的 K=V 写回 environment（对后继节点可见），再向后继 advance

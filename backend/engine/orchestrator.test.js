@@ -163,3 +163,52 @@ test("多 ECI 全链路：同轮都派发都进 waiting → 回调各自移除 �
   assert.deepEqual(completed, ["completed"], "complete 回调被调用一次");
   assert.equal(advanceCalls, 3, "run + 两次回调各推进一次，无重复推进");
 });
+
+test("并行回调：中间回调的输出持久化，下游变量解析成功（回归：x=1 不丢失）", async () => {
+  // 缺陷机理：a、b 并行派发 → a 先回 x=1（中间回调）→ b 后回 y=2 → c 引用 ${x}。
+  // 旧实现 a 回调的 advance 因 waiting=[b] 非空早退且不写快照，x=1 从未落库；
+  // b 回调的 markDone 从 store 读回旧快照 environment，c 渲染时 ${x} 原样保留 → 静默产出错误数据。
+  // 本用例必须断言下游渲染后的 params（done 型 E2E 用例只断言 waiting，抓不到此缺陷）。
+  const spec = {
+    execId: 1,
+    nodes: [
+      { id: "a", type: "shell", params: {} },
+      { id: "b", type: "shell", params: {} },
+      { id: "c", type: "sql", params: { sql: "select ${x} + ${y} as total" } },
+    ],
+    edges: [{ from: "a", to: "c" }, { from: "b", to: "c" }],
+  };
+  const rendered = {}; // nodeId -> 该节点执行时收到的渲染后 params
+  const stepRun = async (node) => {
+    if (node.type === "shell") return { kind: "dispatch", ref: `tok-${node.id}` };
+    rendered[node.id] = node.params; // sql 节点：捕获渲染后的 params
+    return { kind: "done", output: { [node.id]: "ok" }, logs: node.id };
+  };
+  const store = memStore();
+  const advancer = createAdvancer({
+    stepRun,
+    snapshot: async (id, s) => { await store.save(id, s); },
+    record: async () => {},
+    complete: async () => {},
+    log: async () => {},
+  });
+  const orch = createOrchestrator(baseDeps({
+    mutex: localMutex(),
+    loadSpecForExec: async () => spec,
+    snapshotStore: store,
+    advance: async (arg) => advancer.advanceOnce(arg),
+  }));
+  // 1) 首轮：a、b 两个 shell 并行派发，waiting=[a,b]
+  await orch.run(spec, new Map());
+  // 2) a 先回（中间回调）：x=1 必须随 markDone 写入快照，供后续回调读回
+  await orch.onEciDone({ execId: 1, nodeId: "a", output: "x=1" });
+  assert.equal((await store.load(1)).environment.x, "1", "中间回调 a 的输出 x=1 已落库（后到回调能读到）");
+  assert.ok(!rendered.c, "a 回调时 b 仍在等待 → c 依赖未满足，不应执行");
+  // 3) b 后回：waiting 清空 → c 就绪，渲染 params 必须含已解析的 x=1（中间回调输出未丢）
+  await orch.onEciDone({ execId: 1, nodeId: "b", output: "y=2" });
+  assert.equal(
+    rendered.c.sql,
+    "select 1 + 2 as total",
+    "下游 c 渲染后 ${x} 已替换为 1（中间回调输出未丢失，${y} 同步替换为 2）"
+  );
+});
