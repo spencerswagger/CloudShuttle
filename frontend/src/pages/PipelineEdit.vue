@@ -42,7 +42,7 @@ const newPipeline = () => ({
   spec_json: { nodes: [], edges: [], trigger: { params: [] } },
 });
 const current = ref(newPipeline());
-const nodes = computed({ get: () => current.value.spec_json.nodes, set: (v) => (current.value.spec_json.nodes = v) });
+const nodes = computed(() => current.value.spec_json.nodes);
 
 // ---------- DAG 自由画布：spec.nodes / spec.edges 是唯一数据源，VueFlow 视图由它们派生 ----------
 const { fitView, screenToFlowCoordinate } = useVueFlow();
@@ -1101,7 +1101,8 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
               :label-x="slot.labelX" :label-y="slot.labelY" />
             <EdgeLabelRenderer>
               <div v-if="hoverEdgeId === slot.id" class="edge-del nodrag" :style="edgeDelStyle(slot)"
-                title="删除连线" @mousedown.prevent.stop @click.stop="removeEdgeByData(slot.data)">
+                title="删除连线" @mousedown.prevent.stop @click.stop="removeEdgeByData(slot.data)"
+                @mouseenter="onEdgeDelMouseEnter(slot.id)">
                 <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
               </div>
             </EdgeLabelRenderer>
