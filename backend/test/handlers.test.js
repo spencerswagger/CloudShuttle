@@ -2,6 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { routeToHandler } from "../index.js";
+import { pool } from "../db/pg.js";
 
 test("路径路由把 /api/pipelines 分到 api 处理器", () => {
   const r = routeToHandler("/api/pipelines", "GET", null);
@@ -46,6 +47,36 @@ test("handler 冒烟：直接调用导入的 handler 模块函数不崩溃", asy
   // 仅在存在时验证入口导出（handler 无需真实外部依赖即可导入）
   const app = await import("../index.js");
   assert.equal(typeof app.handler, "function");
+});
+
+test("handler 入口对坏 DAG 返回 400 BAD_DAG（配置错误不能被吞成 500）", async () => {
+  const { handler } = await import("../index.js");
+  pool.query = async (sql, params) => {
+    const s = String(sql).replace(/\s+/g, " ").trim();
+    if (/^SELECT spec_json FROM pipeline_rev/.test(s)) {
+      // n1→n2→n1 成环：validateSpec 必须在触发前拦截
+      return { rows: [{ spec_json: { nodes: [{ id: "n1" }, { id: "n2" }], edges: [{ from: "n1", to: "n2" }, { from: "n2", to: "n1" }] } }] };
+    }
+    if (/^INSERT INTO execution\(/.test(s)) return { rows: [{ id: 999 }] };
+    return { rows: [] };
+  };
+  let res;
+  try {
+    res = await handler({
+      httpMethod: "POST",
+      path: "/api/pipelines/9/run",
+      headers: { host: "ctl.example.com", "content-type": "application/json" },
+      body: "{}",
+    });
+  } finally {
+    delete pool.query; // pg.Pool 的 query 在原型上，删掉自有属性即还原
+  }
+  assert.equal(res.statusCode, 400, "坏 DAG 必须 4xx 透出原因，而不是被当成服务故障 500");
+  const out = JSON.parse(res.body);
+  assert.equal(out.ok, false);
+  assert.equal(out.code, "BAD_DAG");
+  assert.match(out.message, /DAG 校验失败/);
+  assert.match(out.message, /环/);
 });
 
 test("审批回调返回前必须已完成卡片更新（FC 冻结下 fire-and-forget 会丢失）", async () => {

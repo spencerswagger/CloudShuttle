@@ -439,7 +439,7 @@ async function buildApp() {
     // 统一校验点：manual / rerun / webhook 三条触发路径都经 hydrateForRun 组装 spec，
     // 运行前先做 DAG 校验（节点 id 唯一、边端点存在、无环），有错直接拒跑并给出人读错误。
     const checked = validateSpec(spec);
-    if (!checked.ok) throw new Error("DAG 校验失败：" + checked.errors.join("；"));
+    if (!checked.ok) throw new HttpError(400, "BAD_DAG", "DAG 校验失败：" + checked.errors.join("；"));
     await schedLog(spec.execId, `★ 触发执行（${kind}${rerunOf != null ? `，重跑自 #${rerunOf}` : ""}）`);
     const initEnv = await buildInitialEnvironment({ execId: spec.execId, pipelineId });
     const environment = assembleTriggerEnv({ spec, formValue, webhookBody, initEnv });
