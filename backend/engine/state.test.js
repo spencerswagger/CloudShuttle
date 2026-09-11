@@ -63,6 +63,30 @@ test("串行链路回归：a→b 前一完成才执行后一（无重叠）", as
   assert.equal(isOverlap(), false);
 });
 
+test("同轮多个 shell（dispatch）节点仅派发一个，其余后续轮再执行", async () => {
+  const order = [];
+  const stepRun = async (node) => {
+    order.push(node.id);
+    return { kind: "dispatch", ref: `tok-${node.id}` };
+  };
+  const recorded = [];
+  const adv = createAdvancer({
+    stepRun, mutex: localMutex(),
+    snapshot: async () => {}, record: async (r) => { recorded.push(r); },
+    complete: async () => {}, log: async () => {},
+  });
+  // a、b 均为根节点（无边），同轮就绪；都属 dispatch 类（shell）→ 本轮应只派发一个
+  const spec = {
+    nodes: [{ id: "a", type: "shell", params: {} }, { id: "b", type: "shell", params: {} }],
+    edges: [],
+  };
+  const res = await adv.advanceOnce({ spec, snap: { done: [], environment: {} }, execId: 4, environment: new Map() });
+  assert.deepEqual(order, ["a"], "同轮 dispatch 类节点应只派发一个（a），b 本轮不应被调用");
+  assert.equal(res.waiting, "a", "第一个被派发的 dispatch 节点成为 waiting");
+  assert.ok(!res.snap.done.has("a") && !res.snap.done.has("b"), "dispatch 节点未 done");
+  assert.deepEqual(recorded.map((x) => x.nodeId), ["a"], "仅 a 进入 dispatch/wait 记录");
+});
+
 test("dispatch 节点：本轮结束等待回调，后续节点不推进", async () => {
   const order = [];
   const stepRun = async (node) => {

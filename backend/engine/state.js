@@ -53,8 +53,17 @@ export function createAdvancer({ stepRun, snapshot, record, recordRegistry = asy
 
     // 同轮就绪节点真并发派发：Promise.allSettled 并发执行，各自 try/catch 把失败包进
     // fulfilled 的 {nodeId, error} 结构（allSettled 的 rejected 项不含 nodeId，必须内联捕获）。
+    //
+    // dispatch 类（shell）收窄为「每轮仅派发一个」：并发执行前无法预知 stepRun 究竟返回 done 还是
+    // dispatch/wait，故以 node.type === 'shell' 作为判定（当前唯一会派发的类型）。若非 shell，
+    // 本轮全部并发派发；若为 shell，仅取第一个参与本轮并发，其余留待后续轮，以免同轮多 dispatch
+    // 节点并发派发但只登记一个 waiting，续跑时未追踪节点重复派发（副作用漂移）。
+    const readyShell = ready.filter((id) => graph.nodes.get(id).type === "shell");
+    const toRun = ready.filter((id) => graph.nodes.get(id).type !== "shell");
+    if (readyShell[0]) toRun.push(readyShell[0]); // dispatch 类同一轮只派发第一个，其余留待后续轮
+
     const results = await Promise.allSettled(
-      ready.map(async (nodeId) => {
+      toRun.map(async (nodeId) => {
         try {
           const node = graph.nodes.get(nodeId);
           const renderedNode = { ...node, params: renderParams(node.params, env) };
