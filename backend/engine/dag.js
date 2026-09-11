@@ -52,13 +52,11 @@ export function validateSpec(spec) {
     ids.add(n.id);
   }
   for (const id of dup) errors.push(`存在重复节点 id: ${id}`);
-  const parents = {};
   const children = {};
-  for (const id of ids) { parents[id] = []; children[id] = []; }
+  for (const id of ids) { children[id] = []; }
   for (const e of edges) {
     if (!ids.has(e.from)) { errors.push(`边的起点不存在: ${e.from}`); continue; }
     if (!ids.has(e.to)) { errors.push(`边的终点不存在: ${e.to}`); continue; }
-    parents[e.to].push(e.from);
     children[e.from].push(e.to);
   }
   // DFS 三色法判环：0=未访问 1=访问中 2=已结束
