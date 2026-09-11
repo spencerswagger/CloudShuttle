@@ -1,14 +1,18 @@
 <!-- 执行详情页：调度日志 + 步骤手风琴（单开）。步骤头展示节点名称/类型/状态/开始时间，
-     悬停显示开始-结束-时长；展开区展示节点配置、审批内容与接收人、执行日志、节点输出。 -->
-<script setup>
-import { ref, computed, watch, onMounted } from "vue";
+     悬停显示开始-结束-时长；展开区展示节点配置、审批内容与接收人、执行日志、节点输出。 --><script setup>
+import { ref, computed, watch, nextTick, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import { VueFlow, Handle, Position, MarkerType, useVueFlow } from "@vue-flow/core";
+import "@vue-flow/core/dist/style.css";
 import MarkdownIt from "markdown-it";
 import { getExecution, cancelExecution, rerunExecution } from "../api/execution.js";
+import { layoutDag } from "../lib/dagLayout.js";
 import { notify } from "../lib/notify.js";
 
 const route = useRoute();
 const router = useRouter();
+
+const { fitView } = useVueFlow();
 
 const exec = ref(null);
 const loading = ref(true);
@@ -79,6 +83,71 @@ const triggerStep = computed(() => exec.value?.trigger ? {
   kind: "trigger", status: "", name: "", started_at: exec.value?.started_at,
 } : null);
 const displaySteps = computed(() => (triggerStep.value ? [triggerStep.value, ...steps.value] : steps.value));
+
+// ---------- 执行拓扑画布（DAG） ----------
+// 边：spec.edges（后端 getExecution 透出 {from,to}）→ vf {source,target，箭头}。
+const canvasEdges = computed(() => (Array.isArray(exec.value?.edges) ? exec.value.edges : []));
+// 节点：后端每条 execution_node（kind!=='trigger' 的真实节点）对应一个画布节点，node_id 作 vf id。
+const CANVAS_W = 200, CANVAS_H = 64, CANVAS_GX = 72, CANVAS_GY = 92;
+// 坐标：优先取后端并入的 spec.position（只读用，不改 spec）；缺失则该步回落到 layoutDag 自动布局生成。
+const positions = computed(() => {
+  const ns = steps.value;
+  const laid = layoutDag(ns.map((s) => ({ id: s.node_id })), canvasEdges.value, { w: CANVAS_W, h: CANVAS_H, gapX: CANVAS_GX, gapY: CANVAS_GY });
+  const byId = Object.fromEntries(laid.map((p) => [p.id, p]));
+  const map = {};
+  for (const s of ns) {
+    if (s.node_id == null) continue;
+    const laidPos = byId[s.node_id];
+    map[s.node_id] = s.position
+      ?? (laidPos ? { x: laidPos.x + 56, y: laidPos.y + 56 } : { x: 40, y: 40 });
+  }
+  return map;
+});
+const canvasNodes = computed(() => steps.value
+  .filter((s) => s.node_id != null)
+  .map((s) => ({
+    id: s.node_id,
+    type: "exec-node",
+    position: positions.value[s.node_id] ?? { x: 40, y: 40 },
+    data: { s },
+  })));
+const canvasVfEdges = computed(() => canvasEdges.value.map((e) => ({
+  id: `e${e.from}>${e.to}`,
+  source: e.from,
+  target: e.to,
+  markerEnd: { type: MarkerType.ArrowClosed, color: "#54d0c6" },
+  style: { stroke: "var(--accent)", strokeWidth: 1.5 },
+})));
+// 并行高亮：同时处于活跃（运行/审批/ECI/派发/等待）的节点一律加高亮 ring。
+const ACTIVE_STATUS = new Set(["running", "eci", "approve", "dispatch", "wait"]);
+const canvasActive = (s) => ACTIVE_STATUS.has(s?.status);
+const canvasAccent = (s) => {
+  const st = s?.status;
+  if (["succeeded", "done", "completed"].includes(st)) return "var(--ok)";
+  if (["failed", "rejected"].includes(st)) return "var(--err)";
+  if (canvasActive(s)) return "var(--warn)";
+  return "var(--text-3)";
+};
+const canvasFill = (s) => {
+  if (canvasActive(s)) return "rgba(245,171,53,.06)";
+  if (["succeeded", "done", "completed"].includes(s?.status)) return "rgba(40,167,69,.05)";
+  if (["failed", "rejected"].includes(s?.status)) return "rgba(230,73,73,.05)";
+  return "transparent";
+};
+watch(canvasNodes, (v) => {
+  if (v.length) nextTick(() => fitView({ padding: 0.22, duration: 200 }).catch(() => {}));
+});
+// 点击画布节点 → 展开并滚动到对应手风琴步骤项，复用现有全部详情模板。
+function onCanvasNodeClick({ node }) {
+  const s = node.data?.s;
+  if (!s?.node_id) return;
+  const idx = displaySteps.value.findIndex((x) => x.node_id === s.node_id);
+  if (idx < 0) return;
+  opened.value = idx;
+  nextTick(() => {
+    document.getElementById("exec-step-" + idx)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+}
 
 const stepTitle = (s) => {
   if (s.kind === "trigger") return triggerLabel.value;
@@ -207,11 +276,48 @@ const rerun = async () => {
         <p v-else class="stempty dim">暂无调度日志（该执行可能早于调度日志功能上线）。</p>
       </section>
 
+      <!-- 执行拓扑：DAG 画布，节点按依赖连线，并行节点同时高亮；点节点定位并展开下方步骤 -->
+      <section v-if="steps.length" class="card canvas-card rise" style="animation-delay:.07s">
+        <div class="block-head">
+          <h3 class="block-title display">执行拓扑</h3>
+          <span class="topo-hint dim">连线为节点依赖 · 点击节点查看详情</span>
+        </div>
+        <div class="topo-canvas">
+          <VueFlow
+            :nodes="canvasNodes"
+            :edges="canvasVfEdges"
+            :nodes-draggable="false"
+            :nodes-connectable="false"
+            :elements-selectable="true"
+            :min-zoom="0.15"
+            :max-zoom="1.6"
+            :fit-view-on-init="true"
+            :zoom-on-scroll="true"
+            class="cflow"
+            @node-click="onCanvasNodeClick"
+            aria-label="执行拓扑画布"
+          >
+            <template #node-exec-node="{ data }">
+              <div class="cn-node" :data-active="canvasActive(data.s)" :style="{ '--acc': canvasAccent(data.s), '--fill': canvasFill(data.s), borderColor: canvasAccent(data.s) }">
+                <Handle type="target" :position="Position.Left" />
+                <div class="cn-row">
+                  <span class="cn-kind mono" :style="{ color: kindAccent(data.s), borderColor: 'currentColor' }">{{ kindLabel(data.s) }}</span>
+                  <span class="cn-dot" :style="{ background: canvasAccent(data.s) }"></span>
+                </div>
+                <div class="cn-name" :title="data.s.name || kindLabel(data.s)">{{ data.s.name || kindLabel(data.s) }}</div>
+                <div class="cn-st badge" :class="statusCls(data.s)" :style="{ '--dot': statusDot(data.s) }">{{ statusLabel(data.s) }}</div>
+                <Handle type="source" :position="Position.Right" />
+              </div>
+            </template>
+          </VueFlow>
+        </div>
+      </section>
+
       <!-- 步骤手风琴（单开）：触发源 + 各节点 -->
       <section v-if="displaySteps.length" class="card steps-card rise" style="animation-delay:.08s">
         <h3 class="block-title display">执行步骤</h3>
         <div class="steps">
-          <div v-for="(s, i) in displaySteps" :key="i" class="stitem" :class="{ open: opened === i, trigger: s.kind === 'trigger' }">
+          <div v-for="(s, i) in displaySteps" :key="i" :id="'exec-step-' + i" class="stitem" :class="{ open: opened === i, trigger: s.kind === 'trigger' }">
             <div class="sthead" role="button" :aria-expanded="opened === i" :title="stepTimeTip(s)" @click="toggleStep(i)">
               <span v-if="s.kind === 'trigger'" class="stidx mono">源</span>
               <span v-else class="stidx mono">STEP {{ String(i).padStart(2, "0") }}</span>
@@ -307,8 +413,37 @@ const rerun = async () => {
 
 .block-title { margin: 0; font-size: 14px; font-weight: 700; letter-spacing: 0.03em; }
 .block-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
-.steps-card, .log-card { padding: 20px 22px; }
-.log-card { margin-bottom: 14px; }
+.steps-card, .log-card, .canvas-card { padding: 20px 22px; }
+.log-card, .canvas-card { margin-bottom: 14px; }
+.topo-hint { font-size: 11px; }
+.topo-canvas { height: 320px; min-height: 220px; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--bg-0); }
+.topo-canvas :deep(.vue-flow) { height: 100%; }
+.topo-canvas :deep(.vue-flow__node) { cursor: pointer; }
+
+.cn-node {
+  width: 176px; min-height: 60px; padding: 9px 11px 10px;
+  border: 1.5px solid var(--line-strong); border-radius: 12px;
+  background: var(--bg-1);
+  display: flex; flex-direction: column; gap: 4px;
+  box-sizing: border-box; font-family: inherit;
+  transition: box-shadow .15s ease, transform .1s ease;
+}
+.cn-node:hover { box-shadow: 0 6px 18px rgba(16,44,66,.12); transform: translateY(-1px); }
+.cn-node[data-active="true"] {
+  box-shadow: 0 0 0 3px rgba(245,171,53,.30), 0 6px 18px rgba(245,171,53,.14);
+  background: var(--fill, var(--bg-1));
+}
+.cn-node[data-active="true"]:hover { box-shadow: 0 0 0 3px rgba(245,171,53,.42), 0 8px 20px rgba(245,171,53,.18); }
+.cn-node :deep(.vue-flow__handle) {
+  width: 7px; height: 7px; border: 1.5px solid var(--bg-1); background: var(--accent); border-radius: 999px;
+}
+.cn-node :deep(.vue-flow__handle-left) { left: -4px; }
+.cn-node :deep(.vue-flow__handle-right) { right: -4px; }
+.cn-row { display: flex; align-items: center; justify-content: space-between; }
+.cn-kind { font-size: 10.5px; font-weight: 700; letter-spacing: .04em; border: 1px solid; border-radius: 999px; padding: 1px 8px; background: var(--bg-0); }
+.cn-dot { width: 8px; height: 8px; border-radius: 999px; }
+.cn-name { font-size: 12.5px; font-weight: 600; color: var(--text-1); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cn-st { align-self: flex-start; font-size: 11px; }
 
 .sched-list { display: flex; flex-direction: column; gap: 6px; max-height: 340px; overflow: auto; }
 .sched-row { display: flex; gap: 12px; align-items: baseline; font-size: 12px; line-height: 1.55; }
