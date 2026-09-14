@@ -443,6 +443,9 @@ async function buildApp() {
       : {};
     // rerun 场景：把被重跑的原执行 id 一并留痕进新执行的 trigger，标识其 provenance
     if (rerunOf != null) trigger.rerunOf = rerunOf;
+    // 触发源原始输入：webhook=原始 body、manual=表单值；传给 orchestrator.run 的 meta.triggerRaw，
+    // 作为快照 trigger_raw 的取值源（$.trigger.* 边条件上下文），无输入时缺省为 undefined。
+    const triggerRaw = kind === "webhook" ? webhookBody : kind === "manual" ? formValue : undefined;
     const spec = await loadPipelineRev(pipelineId, trigger, authority ? { authority } : undefined);
     // 统一校验点：manual / rerun / webhook 三条触发路径都经 hydrateForRun 组装 spec，
     // 运行前先做 DAG 校验（节点 id 唯一、边端点存在、无环），有错直接拒跑并给出人读错误。
@@ -451,7 +454,7 @@ async function buildApp() {
     await schedLog(spec.execId, `★ 触发执行（${kind}${rerunOf != null ? `，重跑自 #${rerunOf}` : ""}）`);
     const initEnv = await buildInitialEnvironment({ execId: spec.execId, pipelineId });
     const environment = assembleTriggerEnv({ spec, formValue, webhookBody, initEnv });
-    return { spec, environment };
+    return { spec, environment, triggerRaw };
   }
   return {
     orchestrator, snapshotStore, mutex, getCredentialSecrets,
@@ -550,8 +553,8 @@ const DISPATCH = {
   "api.cancelExecution": async ({ path }) => ok(api.cancelExecution(Number(m(path, RE.executionCancel)))),
   "api.runPipeline": async ({ app, path, body }) => {
     const id = Number(RE.pipelineRun.exec(path)?.[1]);
-    const { spec, environment } = await app.hydrateForRun({ pipelineId: id, kind: "manual", formValue: body?.params });
-    const out = await app.orchestrator.run(spec, environment);
+    const { spec, environment, triggerRaw } = await app.hydrateForRun({ pipelineId: id, kind: "manual", formValue: body?.params });
+    const out = await app.orchestrator.run(spec, environment, { triggerRaw });
     return {
       status: 200,
       body: {
@@ -569,10 +572,10 @@ const DISPATCH = {
     const kind = origTrigger.trigger === "webhook" ? "webhook" : "manual";
     const formValue = kind === "manual" ? origTrigger.params : undefined;
     const webhookBody = kind === "webhook" ? origTrigger.body : undefined;
-    const { spec, environment } = await app.hydrateForRun({
+    const { spec, environment, triggerRaw } = await app.hydrateForRun({
       pipelineId: orig.pipeline_id, kind, formValue, webhookBody, rerunOf: id,
     });
-    const out = await app.orchestrator.run(spec, environment);
+    const out = await app.orchestrator.run(spec, environment, { triggerRaw });
     return {
       status: 200,
       body: {
@@ -634,10 +637,10 @@ const DISPATCH = {
     // 套了会把任何拒绝都包成 HTTP 200，第三方与本方探针语义同时失真（与 R3 的 http_status 同源）
     return hook.webhook(
       async ({ pipelineId, payload, authority }) => {
-        const { spec, environment } = await app.hydrateForRun({
+        const { spec, environment, triggerRaw } = await app.hydrateForRun({
           pipelineId, kind: "webhook", webhookBody: payload, authority,
         });
-        return app.orchestrator.run(spec, environment);
+        return app.orchestrator.run(spec, environment, { triggerRaw });
       },
       {
         // 管道名是百分号编码的路径段，先还原再查库；secret 在 query 里，从 rawPath 读

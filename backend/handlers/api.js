@@ -8,7 +8,7 @@ import { HttpError } from "../errors.js";
 import { buildDbConfig, createConnection } from "../providers/db.js";
 import { randomUUID } from "node:crypto";
 import { checkVars, resolveScope } from "../engine/variables.js";
-import { buildGraph, ancestors } from "../engine/dag.js";
+import { buildGraph, ancestors, validateSpec } from "../engine/dag.js";
 
 const rows = (r) => r.rows;
 
@@ -25,6 +25,12 @@ function resolveSpec(body) {
 function assertVarsResolved(spec) {
   const err = checkVars(spec, { ancestors });
   if (err) throw new HttpError(422, "VAR_UNRESOLVED", err, "unknown variable");
+}
+
+// 保存前 DAG 校验（节点唯一/边端点/无环/边条件格式/loop 区域）；非法直接 400
+function assertDagValid(spec) {
+  const checked = validateSpec(spec);
+  if (!checked.ok) throw new HttpError(400, "BAD_DAG", "DAG 校验失败：" + checked.errors.join("；"));
 }
 
 // 把当前 spec 对应版本登记进 pipeline_rev（历史版本表）
@@ -60,6 +66,7 @@ export async function getPipeline(id) {
 export async function createPipeline(body) {
   const specObj = resolveSpec(body);
   assertVarsResolved(specObj);
+  assertDagValid(specObj);
   const spec = JSON.stringify(specObj);
   // 每条管道的 webhook 触发独立密钥，创建时生成并存库
   const webhookSecret = randomUUID();
@@ -191,6 +198,7 @@ function oapiForm(data) { return new URLSearchParams(data).toString(); }
 export async function updatePipeline(id, body) {
   const specObj = resolveSpec(body);
   assertVarsResolved(specObj);
+  assertDagValid(specObj);
   const spec = JSON.stringify(specObj);
   const { rows: r } = await pool.query(
     `UPDATE pipeline SET name=$2, description=$3, spec_json=$4::jsonb, rev=rev+1, updated_at=now()

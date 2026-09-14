@@ -119,3 +119,22 @@ test("steps 类型注册表包含控制节点三类型 branch/join/loop（已实
   const { STEP_TYPES } = await import("../index.js");
   assert.ok(["branch", "join", "loop"].every((t) => STEP_TYPES.includes(t)));
 });
+
+test("创建管道：DAG 非法（loop 体内嵌套 branch）保存报 400 BAD_DAG", async () => {
+  const { createPipeline } = await import("./api.js");
+  const body = {
+    name: "bad-loop",
+    spec_json: {
+      nodes: [
+        { id: "l", type: "loop", params: { items: { count: 2 } } },
+        { id: "b", type: "branch", params: {} },
+        { id: "j", type: "join", params: {} },
+      ],
+      edges: [{ from: "l", to: "b" }, { from: "b", to: "j" }],
+    },
+  };
+  await assert.rejects(
+    () => createPipeline(body),
+    (e) => e.status === 400 && e.code === "BAD_DAG" && String(e.message).includes("循环体内不允许 branch")
+  );
+});
