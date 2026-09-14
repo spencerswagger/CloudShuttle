@@ -300,3 +300,79 @@ test("run：advance 抛错时执行落为 failed 再上抛（loop 初始化失�
   await assert.rejects(() => orch.run({ execId: 1 }), /loop count 非法/);
   assert.deepEqual(failed, [1], "执行标记为 failed");
 });
+
+test("drain：loop 迭代清 done 数量不变也不误停（快照指纹护栏，回归：seenIter 应到 2）", async () => {
+  // 缺陷机理：loop 迭代边界会 done.delete(body)，两轮间 done 数量完全不变，
+  // 旧护栏「done 数量相等即无进展」在首轮迭代后误停 → 执行永久 running、seenIter 只有 ["1"]。
+  // 本用例用真实 createAdvancer + createOrchestrator 走 loop(2 次迭代) + 同步 sql 体，
+  // 断言单次 run 内两次迭代都跑完且执行 completed。
+  const spec = {
+    execId: 31,
+    nodes: [
+      { id: "t", type: "trigger", params: {} },
+      { id: "l", type: "loop", params: { items: { count: 2 }, accumulate: [] } },
+      { id: "body", type: "sql", params: {} },
+      { id: "j", type: "join", params: {} },
+    ],
+    edges: [{ from: "t", to: "l" }, { from: "l", to: "body" }, { from: "body", to: "j" }],
+  };
+  const seenIter = [];
+  const stepRun = async (node, ctx) => {
+    if (node.id === "body") seenIter.push(ctx.environment.get("iteration"));
+    return { kind: "done", output: { n: node.id }, logs: node.id };
+  };
+  const store = memStore();
+  const advancer = createAdvancer({
+    stepRun,
+    snapshot: async (id, s) => { await store.save(id, s); },
+    record: async () => {},
+    complete: async () => {},
+    log: async () => {},
+  });
+  const orch = createOrchestrator({
+    loadSpec: async () => spec,
+    snapshotStore: store,
+    advance: async (arg) => advancer.advanceOnce(arg),
+    record: async () => {},
+  });
+  const out = await orch.run(spec);
+  assert.deepEqual(seenIter, ["1", "2"], "两次迭代都在单次 run 内跑完（旧护栏只到 [\"1\"]）");
+  assert.equal(out.snap.status, "completed", "执行最终 completed，不停留在 running");
+});
+
+test("onEciDone：续跑 drain 抛错时执行落为 failed 再上抛（回调路径不留孤儿 running）", async () => {
+  const failed = [];
+  const orch = createOrchestrator(baseDeps({
+    loadSpecForExec: async () => ({ execId: 7, nodes: [], edges: [] }),
+    snapshotStore: memStore({ done: [], waiting: null }),
+    advance: async () => { throw new Error("loop count 非法"); },
+    failExecution: async (execId) => failed.push(execId),
+  }));
+  await assert.rejects(
+    () => orch.onEciDone({ execId: 7, nodeId: "a", output: "x=1" }),
+    /loop count 非法/
+  );
+  assert.deepEqual(failed, [7], "续跑异常同样落 failed，不留 running 孤儿");
+});
+
+test("drain：外部 environment 只在首轮合并（后续轮以快照环境为基础）", async () => {
+  // 缺陷机理：旧 drain 每轮透传同一外部 Map，advanceOnce 每轮把它以最高优先级重放，
+  // 节点输出与触发变量同名碰撞时下游读到错误值（外部 x=1、节点 a 输出 x=2、下一轮 b 读到 x=1）。
+  // 断言第二次及以后的 advance 收到空 Map（外部变量不再重放）。
+  const seen = [];
+  const orch = createOrchestrator({
+    loadSpec: async () => ({ execId: 1, nodes: [], edges: [] }),
+    snapshotStore: { save: async () => {}, load: async () => ({}), clear: async () => {} },
+    advance: async ({ environment }) => {
+      seen.push(environment);
+      return { snap: { done: ["a"], waiting: null }, waiting: null };
+    },
+    record: async () => {},
+  });
+  await orch.run({ execId: 1 }, new Map([["x", "1"]]));
+  assert.ok(seen.length >= 2, "至少推进两轮才能观察外部环境是否被重放");
+  assert.deepEqual([...seen[0].entries()], [["x", "1"]], "首轮携带外部变量");
+  for (const env of seen.slice(1)) {
+    assert.equal(env.size, 0, "第二轮起外部 environment 不再重放（空 Map）");
+  }
+});

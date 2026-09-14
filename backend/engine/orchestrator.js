@@ -44,18 +44,35 @@ export function createOrchestrator({
     }
   }
 
-  // 一次唤醒内连续推进同步节点：直到进入外部等待 / 全部完成 / 本轮无进展（死锁护栏）。
-  // 控制节点（branch 剪枝、loop 迭代）依赖它在一个 FC 调用内跑完同步链路。
+  // 一次唤醒内连续推进同步节点：直到进入外部等待 / 全部完成 / 连续两轮快照完全相同（无进展，死锁护栏）。
+  // 进度判定不能看 done 数量——loop 迭代会清除循环体的 done，数量可能保持不变；快照整体比较才稳。
+  // prevKey 以入参快照为基线（与旧护栏以入参 done 为基线一致）：首轮即无进展则立即停，不停多余一轮。
   async function drainAdvance({ spec, snap, execId, environment }) {
     let last = { snap, waiting: snap?.waiting ?? null };
-    let prevDone = new Set(snap?.done ?? []);
+    let prevKey = JSON.stringify(snap);
+    let first = true;
     for (;;) {
-      last = await advance({ spec, snap: last.snap, execId, environment });
+      // 外部 environment 只在首轮合并（节点输出应随每轮累积进 snap.environment，后续轮由它作基础）
+      last = await advance({ spec, snap: last.snap, execId, environment: first ? environment : new Map() });
+      first = false;
       if (last.waiting) return last;                       // 有外部等待 → 断点返回（FC 释放）
-      if (last.snap?.status === "completed") return last;  // 全部完成
-      const now = last.snap?.done ?? [];
-      if (now.length === prevDone.size) return last;       // 本轮无进展 → 死锁护栏
-      prevDone = new Set(now);
+      // 全部完成：兼容 advance 在 snap 内（advanceOnce 标准形态）与顶层（单测 stub 形态）两种完成信号
+      if (last.snap?.status === "completed" || last.status === "completed") return last;
+      const key = JSON.stringify(last.snap);
+      if (key === prevKey) return last;                    // 与上一轮快照完全相同 → 无进展，停止
+      prevKey = key;
+    }
+  }
+
+  // 推进入口统一失败兜底：advance 抛错（如 loop 初始化失败已 record 节点 failed）→ 执行落 failed 再上抛，
+  // 不留 running 孤儿；run 与回调续跑共用，覆盖一致。
+  async function runDrain({ spec, snap, execId, environment, stage }) {
+    try {
+      return await drainAdvance({ spec, snap, execId, environment });
+    } catch (err) {
+      console.error(`[orchestrator] ${stage} 推进异常 exec=${execId}：${err?.message ?? err}`);
+      await failExecution(execId);
+      throw err;
     }
   }
 
@@ -91,14 +108,7 @@ export function createOrchestrator({
         environment: stored.environment ?? {},
         trigger_raw: meta.triggerRaw ?? stored.trigger_raw,
       };
-      try {
-        return await drainAdvance({ spec, snap, execId: spec.execId, environment: env });
-      } catch (err) {
-        // 推进异常（如 loop 初始化失败已 record 节点 failed）：执行必须落 failed，不留 running 孤儿
-        console.error(`[orchestrator] run advance 异常 exec=${spec.execId}：${err?.message ?? err}`);
-        await failExecution(spec.execId);
-        throw err;
-      }
+      return runDrain({ spec, snap, execId: spec.execId, environment: env, stage: "run" });
     });
   }
 
@@ -151,7 +161,7 @@ export function createOrchestrator({
         const spec = await loadSpecForExec(execId);
         // 把解析出的 K=V 写回 environment（对后继节点可见），再向后继 drain 推进（同步链一次跑完）
         const env = buildEnv(next.environment, parsed);
-        return drainAdvance({ spec, snap: next, execId, environment: env });
+        return runDrain({ spec, snap: next, execId, environment: env, stage: "eciDone" });
       });
     },
     // ECI 失败回调 → 该节点终态失败，整个执行结束
@@ -182,7 +192,7 @@ export function createOrchestrator({
         await schedLog(execId, `✆ 审批通过（节点 ${nodeId}），继续推进后续节点`);
         const spec = await loadSpecForExec(execId);
         // 续跑不丢 environment：从 markDone 透传回的快照 environment 重建 Map，供 state.advanceOnce 继续引用
-        return drainAdvance({ spec, snap: next, execId, environment: buildEnv(next.environment, null) });
+        return runDrain({ spec, snap: next, execId, environment: buildEnv(next.environment, null), stage: "approval" });
       });
     },
   };
