@@ -36,10 +36,14 @@ async function loadCreds() {
   finally { credsLoading.value = false; }
 }
 
+const triggerNodeId = "t1";
 const newPipeline = () => ({
-  id: null, name: "", description: "",
-  // 统一触发参数：manual 与 webhook 共用一份 params（webhook 用每项的 jsonPath 从请求体取值）
-  spec_json: { nodes: [], edges: [], trigger: { params: [] } },
+  id: null, name: "未命名流水线", description: "",
+  spec_json: {
+    nodes: [{ id: triggerNodeId, type: "trigger", kind: "manual", params: {}, name: "触发源", position: { x: 60, y: 60 } }],
+    edges: [],
+    trigger: { params: [] },
+  },
 });
 const current = ref(newPipeline());
 const nodes = computed(() => current.value.spec_json.nodes);
@@ -109,6 +113,10 @@ function onConnect(conn) {
     notify({ type: "error", message: "不能把节点连接到自己" });
     return;
   }
+  if (target === triggerNodeId) {
+    notify({ type: "error", message: "触发源是起点，只能作为出边，不能连入" });
+    return;
+  }
   const edges = spec.value.edges;
   if (edges.some((e) => e.from === source && e.to === target)) {
     notify({ type: "error", message: "两点之间已存在连线" });
@@ -122,6 +130,7 @@ function onConnect(conn) {
 }
 // 删除节点：同步清掉关联边；若正在编辑该节点则收起右侧面板
 function removeNodeById(id) {
+  if (id === triggerNodeId || isTrigger(nodes.value.find((x) => x.id === id))) return;
   const i = nodes.value.findIndex((x) => x.id === id);
   if (i < 0) return;
   nodes.value.splice(i, 1);
@@ -200,7 +209,23 @@ function onCanvasDrop(ev) {
 // 由路由参数判定是否编辑态：新建/编辑不再依赖返显是否成功
 const editingId = computed(() => (route.params.id ? +route.params.id : null));
 const isNew = computed(() => !editingId.value);
-const pageTitle = computed(() => (isNew.value ? "新建流水线" : `编辑流水线${current.value.name ? " · " + current.value.name : ""}`));
+// 顶部栏名称内联编辑（会话态）
+const nameEditing = ref(false);
+const nameDraft = ref("");
+const nameInputEl = "pipeline-name-input";
+function startNameEdit() {
+  nameDraft.value = current.value.name;
+  nameEditing.value = true;
+  nextTick(() => { const el = document.getElementById(nameInputEl); el?.focus(); el?.select(); });
+}
+function commitName() {
+  if (!nameEditing.value) return;
+  const v = String(nameDraft.value ?? "").trim();
+  if (!v) { notify({ type: "error", message: "流水线名称不能为空" }); nameDraft.value = current.value.name; nameEditing.value = false; return; }
+  current.value.name = v;
+  nameEditing.value = false;
+}
+function cancelName() { nameEditing.value = false; }
 
 async function hydrate() {
   if (!editingId.value) { current.value = newPipeline(); resetHookSession(); return; }
@@ -210,6 +235,14 @@ async function hydrate() {
     resetHookSession(); // 切换流水线：丢弃后端下发的触发地址与调试接收态，避免跨 /pipelines/:id 残留
     selectedId.value = ""; // 收起画布右侧配置面板
     if (!current.value.spec_json?.edges) current.value.spec_json.edges = [];
+    // 触发源画布化：旧数据 nodes 无 trigger 节点时注入一个（kind 取顶层 trigger.kind，缺省 manual）
+    if (!current.value.spec_json.nodes.some((n) => isTrigger(n))) {
+      current.value.spec_json.nodes.unshift({
+        id: triggerNodeId, type: "trigger",
+        kind: current.value.spec_json.trigger?.kind ?? "manual",
+        params: {}, name: "触发源", position: defaultNodePosition(),
+      });
+    }
     ensurePositions(); // 老数据节点补 position，保证画布可拖
     // 下拉数据懒加载：仅当节点实际用到镜像/凭证才请求，避免挂载即连拉 3 个接口
     const ns = current.value.spec_json?.nodes ?? [];
@@ -320,10 +353,35 @@ function autofit(ev) { fit(ev.target); }
 function fitAll() { document.querySelectorAll("textarea.autofit").forEach(fit); }
 
 const NODE_KINDS = {
+  trigger:  { label: "触发源",   accent: "var(--warn)", icon: "M5 3h14v18l-7-4-7 4z" },
   shell:    { label: "Shell 执行",   accent: "var(--accent)",  icon: "M4 5l6 7-6 7m8 0h8" },
   approval: { label: "人工审批",     accent: "var(--ember)",   icon: "M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6zm-3.5 6.5L11 12l4-4.5" },
   sql:      { label: "SQL 执行",     accent: "var(--accent)",  icon: "M4 5h16M7 3l2 2-2 2M12 3l2 2-2 2M7 12H4v3h3zM4 21h7M6 15v6M15 8l5 5M15 13h2a2 2 0 0 1 2 2v0a2 2 0 0 1-2 2h-2" },
 };
+const LIB_TYPES = ["shell", "approval", "sql"];
+const isTrigger = (n) => n?.type === "trigger";
+
+// 悬浮参数浮窗拖拽状态 + 画布「回到原位」
+const floatPos = ref({ right: "24px", top: "80px" });
+let floatDrag = null;
+function startFloatDrag(e) {
+  floatDrag = { dx: e.clientX, dy: e.clientY, right: floatPos.value.right, top: floatPos.value.top };
+  window.addEventListener("mousemove", onFloatDrag);
+  window.addEventListener("mouseup", stopFloatDrag);
+}
+function onFloatDrag(e) {
+  if (!floatDrag) return;
+  const right = Math.max(8, parseFloat(floatDrag.right) + (floatDrag.dx - e.clientX));
+  const top = Math.max(8, parseFloat(floatDrag.top) + (e.clientY - floatDrag.dy));
+  floatPos.value = { right: right + "px", top: top + "px" };
+}
+function stopFloatDrag() {
+  floatDrag = null;
+  window.removeEventListener("mousemove", onFloatDrag);
+  window.removeEventListener("mouseup", stopFloatDrag);
+}
+onBeforeUnmount(() => stopFloatDrag());
+const fitAllNodes = () => { nextTick(() => { fitView({ padding: 0.2, duration: 250 }).catch(() => {}); }); };
 // Shell 节点运行规格：阿里云按「CPU → 内存」定义规格组合（核内比 1:1 ~ 1:8）。
 // 预设档位在未选中凭证/接口探测失败时兜底；选中凭证+地域后探测量接口返回真实可购组合与目录价。
 const ECI_PRESET_BY_CPU = {
@@ -635,9 +693,13 @@ const save = async ({ stay = false } = {}) => {
     if (editingId.value) await updatePipeline(editingId.value, current.value);
     else Object.assign(current.value, await createPipeline(current.value));
     notify({ type: "success", message: "已保存流水线 ✓" });
-    hookAutoFor = null;      // 名称/spec 可能变化，保存后允许重新拉取触发地址
-    if (!stay) router.push("/pipelines");
-    else if (triggerTab.value === "webhook") loadHook({ quiet: true }); // 留在页面时刷新地址
+    hookAutoFor = null; // 名称/spec 可能变化，保存后允许重新拉取触发地址
+    if (stay) {
+      if (isNew.value) router.replace(`/pipelines/${current.value.id}`); // 新建 stay 模式：URL 落到真实 id，防刷新丢失
+      else if (triggerTab.value === "webhook") loadHook({ quiet: true }); // 留在页面时刷新地址
+    } else {
+      router.push("/pipelines");
+    }
     return true;
   } catch { /* 全局拦截器提示 */ return false; }
   finally { saving.value = false; }
@@ -683,6 +745,11 @@ const triggerCfg = computed(() => {
 });
 const triggerParams = computed(() => triggerCfg.value.params);
 const triggerTab = ref("manual");
+// 触发节点 kind 与浮窗 tab 双向同步；镜像写顶层 spec.trigger.kind（后端不读，仅语义化）
+watch(triggerTab, (v) => {
+  const t = nodes.value.find((n) => isTrigger(n));
+  if (t) { t.kind = v; current.value.spec_json.trigger.kind = v; }
+});
 
 // ---------- Webhook 触发地址：由后端生成下发，前端只读展示 + 复制，不再本地拼接 ----------
 const HOOK_URL_PLACEHOLDER = "点击「获取地址」将自动保存并生成触发地址";
@@ -909,162 +976,64 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
 </script>
 
 <template>
-  <div class="page">
-    <header class="page-head rise">
-      <div class="title-wrap">
-        <button class="btn btn-ghost back-btn" @click="back">
-          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
-          返回列表
-        </button>
-        <div>
-          <h1 class="head-title display">{{ pageTitle }}</h1>
-          <p class="head-sub muted">编排 shell 执行与人工审批节点，保存后进入列表。</p>
-        </div>
-      </div>
-      <div class="head-actions">
-        <button class="btn" @click="run" :disabled="!current.id" title="配置触发参数并运行">
-          <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-          运行
-        </button>
-        <button class="btn btn-accent" @click="save" :disabled="saving">
-          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2zM17 21v-8H7v8M7 3v5h8"/></svg>
-          {{ saving ? "保存中…" : "保存流水线" }}
-        </button>
-      </div>
-    </header>
+  <div class="editor-page">
+    <!-- 顶部工具栏 -->
+    <header class="topbar">
+      <button class="btn btn-ghost" @click="back">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+        返回列表
+      </button>
 
-    <!-- 命名栏 -->
-    <section class="name-bar card rise" style="animation-delay:.04s">
-      <div class="field name-field">
-        <label class="field-label">流水线名称</label>
-        <input class="input" v-model="current.name" placeholder="如：release-构建-发布" />
-        <p class="field-hint" v-if="current.id">名称是 Webhook 触发地址的一部分，修改并保存后，请重新复制触发地址到第三方平台。</p>
+      <div class="tb-name-wrap">
+        <template v-if="nameEditing">
+          <input :id="nameInputEl" class="tb-name-input display" v-model="nameDraft"
+            @keydown.enter="commitName" @keydown.esc="cancelName" @blur="commitName" />
+        </template>
+        <template v-else>
+          <h1 class="tb-name display" :title="current.id ? '名称是 Webhook 触发地址的一部分，改名并保存后需重新复制触发地址' : ''">{{ current.name || "未命名流水线" }}</h1>
+          <button type="button" class="btn btn-sm btn-ghost tb-name-edit" title="重命名流水线" @click="startNameEdit">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z"/></svg>
+          </button>
+        </template>
       </div>
-      <div class="field">
-        <label class="field-label">节点总数</label>
-        <div class="mono counter">{{ current.spec_json.nodes.length }}</div>
-      </div>
-    </section>
 
-    <!-- 工具箱：节点库（点击添加 / 拖入画布）+ 自动布局 -->
-    <section class="toolbox rise" style="animation-delay:.07s">
-      <span class="mono-tag">节点库</span>
-      <button class="btn node-add shell" draggable="true" title="点击添加，或拖到画布上指定位置" @dragstart="onLibDragStart($event, 'shell')" @click="addNode('shell')">
-        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5l6 7-6 7m8 0h8"/></svg>
-        Shell 执行
-      </button>
-      <button class="btn node-add approval" draggable="true" title="点击添加，或拖到画布上指定位置" @dragstart="onLibDragStart($event, 'approval')" @click="addNode('approval')">
-        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6z"/><path d="M8.5 12l2.5 2.5 4.5-4.5"/></svg>
-        人工审批
-      </button>
-      <button class="btn node-add sql" draggable="true" title="点击添加，或拖到画布上指定位置" @dragstart="onLibDragStart($event, 'sql')" @click="addNode('sql')">
-        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16M7 3l2 2-2 2M12 3l2 2-2 2M7 12H4v3h3zM4 21h7M6 15v6M15 8l5 5M15 13h2a2 2 0 0 1 2 2v0a2 2 0 0 1-2 2h-2"/></svg>
-        SQL 执行
-      </button>
-      <span class="toolbox-hint muted">点击添加，或拖入画布指定位置；节点右侧手柄拖到目标节点左侧手柄建立依赖</span>
       <span class="toolbox-spacer"></span>
+
       <button class="btn btn-ghost" title="按依赖关系重新排布所有节点" @click="autoLayout">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9a2 2 0 1 0 0-.01M12 9a2 2 0 1 0 0-.01M20 9a2 2 0 1 0 0-.01M4 15a2 2 0 1 0 0-.01M12 15a2 2 0 1 0 0-.01M20 15a2 2 0 1 0 0-.01M4 21a2 2 0 1 0 0-.01M12 21a2 2 0 1 0 0-.01M20 21a2 2 0 1 0 0-.01"/></svg>
         自动布局
       </button>
-    </section>
+      <button class="btn btn-ghost" title="恢复到适合视角" @click="fitAllNodes">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
+        回到原位
+      </button>
+      <button class="btn" @click="run" :disabled="!current.id" title="配置触发参数并运行">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+        运行
+      </button>
+      <button class="btn btn-accent" @click="save({ stay: true })" :disabled="saving">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2zM17 21v-8H7v8M7 3v5h8"/></svg>
+        {{ saving ? "保存中…" : "保存" }}
+      </button>
+    </header>
 
-    <!-- 触发源配置 -->
-    <section class="trigger-card card rise" style="animation-delay:.09s">
-      <div class="trig-head">
-        <span class="mono-tag">触发源</span>
-        <div class="seg-tabs">
-          <button type="button" class="seg-tab" :class="{ active: triggerTab === 'manual' }" @click="triggerTab = 'manual'">手动触发</button>
-          <button type="button" class="seg-tab" :class="{ active: triggerTab === 'webhook' }" @click="triggerTab = 'webhook'">Webhook 触发</button>
-        </div>
-      </div>
+    <!-- 编辑体：左节点库 + 画布 + 悬浮浮窗 -->
+    <div class="editor-body">
+      <!-- 左栏：节点库（点击添加 / 拖入画布） -->
+      <aside class="node-lib">
+        <span class="mono-tag">节点库</span>
+        <button v-for="k in LIB_TYPES" :key="k" class="btn node-add lib-item" :class="k"
+          draggable="true" :title="`${NODE_KINDS[k].label}：点击添加，或拖到画布上指定位置`"
+          @dragstart="onLibDragStart($event, k)" @click="addNode(k)">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path :d="NODE_KINDS[k].icon" /></svg>
+          {{ NODE_KINDS[k].label }}
+        </button>
+        <p class="toolbox-hint muted">点击添加，或拖入画布指定位置</p>
+      </aside>
 
-      <!-- 统一触发参数编辑器：manual 与 webhook 共用一份 params，webhook tab 额外展示 JSONPath 列 -->
-      <template v-if="triggerTab === 'manual'">
-        <p class="field-hint trig-desc">运行弹窗将按此 schema 渲染表单；填写的值作为执行期变量注入，可用 <code class="mono ph-code">${key}</code> 引用。切到 Webhook tab 可为同一份参数补配 JSONPath。</p>
-        <TriggerParamsEditor :params="triggerParams" />
-      </template>
-
-      <!-- webhook 映射编辑器 -->
-      <template v-else>
-        <div class="field">
-          <div class="field-head">
-            <label class="field-label">Webhook 触发地址</label>
-            <span class="mono-tag">后端生成</span>
-          </div>
-          <div class="group-row">
-            <input class="input mono" :value="webhookUrl" :placeholder="HOOK_URL_PLACEHOLDER" readonly />
-            <button type="button" class="btn btn-sm btn-ghost" @click="copyHook" :disabled="!webhookUrl">复制</button>
-            <button type="button" class="btn btn-sm" @click="loadHook()" :disabled="hookLoading">
-              {{ hookLoading ? "获取中…" : "获取地址" }}
-            </button>
-            <button
-              type="button"
-              class="btn btn-sm"
-              :class="{ 'btn-danger-solid': resetArmed }"
-              :disabled="hookLoading"
-              :title="resetArmed ? '再次点击确认轮换密钥' : '轮换访问密钥并重新生成触发地址'"
-              @click="armReset"
-            >
-              {{ resetArmed ? "确认重置" : "重置密钥" }}
-            </button>
-          </div>
-          <p class="field-hint">
-            地址由后端生成并下发（访问密钥在 URL 末尾 <code class="mono ph-code">?secret=</code> 中），前端不再拼接；
-            复制到 GitHub / GitLab 仓库的 Webhook 配置即触发运行。重置密钥后旧地址立即失效。
-            未保存的流水线点击「获取地址」会先自动保存（不离开本页）。
-          </p>
-        </div>
-
-        <!-- 调试接收：轮询后端探针，展示最近收到的请求体并生成映射草案（纯前端会话态） -->
-        <div class="probe-panel">
-          <div class="probe-head">
-            <span class="probe-lead">
-              <span class="probe-title display">调试接收</span>
-              <span class="probe-dot" :class="{ live: probeOn && current.id, off: probeMissing }"></span>
-              <span class="probe-state muted">
-                {{ probeMissing ? "接口不可用" : probeOn ? `轮询中 · 每 ${PROBE_POLL_MS / 1000} 秒` : "已停止" }}
-              </span>
-            </span>
-            <label class="switch" title="开启后每 3 秒拉取一次最近收到的 Webhook 请求体（未保存时先自动保存）">
-              <input type="checkbox" v-model="probeOn" />
-              <span class="switch-slider"></span>
-            </label>
-          </div>
-
-          <div v-if="probePolled" class="probe-meta">
-            <span class="probe-time mono">最近触发：{{ probeTimeText || "尚无投递" }}</span>
-            <span class="probe-status mono" :class="probeStatusCls">{{ probeStatusText }}</span>
-            <button
-              type="button"
-              class="btn btn-sm btn-accent"
-              :disabled="!probeDrafts.length"
-              title="按请求体结构生成 JSONPath 映射草案，追加到下方映射表"
-              @click="appendProbeDrafts"
-            >
-              从请求生成映射草案
-            </button>
-          </div>
-          <template v-if="probeHasBody">
-            <pre class="probe-json mono">{{ probeJsonShown }}{{ probeJsonOverflow ? "\n…" : "" }}</pre>
-            <p v-if="probeJsonOverflow" class="field-hint">
-              请求体共 {{ probeJsonText.length }} 字符，为避免卡顿仅展示前 {{ PROBE_JSON_MAX }} 字符（映射草案仍按完整结构生成）。
-            </p>
-          </template>
-          <p v-else class="probe-empty muted">{{ probeEmptyText }}</p>
-        </div>
-
-        <p class="field-hint trig-desc">与 Manual 参数共用同一份配置（只填一遍）；Webhook 触发时按每行的 JSONPath 从请求体取值，取不到时回退默认值。</p>
-        <TriggerParamsEditor :params="triggerParams" show-json />
-        <p class="field-hint wh-limits">仅支持 <code class="mono">POST</code> 且 <code class="mono">Content-Type: application/json</code> 的请求体；访问密钥通过 URL 末尾 <code class="mono">?secret=</code> 校验，不支持签名头/HMAC。</p>
-      </template>
-    </section>
-
-    <!-- 画布 + 节点配置：左自由画布 / 右选中节点参数抽屉 -->
-    <section class="dag-shell rise" style="animation-delay:.1s">
-      <div class="canvas card" @dragover.prevent="onCanvasDragOver" @drop.prevent="onCanvasDrop">
+      <!-- 中区：画布（撑满） -->
+      <main class="canvas-zone" @dragover.prevent="onCanvasDragOver" @drop.prevent="onCanvasDrop">
         <div class="canvas-grd"></div>
-
         <VueFlow
           :nodes="vfNodes"
           :edges="vfEdges"
@@ -1079,7 +1048,7 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
           @edge-mouse-leave="onEdgeMouseLeave"
         >
           <template #node-dag-node="{ data }">
-            <div class="canvas-node" :data-type="data.n.type">
+            <div class="canvas-node" :data-type="data.n.type" :class="{ 'is-trigger': isTrigger(data.n) }">
               <Handle type="target" :position="Position.Left" />
               <span class="cn-ico" :style="{ color: NODE_KINDS[data.n.type].accent }">
                 <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path :d="NODE_KINDS[data.n.type].icon" /></svg>
@@ -1088,7 +1057,7 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
                 <span class="cn-name" :title="data.n.name || NODE_KINDS[data.n.type].label">{{ data.n.name || NODE_KINDS[data.n.type].label }}</span>
                 <span class="cn-id mono">{{ drainId(data.n.id) }}</span>
               </div>
-              <button class="cn-del nodrag" title="删除节点" @mousedown.stop.prevent @click.stop="removeNodeById(data.n.id)">
+              <button v-if="!isTrigger(data.n)" class="cn-del nodrag" title="删除节点" @mousedown.stop.prevent @click.stop="removeNodeById(data.n.id)">
                 <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
               </button>
               <Handle type="source" :position="Position.Right" />
@@ -1109,288 +1078,214 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
           </template>
         </VueFlow>
 
-        <div v-if="!current.spec_json.nodes.length" class="empty">
-          <svg viewBox="0 0 24 24" width="42" height="42" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M3 6h11M14 6a2.5 2.5 0 1 0 5 0 2.5 2.5 0 0 0-5 0zM3 12h11M14 12a2.5 2.5 0 1 0 5 0 2.5 2.5 0 0 0-5 0zM3 18h11M14 18a2.5 2.5 0 1 0 5 0 2.5 2.5 0 0 0-5 0z"/>
-          </svg>
-          <p class="display" style="font-size:15px;color:var(--text-2);margin:0 0 6px">画布为空</p>
-          <p>从节点库点击添加（可拖入画布指定落点），再拖拽节点右侧手柄到目标建立依赖。</p>
+        <div v-if="!current.spec_json.nodes.some((n) => !isTrigger(n))" class="empty">
+          <p class="display" style="font-size:15px;color:var(--text-2);margin:0 0 6px">从左侧节点库添加节点</p>
+          <p>点击添加，或拖入画布指定落点；节点右侧手柄拖到目标节点左侧手柄建立依赖。</p>
         </div>
-      </div>
+      </main>
 
-      <!-- 右侧节点配置抽屉 -->
-      <div class="config card" :class="{ on: !!selected }">
-        <div v-if="selected" class="cfg-inner">
-          <div class="cfg-head">
+      <!-- 悬浮参数浮窗：仅选中节点时显示，可拖动/关闭 -->
+      <Transition name="float">
+        <div v-if="selected" class="param-float" :style="floatPos" @mousedown.stop>
+          <div class="float-head" @mousedown="startFloatDrag">
             <span class="cfg-kind" :style="{ backgroundColor: NODE_KINDS[selected.type].accent }">{{ NODE_KINDS[selected.type].label }}</span>
-            <input class="cfg-name-input" v-model="selected.name" :placeholder="NODE_KINDS[selected.type].label" title="节点名称（执行详情页展示用）" />
+            <template v-if="!isTrigger(selected)">
+              <input class="cfg-name-input" v-model="selected.name" :placeholder="NODE_KINDS[selected.type].label" title="节点名称（执行详情页展示用）" />
+            </template>
             <span class="cfg-id mono">{{ drainId(selected.id) }}</span>
-            <button type="button" class="btn btn-sm btn-ghost" title="收起面板" @click="selectedId = ''">×</button>
+            <span class="toolbox-spacer"></span>
+            <button type="button" class="btn btn-sm btn-ghost" title="收起" @mousedown.stop @click="selectedId = ''">×</button>
           </div>
 
-          <div class="node-body" v-for="n in [selected]" :key="n.id">
-                <template v-if="n.type === 'shell'">
-                  <div class="field">
-                    <label class="field-label">ECI 凭证 <span class="req">*</span></label>
-                    <select class="select" v-model="n.params.credential">
-                      <option value="">选择运行载体（阿里云 ECI 凭证）…</option>
-                      <option v-for="c in eciCreds" :key="c.name" :value="c.name">{{ c.name }}</option>
-                    </select>
-                    <p class="field-hint" v-if="!eciCreds.length">暂无 ECI 凭证，请先在「凭证」中创建阿里云 ECI 类型凭证</p>
-                    <p class="field-hint" v-else>凭证只提供 AK/SK；地域与网络在下方节点内配置</p>
+          <div class="float-body">
+            <template v-if="isTrigger(selected)">
+              <div class="trig-head">
+                <span class="mono-tag">触发源</span>
+                <div class="seg-tabs">
+                  <button type="button" class="seg-tab" :class="{ active: triggerTab === 'manual' }" @click="triggerTab = 'manual'">手动触发</button>
+                  <button type="button" class="seg-tab" :class="{ active: triggerTab === 'webhook' }" @click="triggerTab = 'webhook'">Webhook 触发</button>
+                </div>
+              </div>
+
+              <!-- 统一触发参数编辑器：manual 与 webhook 共用一份 params，webhook tab 额外展示 JSONPath 列 -->
+              <template v-if="triggerTab === 'manual'">
+                <p class="field-hint trig-desc">运行弹窗将按此 schema 渲染表单；填写的值作为执行期变量注入，可用 <code class="mono ph-code">${key}</code> 引用。切到 Webhook tab 可为同一份参数补配 JSONPath。</p>
+                <TriggerParamsEditor :params="triggerParams" />
+              </template>
+
+              <!-- webhook 映射编辑器 -->
+              <template v-else>
+                <div class="field">
+                  <div class="field-head">
+                    <label class="field-label">Webhook 触发地址</label>
+                    <span class="mono-tag">后端生成</span>
                   </div>
-                  <div class="field">
-                    <label class="field-label">地域 Region <span v-if="n.params.credential" class="req">*</span></label>
-                    <select class="select" v-model="n.params.regionId">
-                      <option value="" disabled>选择运行地域</option>
-                      <option v-for="reg in ECI_REGIONS" :key="reg.id" :value="reg.id">{{ reg.label }}（{{ reg.id }}）</option>
-                      <option v-if="n.params.regionId && !ECI_REGIONS.some((r) => r.id === n.params.regionId)" :value="n.params.regionId">其他：{{ n.params.regionId }}</option>
-                    </select>
-                    <p class="field-hint">选择 ECI 实例部署地域；选择凭证+地域后自动探测可用网络与规格</p>
+                  <div class="group-row">
+                    <input class="input mono" :value="webhookUrl" :placeholder="HOOK_URL_PLACEHOLDER" readonly />
+                    <button type="button" class="btn btn-sm btn-ghost" @click="copyHook" :disabled="!webhookUrl">复制</button>
+                    <button type="button" class="btn btn-sm" @click="loadHook()" :disabled="hookLoading">
+                      {{ hookLoading ? "获取中…" : "获取地址" }}
+                    </button>
+                    <button
+                      type="button"
+                      class="btn btn-sm"
+                      :class="{ 'btn-danger-solid': resetArmed }"
+                      :disabled="hookLoading"
+                      :title="resetArmed ? '再次点击确认轮换密钥' : '轮换访问密钥并重新生成触发地址'"
+                      @click="armReset"
+                    >
+                      {{ resetArmed ? "确认重置" : "重置密钥" }}
+                    </button>
                   </div>
-                  <div class="field">
-                    <label class="field-label">交换机 VSwitch ID <span v-if="n.params.regionId" class="req">*</span></label>
-                    <input class="input mono" v-model="n.params.vswitchId" list="shell-vsw-dl" placeholder="选择或输入 vsw-…" />
-                    <datalist id="shell-vsw-dl">
-                      <option v-for="opt in netVswitches" :key="opt.id" :value="opt.id">{{ opt.name || opt.id }}{{ opt.zoneId ? " · " + opt.zoneId : "" }}</option>
-                    </datalist>
-                    <p class="field-hint">ECI 实例所在交换机，可下拉选择探测结果或手动输入</p>
-                  </div>
-                  <div class="field">
-                    <label class="field-label">安全组 ID <span v-if="n.params.regionId" class="req">*</span></label>
-                    <input class="input mono" v-model="n.params.securityGroupId" list="shell-sg-dl" placeholder="选择或输入 sg-…" />
-                    <datalist id="shell-sg-dl">
-                      <option v-for="opt in netSecurityGroups" :key="opt.id" :value="opt.id">{{ opt.name || opt.id }}</option>
-                    </datalist>
-                    <p class="field-hint">ECI 实例安全组，需放行出网以调用回调</p>
-                  </div>
-                  <section class="field net-card">
-                    <div class="net-head">
-                      <span class="net-title">网络 / 规格自动探测</span>
-                      <div class="net-acts">
-                        <template v-if="n.params.credential && n.params.regionId">
-                          <a :href="nodeCreateSecurityGroupUrl()" target="_blank" rel="noreferrer" class="btn btn-sm btn-ghost">去创建安全组 ↗</a>
-                          <a :href="nodeCreateVswitchUrl()" target="_blank" rel="noreferrer" class="btn btn-sm btn-ghost">去创建交换机 ↗</a>
-                          <button type="button" class="btn btn-sm btn-ghost" :disabled="netProbing" @click="probeNodeNetworks(n.params.credential, n.params.regionId)">⟳ 刷新</button>
-                        </template>
-                        <span v-else class="muted">选择凭证与地域后自动探测</span>
-                      </div>
-                    </div>
-                    <p v-if="netProbing" class="field-hint">正在查询该地域的交换机与安全组…</p>
-                    <p v-else-if="netError" class="field-hint warn">网络探测失败：{{ netError }}</p>
-                    <p v-else-if="netSearched" class="field-hint">已探测：{{ netVswitches.length }} 个交换机、{{ netSecurityGroups.length }} 个安全组（输入框可选）</p>
-                  </section>
-                  <div class="field">
-                    <label class="field-label">运行镜像</label>
-                    <div class="group-row">
-                      <select class="select" v-model="n.params.image">
-                        <option v-if="!images.length && !imagesLoading" :value="n.params.image" hidden></option>
-                        <option v-for="im in images" :key="im.image" :value="im.image">{{ im.name }} · {{ im.image }}</option>
-                      </select>
-                      <button type="button" class="btn btn-sm btn-ghost refresh-btn" title="加载/刷新镜像" @click="loadImages" :disabled="imagesLoading">⟳</button>
-                    </div>
-                    <p v-if="!images.length" class="field-hint">{{ imagesLoading ? "加载中…" : "暂无镜像，点击右侧刷新图标加载" }}</p>
-                  </div>
-                  <div class="field">
-                    <label class="field-label">Shell 命令</label>
-                    <textarea class="textarea mono autofit" v-model="n.params.command" rows="2" placeholder="echo 'hello cloudshuttle'" @focus="onFieldFocus($event, n, 'command')" @input="autofit"></textarea>
-                    <div class="var-insert">
-                      <div class="vi-wrap" @click.stop>
-                        <button type="button" class="btn btn-sm vi-btn" @click="toggleVarDrop(n.id + ':command')">
-                          插入变量
-                          <svg class="vi-caret" :class="{ flip: varDrop === n.id + ':command' }" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
-                        </button>
-                        <div v-if="varDrop === n.id + ':command'" class="vi-drop">
-                          <template v-for="grp in varGroups(n)" :key="grp.g">
-                            <div class="vi-group">{{ grp.g }}</div>
-                            <button v-for="it in grp.items" :key="it.k" type="button" class="vi-item" @click="insertVar(it.k, n, 'command')">
-                              <span class="vi-l1"><code class="vi-key mono">{{ "${" + it.k + "}" }}</code><span class="vi-title">{{ it.t }}</span></span>
-                              <span v-if="it.d" class="vi-desc">{{ it.d }}</span>
-                            </button>
-                          </template>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                  <div class="field">
-                    <label class="field-label">附加环境变量（K=V）</label>
-                    <div class="kv-list">
-                      <div v-for="(e, ei) in n.params.env || []" :key="ei" class="kv-row">
-                        <input class="input mono kv-key" v-model="e.k" placeholder="KEY" />
-                        <div class="kv-val">
-                          <input class="input mono" v-model="e.v" placeholder="value（可用 ${} 引用变量）" @focus="onFieldFocus($event, n, 'env:' + ei + ':v')" />
-                          <div class="var-insert">
-                            <div class="vi-wrap" @click.stop>
-                              <button type="button" class="btn btn-sm vi-btn" @click="toggleVarDrop(n.id + ':env:' + ei)">＋ 变量</button>
-                              <div v-if="varDrop === n.id + ':env:' + ei" class="vi-drop">
-                                <template v-for="grp in varGroups(n)" :key="grp.g">
-                                  <div class="vi-group">{{ grp.g }}</div>
-                                  <button v-for="it in grp.items" :key="it.k" type="button" class="vi-item" @click="insertVar(it.k, n, 'env:' + ei + ':v')">
-                                    <span class="vi-l1"><code class="vi-key mono">{{ "${" + it.k + "}" }}</code><span class="vi-title">{{ it.t }}</span></span>
-                                    <span v-if="it.d" class="vi-desc">{{ it.d }}</span>
-                                  </button>
-                                </template>
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                        <button type="button" class="btn btn-sm btn-danger" title="删除" @click="n.params.env.splice(ei, 1)">×</button>
-                      </div>
-                      <button type="button" class="btn btn-sm btn-ghost" @click="(n.params.env = n.params.env || []).push({ k: '', v: '' })">＋ 添加环境变量</button>
-                    </div>
-                  </div>
-                  <div class="field">
-                    <div class="field-head">
-                      <label class="field-label">输出变量（K=V 写回，供后继节点引用）</label>
-                      <button type="button" class="btn btn-sm btn-ghost" title="从 Shell 命令中识别写回 $CLOUDSHUTTLE_OUT_FILE 的变量" @click="autoProbeOutputs(n)">↻ 从命令提取</button>
-                    </div>
-                    <TriggerParamsEditor :params="n.params.outputs ?? (n.params.outputs = [])" :show-required="false" />
-                    <p class="field-hint">脚本内可用 <code class="mono ph-code">echo "key=value" >> "$CLOUDSHUTTLE_OUT_FILE"</code> 写回；未声明 key 时默认输出单变量 <code class="mono ph-code">step_out</code>。</p>
-                  </div>
-                  <div class="field">
-                    <label class="field-label">运行规格</label>
-                    <div class="approval-grid">
-                      <div class="sub-field">
-                        <label class="sub-label">CPU（vCPU）</label>
-                        <select class="select" v-model="n.params.cpu" @change="normMemFor(n)">
-                          <option v-for="c in cpuChoices" :key="c" :value="c">{{ c }}</option>
-                        </select>
-                      </div>
-                      <div class="sub-field">
-                        <label class="sub-label">内存（GiB）</label>
-                        <select class="select" v-model="n.params.memory">
-                          <template v-for="mc in memChoicesOf(n.params.cpu)" :key="mc.memory">
-                            <option :value="mc.memory">{{ mc.memory }} {{ priceSuffix(mc) }}</option>
-                          </template>
-                        </select>
-                      </div>
-                    </div>
-                    <p class="field-hint" :class="{ warn: eciSpecError }">
-                      {{ eciSpecLoading
-                        ? "正在从阿里云探测可购规格与目录价…"
-                        : (eciSpecError
-                            ? `规格探测失败，已回退预设：${eciSpecError}`
-                            : n.params.credential && n.params.regionId
-                              ? "已加载该地域可购规格与目录价（来自阿里云接口）；价格单位 ¥/小时"
-                              : "选择 ECI 凭证与地域后自动加载规格与目录价") }}
-                    </p>
-                  </div>
-                  <div class="field">
-                    <label class="field-label">超时（秒）</label>
-                    <input class="input mono" v-model.number="n.params.timeout" placeholder="300" />
-                    <p class="field-hint">容器运行超时上限，到期未完成会被强制终止，单位秒</p>
-                  </div>
-                </template>
-                <template v-else-if="n.type === 'sql'">
-                  <div class="field">
-                    <label class="field-label">数据库凭证 <span class="req">*</span></label>
-                    <select class="select" v-model="n.params.credential">
-                      <option value="">选择数据库连接凭证…</option>
-                      <option v-for="c in sqlCreds" :key="c.name" :value="c.name">{{ c.name }}</option>
-                    </select>
-                    <p class="field-hint" v-if="!sqlCreds.length">暂无数据库凭证，请先在「凭证」中创建 MySQL 或 PostgreSQL 类型凭证</p>
-                    <p class="field-hint" v-else>凭证提供连接信息；TLS/字符集等额外参数在凭证里配置</p>
-                  </div>
-                  <div class="field">
-                    <label class="field-label">SQL 语句（在一个事务内逐条执行）<span class="req">*</span></label>
-                    <div v-for="(stmt, i) in n.params.statements" :key="i" class="sql-stmt-row">
-                      <textarea class="textarea mono" v-model="n.params.statements[i]" rows="3" placeholder="支持 ${变量}，引用前驱节点输出或触发参数"></textarea>
-                      <button type="button" class="btn btn-sm btn-danger" @click="n.params.statements.splice(i, 1)">删</button>
-                    </div>
-                    <div class="sql-actions">
-                      <button type="button" class="btn btn-sm btn-ghost" @click="n.params.statements.push('')">＋添加一条语句</button>
-                    </div>
-                  </div>
-                  <div class="field">
-                    <label class="field-label">输出变量</label>
-                    <div v-for="(o, i) in n.params.outputs" :key="i" class="sql-out-row">
-                      <input class="input mono" v-model="o.key" placeholder="变量 key" />
-                      <input class="input mono" v-model="o.column" placeholder="列名（可选，绑最后结果集首行）" />
-                      <button type="button" class="btn btn-sm btn-danger" @click="n.params.outputs.splice(i, 1)">删</button>
-                    </div>
-                    <div class="sql-actions">
-                      <button type="button" class="btn btn-sm btn-ghost" @click="n.params.outputs.push({ key: '', column: '' })">＋添加输出</button>
-                    </div>
-                    <p class="field-hint">填写列名时按该列取值；不填列名则输出最后一条语句的影响/返回行数</p>
-                  </div>
-                  <div class="field">
-                    <label class="field-label">超时（秒，可选）</label>
-                    <input class="input mono" type="number" v-model.number="n.params.timeout" placeholder="如 60" />
-                    <p class="field-hint">后端直连执行；超出视为失败并回滚，防止长 SQL 阻塞请求</p>
-                  </div>
-                </template>
-                <template v-else>
-                  <div class="approval-grid">
-                    <div class="field">
-                      <label class="field-label">钉钉机器人</label>
-                      <div class="group-row">
-                        <div class="cs-select" @click.stop>
-                          <button type="button" class="cs-trigger" :class="{ open: robotOpenId === n.id }" @click.stop="toggleRobotDrop(n.id)" :disabled="credsLoading">
-                            <template v-if="selectedCred(n)">
-                              <img v-if="selectedCred(n)?.display_meta?.appIcon" :src="selectedCred(n).display_meta.appIcon" class="cs-ico" alt="" />
-                              <span v-else class="cs-badge" :style="{ color: isCorpRobot(n.params.robot) ? 'var(--ember)' : '' }">{{ KIND_BADGE[selectedCred(n).kind] }}</span>
-                              <span class="cs-trigger-text">
-                                <span class="cs-title">{{ credTitle(selectedCred(n)) }}</span>
-                                <span class="cs-sub">{{ credSub(selectedCred(n)) }}</span>
-                              </span>
-                            </template>
-                            <span v-else class="cs-placeholder">{{ credsLoading ? "加载中…" : "请选择机器人" }}</span>
-                            <svg class="cs-caret" :class="{ flip: robotOpenId === n.id }" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
-                          </button>
-                          <div v-if="robotOpenId === n.id" class="cs-drop">
-                            <div
-                              v-for="c in robotCreds"
-                              :key="c.id"
-                              class="cs-opt"
-                              :class="{ active: n.params.robot === c.name }"
-                              @click="pickRobot(n, c.name)"
-                            >
-                              <img v-if="c.display_meta?.appIcon" :src="c.display_meta.appIcon" class="cs-opt-ico" alt="" />
-                              <span v-else class="cs-opt-badge">{{ KIND_BADGE[c.kind] || "凭证" }}</span>
-                              <span class="cs-opt-text">
-                                <span class="cs-opt-title">{{ credTitle(c) }}</span>
-                                <span class="cs-opt-sub">{{ credSub(c) }}</span>
-                              </span>
-                              <svg v-if="n.params.robot === c.name" class="cs-check" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
-                            </div>
-                            <div v-if="!robotCreds.length && !credsLoading" class="cs-empty">暂无审批机器人，点右侧刷新图标加载</div>
-                          </div>
-                        </div>
-                        <button type="button" class="btn btn-sm btn-ghost refresh-btn" title="加载/刷新机器人" @click="loadCreds" :disabled="credsLoading">⟳</button>
-                      </div>
-                      <p v-if="!robotCreds.length" class="field-hint">{{ credsLoading ? "加载中…" : "暂无审批机器人，点击右侧刷新图标加载" }}</p>
-                    </div>
+                  <p class="field-hint">
+                    地址由后端生成并下发（访问密钥在 URL 末尾 <code class="mono ph-code">?secret=</code> 中），前端不再拼接；
+                    复制到 GitHub / GitLab 仓库的 Webhook 配置即触发运行。重置密钥后旧地址立即失效。
+                    未保存的流水线点击「获取地址」会先自动保存（不离开本页）。
+                  </p>
+                </div>
+
+                <!-- 调试接收：轮询后端探针，展示最近收到的请求体并生成映射草案（纯前端会话态） -->
+                <div class="probe-panel">
+                  <div class="probe-head">
+                    <span class="probe-lead">
+                      <span class="probe-title display">调试接收</span>
+                      <span class="probe-dot" :class="{ live: probeOn && current.id, off: probeMissing }"></span>
+                      <span class="probe-state muted">
+                        {{ probeMissing ? "接口不可用" : probeOn ? `轮询中 · 每 ${PROBE_POLL_MS / 1000} 秒` : "已停止" }}
+                      </span>
+                    </span>
+                    <label class="switch" title="开启后每 3 秒拉取一次最近收到的 Webhook 请求体（未保存时先自动保存）">
+                      <input type="checkbox" v-model="probeOn" />
+                      <span class="switch-slider"></span>
+                    </label>
                   </div>
 
-                  <div v-if="isCorpRobot(n.params.robot)" class="approval-grid" style="margin-top:14px">
-                    <div class="field" style="grid-column:1/-1">
-                      <div class="field-head">
-                        <label class="field-label">审批卡片正文（Markdown）</label>
-                        <div class="card-tabs">
-                          <button type="button" class="card-tab" :class="{ active: cardModeOf(n) === 'edit' }" @click="cardModes[n.id] = 'edit'">编辑</button>
-                          <button type="button" class="card-tab" :class="{ active: cardModeOf(n) === 'preview' }" @click="cardModes[n.id] = 'preview'">预览</button>
-                          <button type="button" class="btn btn-sm" title="还原为内置默认模板" @click="resetApprovalMsg(n)">恢复默认</button>
-                        </div>
+                  <div v-if="probePolled" class="probe-meta">
+                    <span class="probe-time mono">最近触发：{{ probeTimeText || "尚无投递" }}</span>
+                    <span class="probe-status mono" :class="probeStatusCls">{{ probeStatusText }}</span>
+                    <button
+                      type="button"
+                      class="btn btn-sm btn-accent"
+                      :disabled="!probeDrafts.length"
+                      title="按请求体结构生成 JSONPath 映射草案，追加到下方映射表"
+                      @click="appendProbeDrafts"
+                    >
+                      从请求生成映射草案
+                    </button>
+                  </div>
+                  <template v-if="probeHasBody">
+                    <pre class="probe-json mono">{{ probeJsonShown }}{{ probeJsonOverflow ? "\n…" : "" }}</pre>
+                    <p v-if="probeJsonOverflow" class="field-hint">
+                      请求体共 {{ probeJsonText.length }} 字符，为避免卡顿仅展示前 {{ PROBE_JSON_MAX }} 字符（映射草案仍按完整结构生成）。
+                    </p>
+                  </template>
+                  <p v-else class="probe-empty muted">{{ probeEmptyText }}</p>
+                </div>
+
+                <p class="field-hint trig-desc">与 Manual 参数共用同一份配置（只填一遍）；Webhook 触发时按每行的 JSONPath 从请求体取值，取不到时回退默认值。</p>
+                <TriggerParamsEditor :params="triggerParams" show-json />
+                <p class="field-hint wh-limits">仅支持 <code class="mono">POST</code> 且 <code class="mono">Content-Type: application/json</code> 的请求体；访问密钥通过 URL 末尾 <code class="mono">?secret=</code> 校验，不支持签名头/HMAC。</p>
+              </template>
+            </template>
+
+            <div v-else v-for="n in [selected]" :key="n.id">
+              <template v-if="n.type === 'shell'">
+                <div class="field">
+                  <label class="field-label">ECI 凭证 <span class="req">*</span></label>
+                  <select class="select" v-model="n.params.credential">
+                    <option value="">选择运行载体（阿里云 ECI 凭证）…</option>
+                    <option v-for="c in eciCreds" :key="c.name" :value="c.name">{{ c.name }}</option>
+                  </select>
+                  <p class="field-hint" v-if="!eciCreds.length">暂无 ECI 凭证，请先在「凭证」中创建阿里云 ECI 类型凭证</p>
+                  <p class="field-hint" v-else>凭证只提供 AK/SK；地域与网络在下方节点内配置</p>
+                </div>
+                <div class="field">
+                  <label class="field-label">地域 Region <span v-if="n.params.credential" class="req">*</span></label>
+                  <select class="select" v-model="n.params.regionId">
+                    <option value="" disabled>选择运行地域</option>
+                    <option v-for="reg in ECI_REGIONS" :key="reg.id" :value="reg.id">{{ reg.label }}（{{ reg.id }}）</option>
+                    <option v-if="n.params.regionId && !ECI_REGIONS.some((r) => r.id === n.params.regionId)" :value="n.params.regionId">其他：{{ n.params.regionId }}</option>
+                  </select>
+                  <p class="field-hint">选择 ECI 实例部署地域；选择凭证+地域后自动探测可用网络与规格</p>
+                </div>
+                <div class="field">
+                  <label class="field-label">交换机 VSwitch ID <span v-if="n.params.regionId" class="req">*</span></label>
+                  <input class="input mono" v-model="n.params.vswitchId" list="shell-vsw-dl" placeholder="选择或输入 vsw-…" />
+                  <datalist id="shell-vsw-dl">
+                    <option v-for="opt in netVswitches" :key="opt.id" :value="opt.id">{{ opt.name || opt.id }}{{ opt.zoneId ? " · " + opt.zoneId : "" }}</option>
+                  </datalist>
+                  <p class="field-hint">ECI 实例所在交换机，可下拉选择探测结果或手动输入</p>
+                </div>
+                <div class="field">
+                  <label class="field-label">安全组 ID <span v-if="n.params.regionId" class="req">*</span></label>
+                  <input class="input mono" v-model="n.params.securityGroupId" list="shell-sg-dl" placeholder="选择或输入 sg-…" />
+                  <datalist id="shell-sg-dl">
+                    <option v-for="opt in netSecurityGroups" :key="opt.id" :value="opt.id">{{ opt.name || opt.id }}</option>
+                  </datalist>
+                  <p class="field-hint">ECI 实例安全组，需放行出网以调用回调</p>
+                </div>
+                <section class="field net-card">
+                  <div class="net-head">
+                    <span class="net-title">网络 / 规格自动探测</span>
+                    <div class="net-acts">
+                      <template v-if="n.params.credential && n.params.regionId">
+                        <a :href="nodeCreateSecurityGroupUrl()" target="_blank" rel="noreferrer" class="btn btn-sm btn-ghost">去创建安全组 ↗</a>
+                        <a :href="nodeCreateVswitchUrl()" target="_blank" rel="noreferrer" class="btn btn-sm btn-ghost">去创建交换机 ↗</a>
+                        <button type="button" class="btn btn-sm btn-ghost" :disabled="netProbing" @click="probeNodeNetworks(n.params.credential, n.params.regionId)">⟳ 刷新</button>
+                      </template>
+                      <span v-else class="muted">选择凭证与地域后自动探测</span>
+                    </div>
+                  </div>
+                  <p v-if="netProbing" class="field-hint">正在查询该地域的交换机与安全组…</p>
+                  <p v-else-if="netError" class="field-hint warn">网络探测失败：{{ netError }}</p>
+                  <p v-else-if="netSearched" class="field-hint">已探测：{{ netVswitches.length }} 个交换机、{{ netSecurityGroups.length }} 个安全组（输入框可选）</p>
+                </section>
+                <div class="field">
+                  <label class="field-label">运行镜像</label>
+                  <div class="group-row">
+                    <select class="select" v-model="n.params.image">
+                      <option v-if="!images.length && !imagesLoading" :value="n.params.image" hidden></option>
+                      <option v-for="im in images" :key="im.image" :value="im.image">{{ im.name }} · {{ im.image }}</option>
+                    </select>
+                    <button type="button" class="btn btn-sm btn-ghost refresh-btn" title="加载/刷新镜像" @click="loadImages" :disabled="imagesLoading">⟳</button>
+                  </div>
+                  <p v-if="!images.length" class="field-hint">{{ imagesLoading ? "加载中…" : "暂无镜像，点击右侧刷新图标加载" }}</p>
+                </div>
+                <div class="field">
+                  <label class="field-label">Shell 命令</label>
+                  <textarea class="textarea mono autofit" v-model="n.params.command" rows="2" placeholder="echo 'hello cloudshuttle'" @focus="onFieldFocus($event, n, 'command')" @input="autofit"></textarea>
+                  <div class="var-insert">
+                    <div class="vi-wrap" @click.stop>
+                      <button type="button" class="btn btn-sm vi-btn" @click="toggleVarDrop(n.id + ':command')">
+                        插入变量
+                        <svg class="vi-caret" :class="{ flip: varDrop === n.id + ':command' }" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+                      </button>
+                      <div v-if="varDrop === n.id + ':command'" class="vi-drop">
+                        <template v-for="grp in varGroups(n)" :key="grp.g">
+                          <div class="vi-group">{{ grp.g }}</div>
+                          <button v-for="it in grp.items" :key="it.k" type="button" class="vi-item" @click="insertVar(it.k, n, 'command')">
+                            <span class="vi-l1"><code class="vi-key mono">{{ "${" + it.k + "}" }}</code><span class="vi-title">{{ it.t }}</span></span>
+                            <span v-if="it.d" class="vi-desc">{{ it.d }}</span>
+                          </button>
+                        </template>
                       </div>
-                      <template v-if="cardModeOf(n) === 'edit'">
-                        <textarea
-                          class="textarea mono card-body autofit"
-                          v-model="n.params.message"
-                          rows="4"
-                          placeholder="编写审批卡片正文（支持 Markdown），点击下方变量标签可插入。"
-                          @focus="onFieldFocus($event, n, 'message')"
-                          @input="autofit"
-                        ></textarea>
+                    </div>
+                  </div>
+                </div>
+                <div class="field">
+                  <label class="field-label">附加环境变量（K=V）</label>
+                  <div class="kv-list">
+                    <div v-for="(e, ei) in n.params.env || []" :key="ei" class="kv-row">
+                      <input class="input mono kv-key" v-model="e.k" placeholder="KEY" />
+                      <div class="kv-val">
+                        <input class="input mono" v-model="e.v" placeholder="value（可用 ${} 引用变量）" @focus="onFieldFocus($event, n, 'env:' + ei + ':v')" />
                         <div class="var-insert">
                           <div class="vi-wrap" @click.stop>
-                            <button type="button" class="btn btn-sm vi-btn" @click="toggleVarDrop(n.id + ':message')">
-                              插入变量
-                              <svg class="vi-caret" :class="{ flip: varDrop === n.id + ':message' }" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
-                            </button>
-                            <div v-if="varDrop === n.id + ':message'" class="vi-drop">
+                            <button type="button" class="btn btn-sm vi-btn" @click="toggleVarDrop(n.id + ':env:' + ei)">＋ 变量</button>
+                            <div v-if="varDrop === n.id + ':env:' + ei" class="vi-drop">
                               <template v-for="grp in varGroups(n)" :key="grp.g">
                                 <div class="vi-group">{{ grp.g }}</div>
-                                <button v-for="it in grp.items" :key="it.k" type="button" class="vi-item" @click="insertVar(it.k, n, 'message')">
+                                <button v-for="it in grp.items" :key="it.k" type="button" class="vi-item" @click="insertVar(it.k, n, 'env:' + ei + ':v')">
                                   <span class="vi-l1"><code class="vi-key mono">{{ "${" + it.k + "}" }}</code><span class="vi-title">{{ it.t }}</span></span>
                                   <span v-if="it.d" class="vi-desc">{{ it.d }}</span>
                                 </button>
@@ -1398,73 +1293,235 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
                             </div>
                           </div>
                         </div>
-                      </template>
-                      <div v-else class="md-render" v-html="approvalHtml(n)"></div>
+                      </div>
+                      <button type="button" class="btn btn-sm btn-danger" title="删除" @click="n.params.env.splice(ei, 1)">×</button>
                     </div>
-
-                    <div class="field" style="grid-column:1/-1">
-                      <div class="field-head">
-                        <label class="field-label">发送成员</label>
-                        <button type="button" class="btn btn-sm" @click="openOrg(n)">＋ 从通讯录选择</button>
-                      </div>
-                      <div class="member-list">
-                        <div v-for="(m, i) in displayMembers(n)" :key="i" class="member-row">
-                          <span v-if="m.dept" class="member-dept">{{ m.dept }}</span>
-                          <span class="member-name">{{ m.name }}</span>
-                          <button v-if="m.userId" type="button" class="member-del" title="移除该成员" @click="removeMember(n, i)">×</button>
-                        </div>
-                        <div v-if="!displayMembers(n).length" class="empty-tip muted">未选择审批人，点右上「从通讯录选择」按部门树勾选。</div>
-                      </div>
+                    <button type="button" class="btn btn-sm btn-ghost" @click="(n.params.env = n.params.env || []).push({ k: '', v: '' })">＋ 添加环境变量</button>
+                  </div>
+                </div>
+                <div class="field">
+                  <div class="field-head">
+                    <label class="field-label">输出变量（K=V 写回，供后继节点引用）</label>
+                    <button type="button" class="btn btn-sm btn-ghost" title="从 Shell 命令中识别写回 $CLOUDSHUTTLE_OUT_FILE 的变量" @click="autoProbeOutputs(n)">↻ 从命令提取</button>
+                  </div>
+                  <TriggerParamsEditor :params="n.params.outputs ?? (n.params.outputs = [])" :show-required="false" />
+                  <p class="field-hint">脚本内可用 <code class="mono ph-code">echo "key=value" >> "$CLOUDSHUTTLE_OUT_FILE"</code> 写回；未声明 key 时默认输出单变量 <code class="mono ph-code">step_out</code>。</p>
+                </div>
+                <div class="field">
+                  <label class="field-label">运行规格</label>
+                  <div class="approval-grid">
+                    <div class="sub-field">
+                      <label class="sub-label">CPU（vCPU）</label>
+                      <select class="select" v-model="n.params.cpu" @change="normMemFor(n)">
+                        <option v-for="c in cpuChoices" :key="c" :value="c">{{ c }}</option>
+                      </select>
+                    </div>
+                    <div class="sub-field">
+                      <label class="sub-label">内存（GiB）</label>
+                      <select class="select" v-model="n.params.memory">
+                        <template v-for="mc in memChoicesOf(n.params.cpu)" :key="mc.memory">
+                          <option :value="mc.memory">{{ mc.memory }} {{ priceSuffix(mc) }}</option>
+                        </template>
+                      </select>
                     </div>
                   </div>
-                </template>
-              </div>
+                  <p class="field-hint" :class="{ warn: eciSpecError }">
+                    {{ eciSpecLoading
+                      ? "正在从阿里云探测可购规格与目录价…"
+                      : (eciSpecError
+                          ? `规格探测失败，已回退预设：${eciSpecError}`
+                          : n.params.credential && n.params.regionId
+                            ? "已加载该地域可购规格与目录价（来自阿里云接口）；价格单位 ¥/小时"
+                            : "选择 ECI 凭证与地域后自动加载规格与目录价") }}
+                  </p>
+                </div>
+                <div class="field">
+                  <label class="field-label">超时（秒）</label>
+                  <input class="input mono" v-model.number="n.params.timeout" placeholder="300" />
+                  <p class="field-hint">容器运行超时上限，到期未完成会被强制终止，单位秒</p>
+                </div>
+              </template>
+              <template v-else-if="n.type === 'sql'">
+                <div class="field">
+                  <label class="field-label">数据库凭证 <span class="req">*</span></label>
+                  <select class="select" v-model="n.params.credential">
+                    <option value="">选择数据库连接凭证…</option>
+                    <option v-for="c in sqlCreds" :key="c.name" :value="c.name">{{ c.name }}</option>
+                  </select>
+                  <p class="field-hint" v-if="!sqlCreds.length">暂无数据库凭证，请先在「凭证」中创建 MySQL 或 PostgreSQL 类型凭证</p>
+                  <p class="field-hint" v-else>凭证提供连接信息；TLS/字符集等额外参数在凭证里配置</p>
+                </div>
+                <div class="field">
+                  <label class="field-label">SQL 语句（在一个事务内逐条执行）<span class="req">*</span></label>
+                  <div v-for="(stmt, i) in n.params.statements" :key="i" class="sql-stmt-row">
+                    <textarea class="textarea mono" v-model="n.params.statements[i]" rows="3" placeholder="支持 ${变量}，引用前驱节点输出或触发参数"></textarea>
+                    <button type="button" class="btn btn-sm btn-danger" @click="n.params.statements.splice(i, 1)">删</button>
+                  </div>
+                  <div class="sql-actions">
+                    <button type="button" class="btn btn-sm btn-ghost" @click="n.params.statements.push('')">＋添加一条语句</button>
+                  </div>
+                </div>
+                <div class="field">
+                  <label class="field-label">输出变量</label>
+                  <div v-for="(o, i) in n.params.outputs" :key="i" class="sql-out-row">
+                    <input class="input mono" v-model="o.key" placeholder="变量 key" />
+                    <input class="input mono" v-model="o.column" placeholder="列名（可选，绑最后结果集首行）" />
+                    <button type="button" class="btn btn-sm btn-danger" @click="n.params.outputs.splice(i, 1)">删</button>
+                  </div>
+                  <div class="sql-actions">
+                    <button type="button" class="btn btn-sm btn-ghost" @click="n.params.outputs.push({ key: '', column: '' })">＋添加输出</button>
+                  </div>
+                  <p class="field-hint">填写列名时按该列取值；不填列名则输出最后一条语句的影响/返回行数</p>
+                </div>
+                <div class="field">
+                  <label class="field-label">超时（秒，可选）</label>
+                  <input class="input mono" type="number" v-model.number="n.params.timeout" placeholder="如 60" />
+                  <p class="field-hint">后端直连执行；超出视为失败并回滚，防止长 SQL 阻塞请求</p>
+                </div>
+              </template>
+              <template v-else>
+                <div class="approval-grid">
+                  <div class="field">
+                    <label class="field-label">钉钉机器人</label>
+                    <div class="group-row">
+                      <div class="cs-select" @click.stop>
+                        <button type="button" class="cs-trigger" :class="{ open: robotOpenId === n.id }" @click.stop="toggleRobotDrop(n.id)" :disabled="credsLoading">
+                          <template v-if="selectedCred(n)">
+                            <img v-if="selectedCred(n)?.display_meta?.appIcon" :src="selectedCred(n).display_meta.appIcon" class="cs-ico" alt="" />
+                            <span v-else class="cs-badge" :style="{ color: isCorpRobot(n.params.robot) ? 'var(--ember)' : '' }">{{ KIND_BADGE[selectedCred(n).kind] }}</span>
+                            <span class="cs-trigger-text">
+                              <span class="cs-title">{{ credTitle(selectedCred(n)) }}</span>
+                              <span class="cs-sub">{{ credSub(selectedCred(n)) }}</span>
+                            </span>
+                          </template>
+                          <span v-else class="cs-placeholder">{{ credsLoading ? "加载中…" : "请选择机器人" }}</span>
+                          <svg class="cs-caret" :class="{ flip: robotOpenId === n.id }" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+                        </button>
+                        <div v-if="robotOpenId === n.id" class="cs-drop">
+                          <div
+                            v-for="c in robotCreds"
+                            :key="c.id"
+                            class="cs-opt"
+                            :class="{ active: n.params.robot === c.name }"
+                            @click="pickRobot(n, c.name)"
+                          >
+                            <img v-if="c.display_meta?.appIcon" :src="c.display_meta.appIcon" class="cs-opt-ico" alt="" />
+                            <span v-else class="cs-opt-badge">{{ KIND_BADGE[c.kind] || "凭证" }}</span>
+                            <span class="cs-opt-text">
+                              <span class="cs-opt-title">{{ credTitle(c) }}</span>
+                              <span class="cs-opt-sub">{{ credSub(c) }}</span>
+                            </span>
+                            <svg v-if="n.params.robot === c.name" class="cs-check" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+                          </div>
+                          <div v-if="!robotCreds.length && !credsLoading" class="cs-empty">暂无审批机器人，点右侧刷新图标加载</div>
+                        </div>
+                      </div>
+                      <button type="button" class="btn btn-sm btn-ghost refresh-btn" title="加载/刷新机器人" @click="loadCreds" :disabled="credsLoading">⟳</button>
+                    </div>
+                    <p v-if="!robotCreds.length" class="field-hint">{{ credsLoading ? "加载中…" : "暂无审批机器人，点击右侧刷新图标加载" }}</p>
+                  </div>
+                </div>
+
+                <div v-if="isCorpRobot(n.params.robot)" class="approval-grid" style="margin-top:14px">
+                  <div class="field" style="grid-column:1/-1">
+                    <div class="field-head">
+                      <label class="field-label">审批卡片正文（Markdown）</label>
+                      <div class="card-tabs">
+                        <button type="button" class="card-tab" :class="{ active: cardModeOf(n) === 'edit' }" @click="cardModes[n.id] = 'edit'">编辑</button>
+                        <button type="button" class="card-tab" :class="{ active: cardModeOf(n) === 'preview' }" @click="cardModes[n.id] = 'preview'">预览</button>
+                        <button type="button" class="btn btn-sm" title="还原为内置默认模板" @click="resetApprovalMsg(n)">恢复默认</button>
+                      </div>
+                    </div>
+                    <template v-if="cardModeOf(n) === 'edit'">
+                      <textarea
+                        class="textarea mono card-body autofit"
+                        v-model="n.params.message"
+                        rows="4"
+                        placeholder="编写审批卡片正文（支持 Markdown），点击下方变量标签可插入。"
+                        @focus="onFieldFocus($event, n, 'message')"
+                        @input="autofit"
+                      ></textarea>
+                      <div class="var-insert">
+                        <div class="vi-wrap" @click.stop>
+                          <button type="button" class="btn btn-sm vi-btn" @click="toggleVarDrop(n.id + ':message')">
+                            插入变量
+                            <svg class="vi-caret" :class="{ flip: varDrop === n.id + ':message' }" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+                          </button>
+                          <div v-if="varDrop === n.id + ':message'" class="vi-drop">
+                            <template v-for="grp in varGroups(n)" :key="grp.g">
+                              <div class="vi-group">{{ grp.g }}</div>
+                              <button v-for="it in grp.items" :key="it.k" type="button" class="vi-item" @click="insertVar(it.k, n, 'message')">
+                                <span class="vi-l1"><code class="vi-key mono">{{ "${" + it.k + "}" }}</code><span class="vi-title">{{ it.t }}</span></span>
+                                <span v-if="it.d" class="vi-desc">{{ it.d }}</span>
+                              </button>
+                            </template>
+                          </div>
+                        </div>
+                      </div>
+                    </template>
+                    <div v-else class="md-render" v-html="approvalHtml(n)"></div>
+                  </div>
+
+                  <div class="field" style="grid-column:1/-1">
+                    <div class="field-head">
+                      <label class="field-label">发送成员</label>
+                      <button type="button" class="btn btn-sm" @click="openOrg(n)">＋ 从通讯录选择</button>
+                    </div>
+                    <div class="member-list">
+                      <div v-for="(m, i) in displayMembers(n)" :key="i" class="member-row">
+                        <span v-if="m.dept" class="member-dept">{{ m.dept }}</span>
+                        <span class="member-name">{{ m.name }}</span>
+                        <button v-if="m.userId" type="button" class="member-del" title="移除该成员" @click="removeMember(n, i)">×</button>
+                      </div>
+                      <div v-if="!displayMembers(n).length" class="empty-tip muted">未选择审批人，点右上「从通讯录选择」按部门树勾选。</div>
+                    </div>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </div>
         </div>
-        <div v-else class="cfg-ph muted">
-          <svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v13M9 8l3 3 3-3M4 21h16"/></svg>
-          <p>点击画布节点，在右侧编辑该节点的参数</p>
-        </div>
-      </div>
-    </section>
+      </Transition>
+    </div>
 
     <!-- 通讯录成员选择器 -->
     <div v-if="orgOpen" class="org-mask" @click.self="orgOpen = false">
-        <div class="org-panel">
-          <div class="org-head">
-            <strong>从通讯录选择成员</strong>
-            <button type="button" class="btn btn-ghost" @click="orgOpen = false">×</button>
+      <div class="org-panel">
+        <div class="org-head">
+          <strong>从通讯录选择成员</strong>
+          <button type="button" class="btn btn-ghost" @click="orgOpen = false">×</button>
+        </div>
+        <div v-if="orgLoading" class="org-body muted">加载中…</div>
+        <div v-else class="org-body">
+          <div class="org-crumb">
+            <a @click="orgGotoIndex(0); orgPath = []; orgLoad()">根部门</a>
+            <template v-for="(p, i) in orgPath" :key="p.id">
+              <span class="org-slash">/</span><a @click="orgPath=orgPath.slice(0,i+1); orgLoad()">{{ p.name }}</a>
+            </template>
           </div>
-          <div v-if="orgLoading" class="org-body muted">加载中…</div>
-          <div v-else class="org-body">
-            <div class="org-crumb">
-              <a @click="orgGotoIndex(0); orgPath = []; orgLoad()">根部门</a>
-              <template v-for="(p, i) in orgPath" :key="p.id">
-                <span class="org-slash">/</span><a @click="orgPath=orgPath.slice(0,i+1); orgLoad()">{{ p.name }}</a>
-              </template>
-            </div>
-            <div v-if="orgDepts.length" class="org-depts">
-              <div v-for="d in orgDepts" :key="d.id" class="org-dept" @click="orgGoto(d)">
-                📁&nbsp;{{ d.name }}
-              </div>
-            </div>
-            <div class="org-users">
-              <label v-for="u in orgUsers" :key="u.userId" class="org-user">
-                <input type="checkbox" :checked="orgSel.has(u.userId)" @change="orgToggle(u)" />
-                <span>{{ u.name }}</span>
-                <span class="muted">{{ u.userId }}</span>
-              </label>
-              <div v-if="!orgUsers.length" class="muted org-empty">该部门暂无成员</div>
+          <div v-if="orgDepts.length" class="org-depts">
+            <div v-for="d in orgDepts" :key="d.id" class="org-dept" @click="orgGoto(d)">
+              📁&nbsp;{{ d.name }}
             </div>
           </div>
-          <div class="org-foot">
-            <span class="org-sel">已选 {{ orgSel.size }}：{{ [...orgSel.values()].map((v) => v.name).join("、") || "—" }}</span>
-            <div>
-              <button type="button" class="btn btn-ghost" @click="orgOpen = false">取消</button>
-              <button type="button" class="btn" @click="orgConfirm">确认</button>
-            </div>
+          <div class="org-users">
+            <label v-for="u in orgUsers" :key="u.userId" class="org-user">
+              <input type="checkbox" :checked="orgSel.has(u.userId)" @change="orgToggle(u)" />
+              <span>{{ u.name }}</span>
+              <span class="muted">{{ u.userId }}</span>
+            </label>
+            <div v-if="!orgUsers.length" class="muted org-empty">该部门暂无成员</div>
+          </div>
+        </div>
+        <div class="org-foot">
+          <span class="org-sel">已选 {{ orgSel.size }}：{{ [...orgSel.values()].map((v) => v.name).join("、") || "—" }}</span>
+          <div>
+            <button type="button" class="btn btn-ghost" @click="orgOpen = false">取消</button>
+            <button type="button" class="btn" @click="orgConfirm">确认</button>
           </div>
         </div>
       </div>
+    </div>
 
     <!-- 运行弹窗（manual 表单） -->
     <RunPipelineModal ref="runModal" />
@@ -1472,32 +1529,36 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
 </template>
 
 <style scoped>
-.page { display: flex; flex-direction: column; gap: 18px; max-width: 1280px; width: 100%; margin: 0 auto; }
-.page-head {
-  display: flex; align-items: flex-end; justify-content: space-between; gap: 16px;
-  padding-bottom: 2px; flex-wrap: wrap;
+.editor-page { height: 100%; display: flex; flex-direction: column; gap: 12px; min-height: 0; width: 100%; }
+.topbar {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
+  padding: 10px 14px; border-bottom: 1px solid var(--line);
 }
-.title-wrap { display: flex; align-items: flex-end; gap: 14px; }
-.back-btn { flex: 0 0 auto; }
-.head-title { margin: 0; font-size: 26px; font-weight: 700; letter-spacing: 0.01em; }
-.head-sub { margin: 6px 0 0; font-size: 13.5px; }
-.head-actions { display: flex; gap: 8px; align-items: center; }
-
-.name-bar { display: flex; gap: 24px; align-items: flex-end; padding: 18px 20px; }
-.name-field { flex: 1; margin-bottom: 0; }
-.counter { font-size: 22px; font-weight: 600; color: var(--accent); line-height: 1; padding: 4px 0; }
-
-.toolbox { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.node-add { display: inline-flex; }
-.node-add.shell { color: var(--accent); background: var(--accent-soft); border-color: transparent; }
-.node-add.shell:hover { background: rgba(84,208,198,.2); }
-.node-add.approval { color: var(--ember); background: var(--warn-soft); border-color: transparent; }
-.node-add.approval:hover { background: rgba(255,192,77,.22); }
-.node-add.sql { color: var(--accent); background: var(--accent-soft); border-color: transparent; }
-.node-add.sql:hover { background: rgba(84,208,198,.2); }
-
-.dag-shell { display: flex; gap: 16px; align-items: stretch; }
-.canvas { position: relative; flex: 1; min-width: 0; height: 640px; padding: 0; overflow: hidden; }
+.tb-name-wrap { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.tb-name {
+  margin: 0; font-size: 17px; font-weight: 700; letter-spacing: .01em;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tb-name-input {
+  font-family: var(--font-display); font-size: 17px; font-weight: 700;
+  width: 320px; max-width: 60vw; padding: 3px 8px; background: var(--bg-1);
+  border: 1px solid var(--accent); border-radius: 8px; color: var(--text-1); outline: none;
+}
+.tb-name-edit { flex: 0 0 auto; }
+.editor-body { flex: 1 1 auto; min-height: 0; display: flex; gap: 12px; position: relative; }
+.node-lib {
+  flex: 0 0 208px; display: flex; flex-direction: column; gap: 8px;
+  padding: 14px 12px; background: linear-gradient(180deg, var(--bg-2), var(--bg-1));
+  border: 1px solid var(--line); border-radius: var(--radius); overflow-y: auto;
+}
+.lib-item { justify-content: flex-start; gap: 9px; }
+.lib-item.shell { color: var(--accent); background: var(--accent-soft); border-color: transparent; }
+.lib-item.shell:hover { background: rgba(84,208,198,.2); }
+.lib-item.approval { color: var(--ember); background: var(--warn-soft); border-color: transparent; }
+.lib-item.approval:hover { background: rgba(255,192,77,.22); }
+.lib-item.sql { color: var(--accent); background: var(--accent-soft); border-color: transparent; }
+.lib-item.sql:hover { background: rgba(84,208,198,.2); }
+.canvas-zone { position: relative; min-width: 0; flex: 1 1 auto; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg-0); }
 .canvas-grd {
   position: absolute; inset: 0; pointer-events: none; opacity: .7;
   background-image:
@@ -1506,8 +1567,24 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
   background-size: 26px 26px;
 }
 .cflow { position: absolute; inset: 0; }
-.cflow .vue-flow__node { cursor: grab; }
-.cflow .vue-flow__node.dragging { cursor: grabbing; }
+.canvas-zone .vue-flow__node { cursor: grab; }
+.canvas-zone .vue-flow__node.dragging { cursor: grabbing; }
+
+/* 悬浮参数浮窗（可拖动/关闭，仅选中节点时显示） */
+.param-float {
+  position: fixed; width: 440px; max-width: calc(100vw - 40px); max-height: calc(100vh - 130px);
+  display: flex; flex-direction: column; z-index: 50;
+  background: linear-gradient(180deg, var(--bg-2), var(--bg-1));
+  border: 1px solid var(--line-strong); border-radius: 14px; box-shadow: 0 18px 48px rgba(0,0,0,.5);
+  overflow: hidden;
+}
+.float-head { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; padding: 10px 12px; border-bottom: 1px solid var(--line); cursor: grab; }
+.float-head:active { cursor: grabbing; }
+.float-body { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 14px; }
+.float-enter-active, .float-leave-active { transition: opacity .16s var(--ease), transform .16s var(--ease); }
+.float-enter-from, .float-leave-to { opacity: 0; transform: translateY(-6px); }
+.canvas-node.is-trigger { border-left-color: var(--warn); }
+.toolbox-spacer { flex: 1 1 auto; }
 
 /* 画布节点卡片（渲染于 Vue Flow 画布） */
 .canvas-node {
@@ -1552,15 +1629,6 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
 .edge-del:hover { color: #ff6b6b; background: var(--bg-3); }
 
 /* 右侧节点配置抽屉 */
-.config {
-  flex: 0 0 400px; min-width: 0; max-height: 640px; display: flex; flex-direction: column;
-  overflow: hidden; position: relative;
-}
-.cfg-inner { display: flex; flex-direction: column; min-height: 0; flex: 1; }
-.cfg-head {
-  display: flex; align-items: center; gap: 10px; flex: 0 0 auto;
-  padding: 12px 14px; border-bottom: 1px solid var(--line);
-}
 .cfg-kind {
   flex: 0 0 auto; font-size: 11px; font-weight: 700; letter-spacing: .04em; color: #fff;
   padding: 3px 9px; border-radius: 999px; white-space: nowrap;
@@ -1574,12 +1642,6 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
 .cfg-name-input:focus { outline: none; border-color: var(--accent); background: var(--bg-0); }
 .cfg-name-input::placeholder { color: var(--text-3); }
 .cfg-id { flex: 0 0 auto; }
-.config .node-body { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 14px; }
-.cfg-ph {
-  flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: 8px; padding: 32px; text-align: center; font-size: 13px; color: var(--text-3);
-  opacity: .7;
-}
 .node-list { position: relative; display: flex; flex-direction: column; }
 
 .node-row { display: flex; gap: 22px; align-items: stretch; }
@@ -1792,8 +1854,7 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
 .org-foot > div { display: flex; gap: 8px; }
 .org-sel { font-size: 12.5px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* 触发源配置区 */
-.trigger-card { padding: 16px 20px; }
+/* 触发源配置 */
 .trig-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
 .seg-tabs { display: flex; gap: 6px; background: var(--bg-1); border: 1px solid var(--line); border-radius: 9px; padding: 3px; }
 .seg-tab {
