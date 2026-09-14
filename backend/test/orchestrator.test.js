@@ -69,7 +69,12 @@ test("onApproval approve 续跑到下一节点", async () => {
   const orch = createOrchestrator({ ...deps, advance: adv });
   const out = await orch.onApproval({ execId: 1, nodeId: "n1", decision: "approve" });
   assert.deepEqual(out.waiting, ["n2"]);
-  assert.deepEqual(saved, { done: ["n1"], waiting: null });
+  // approve 分支把 decision 输出透传进快照（environment 合并 + node_outputs 写入），供后续节点/条件上下文使用
+  assert.deepEqual(saved, {
+    done: ["n1"], waiting: null,
+    environment: { decision: "approve" },
+    node_outputs: { n1: { decision: "approve" } },
+  });
 });
 
 test("onApproval reject 终止执行", async () => {

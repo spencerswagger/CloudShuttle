@@ -55,6 +55,12 @@ const spec = computed(() => current.value.spec_json);
 const selectedId = ref("");
 const selected = computed(() => nodes.value.find((x) => x.id === selectedId.value) ?? null);
 function selectNode(id) { selectedId.value = id; }
+// 边选中态：点选边进入边条件配置（与节点选中互斥：选择边时收起节点浮窗）
+const selEdgeId = ref("");
+const selEdge = computed(() => (spec.value.edges ?? []).find((e) => edgeIdOf(e) === selEdgeId.value) ?? null);
+function selectEdge(id) { selEdgeId.value = id; }
+// 边条件编辑：直接改 spec.edges 中对应边的 cond 字段（null 表示无条件边）
+function setEdgeCond(e, patch) { e.cond = { op: "eq", ...(e.cond ?? {}), ...patch }; }
 
 // 节点没有 position（老数据）时的兜底排布；新节点用 defaultNodePosition 级联放置
 function ensurePositions() {
@@ -82,7 +88,7 @@ const vfEdges = computed(() => (spec.value.edges ?? []).map((e) => ({
   source: e.from,
   target: e.to,
   type: "default",
-  data: { from: e.from, to: e.to },
+  data: { from: e.from, to: e.to, cond: e.cond },
   markerEnd: { type: MarkerType.ArrowClosed, color: "#54d0c6" },
   style: { stroke: "var(--line-strong)", strokeWidth: 1.6 },
 })));
@@ -147,8 +153,13 @@ function removeEdgeByData({ from, to }) {
 function onNodeClick({ event, node }) {
   if (event.target?.closest?.(".vue-flow__handle")) return; // 拖手柄连线时不弹出面板
   selectNode(node.id);
+  selEdgeId.value = ""; // 选中节点时收起边配置
 }
-function onPaneClick() { selectedId.value = ""; }
+function onPaneClick() { selectedId.value = ""; selEdgeId.value = ""; }
+function onEdgeClick({ edge }) {
+  selectedId.value = ""; // 选边时收起节点浮窗
+  selEdgeId.value = edge.id;
+}
 
 // 边的悬停删除键：hover 边时显示（移入按钮有小延迟，保证能点到）
 const hoverEdgeId = ref("");
@@ -357,13 +368,18 @@ function fit(el) { if (!el) return; el.style.height = "auto"; el.style.height = 
 function autofit(ev) { fit(ev.target); }
 function fitAll() { document.querySelectorAll("textarea.autofit").forEach(fit); }
 
+const COND_OPS = ["eq", "ne", "gt", "ge", "lt", "le", "contains", "starts_with", "ends_with", "exists", "empty", "regex"];
+const COND_OP_LABELS = { eq: "等于", ne: "不等于", gt: "大于", ge: "大于等于", lt: "小于", le: "小于等于", contains: "包含", starts_with: "以…开头", ends_with: "以…结尾", exists: "存在", empty: "为空", regex: "正则匹配" };
 const NODE_KINDS = {
   trigger:  { label: "触发源",   accent: "var(--warn)", icon: "M5 3h14v18l-7-4-7 4z" },
   shell:    { label: "Shell 执行",   accent: "var(--accent)",  icon: "M4 5l6 7-6 7m8 0h8" },
   approval: { label: "人工审批",     accent: "var(--ember)",   icon: "M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6zm-3.5 6.5L11 12l4-4.5" },
   sql:      { label: "SQL 执行",     accent: "var(--accent)",  icon: "M4 5h16M7 3l2 2-2 2M12 3l2 2-2 2M7 12H4v3h3zM4 21h7M6 15v6M15 8l5 5M15 13h2a2 2 0 0 1 2 2v0a2 2 0 0 1-2 2h-2" },
+  branch:  { label: "条件分支", accent: "var(--warn)",   icon: "M7 3v7a2 2 0 0 0 2 2h2m-4 9v-5m0 0h-3m3 0h3m4-9l5-5m0 0V3h-5m5 0v5" },
+  join:    { label: "汇聚",     accent: "var(--accent)", icon: "M4 4h16M8 8h8M12 12v8M4 20h16" },
+  loop:    { label: "循环",     accent: "var(--ember)",  icon: "M17 2l4 4-4 4m4-4H8a6 6 0 0 0-6 6v1m5 5l-4 4 4 4m-4-4h8a6 6 0 0 0 6-6v-1" },
 };
-const LIB_TYPES = ["shell", "approval", "sql"];
+const LIB_TYPES = ["shell", "approval", "sql", "branch", "join", "loop"];
 const isTrigger = (n) => n?.type === "trigger";
 
 // 悬浮参数浮窗拖拽状态 + 画布「回到原位」
@@ -677,7 +693,11 @@ const addNode = (type, at) => {
           ? { image: images.value[0]?.image ?? "alpine", command: "", env: [], outputs: [{ key: "step_out" }], credential: "", regionId: "", vswitchId: "", securityGroupId: "", cpu: "1", memory: "2", timeout: 300 }
           : type === "sql"
             ? { credential: "", statements: [""], outputs: [{ key: "affected_rows" }], timeout: 60 }
-            : { robot: "", message: DEFAULT_APPROVAL_BODY, target: { type: "user", openIds: "", members: [] } },
+            : type === "loop"
+              ? { items: { count: 3 }, accumulate: [] }
+              : type === "branch" || type === "join"
+                ? {}
+                : { robot: "", message: DEFAULT_APPROVAL_BODY, target: { type: "user", openIds: "", members: [] } },
     name: "",
     position: at ?? defaultNodePosition(),
   };
@@ -685,6 +705,37 @@ const addNode = (type, at) => {
   selectedId.value = node.id; // 新节点选中即编辑
   nextTick(() => { fitView({ padding: 0.3, duration: 300 }).catch(() => {}); });
 };
+
+// loop 表单辅助：迭代来源切换与循环体节点列表（前端只读计算，不校验——校验由后端保存/运行期负责）
+function loopItemsModeOf(n) {
+  n.params.items ?? (n.params.items = { count: 3 }); // 旧数据/手造数据兜底，防渲染读 undefined 崩溃
+  return n.params.items.path ? "path" : "count";
+}
+function addAccumulate(n) {
+  n.params.accumulate ?? (n.params.accumulate = []); // 兜底，防「＋添加累积」对缺失数组 push 崩溃
+  n.params.accumulate.push({ key: "", from: "", field: "" });
+}
+function setLoopItemsMode(n, mode) {
+  n.params.items = mode === "count" ? { count: n.params.items?.count ?? 3 } : { path: n.params.items?.path ?? "$.trigger.items" };
+}
+function loopBody(n) {
+  const byId = new Map(nodes.value.map((x) => [x.id, x]));
+  const edges = spec.value.edges ?? [];
+  const succ = {};
+  for (const x of nodes.value) { succ[x.id] = []; }
+  for (const e of edges) { succ[e.from].push(e.to); }
+  const seen = new Set(); const joins = [];
+  const stack = [...(succ[n.id] ?? [])];
+  while (stack.length) {
+    const id = stack.pop();
+    if (seen.has(id)) continue;
+    seen.add(id);
+    if (byId.get(id)?.type === "join") { joins.push(id); continue; }
+    for (const c of succ[id] ?? []) stack.push(c);
+  }
+  if (joins.length !== 1) return [];
+  return [...seen].filter((id) => id !== joins[0]).map((id) => byId.get(id)).filter(Boolean);
+}
 
 const save = async ({ stay = false } = {}) => {
   if (!current.value.name.trim()) { notify({ type: "error", message: "请先填写流水线名称" }); return false; }
@@ -1049,6 +1100,7 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
           @connect="onConnect"
           @node-click="onNodeClick"
           @pane-click="onPaneClick"
+          @edge-click="onEdgeClick"
           @edge-mouse-enter="onEdgeMouseEnter"
           @edge-mouse-leave="onEdgeMouseLeave"
         >
@@ -1079,6 +1131,14 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
                 @mouseenter="onEdgeDelMouseEnter(slot.id)">
                 <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
               </div>
+              <div v-if="slot.data?.cond" class="edge-cond nodrag" :style="edgeDelStyle(slot)"
+                title="点击边配置条件" @click.stop="selectEdge(slot.id)">
+                <span class="mono">{{ slot.data.cond.op }} {{ String(slot.data.cond.val ?? "") }}</span>
+              </div>
+              <div v-else-if="hoverEdgeId !== slot.id" class="edge-cond edge-cond-default nodrag" :style="edgeDelStyle(slot)"
+                title="无条件边（默认激活）" @click.stop="selectEdge(slot.id)">
+                <span class="mono">默认</span>
+              </div>
             </EdgeLabelRenderer>
           </template>
         </VueFlow>
@@ -1089,21 +1149,50 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
         </div>
       </main>
 
-      <!-- 悬浮参数浮窗：仅选中节点时显示，可拖动/关闭 -->
+      <!-- 悬浮参数浮窗：选中节点或边时显示，可拖动/关闭 -->
       <Transition name="float">
-        <div v-if="selected" class="param-float" :style="floatPos" @mousedown.stop>
+        <div v-if="selected || selEdge" class="param-float" :style="floatPos" @mousedown.stop>
           <div class="float-head" @mousedown="startFloatDrag">
-            <span class="cfg-kind" :style="{ backgroundColor: NODE_KINDS[selected.type].accent }">{{ NODE_KINDS[selected.type].label }}</span>
-            <template v-if="!isTrigger(selected)">
-              <input class="cfg-name-input" v-model="selected.name" :placeholder="NODE_KINDS[selected.type].label" title="节点名称（执行详情页展示用）" @mousedown.stop />
+            <template v-if="selEdge && !selected">
+              <span class="cfg-kind" style="background: var(--line-strong)">边条件</span>
+              <span class="cfg-id mono">{{ drainId(selEdge.from) }} → {{ drainId(selEdge.to) }}</span>
+              <span class="toolbox-spacer"></span>
+              <button type="button" class="btn btn-sm btn-ghost" title="收起" @mousedown.stop @click="selEdgeId = ''">×</button>
             </template>
-            <span class="cfg-id mono">{{ drainId(selected.id) }}</span>
-            <span class="toolbox-spacer"></span>
-            <button type="button" class="btn btn-sm btn-ghost" title="收起" @mousedown.stop @click="selectedId = ''">×</button>
+            <template v-else>
+              <span class="cfg-kind" :style="{ backgroundColor: NODE_KINDS[selected.type].accent }">{{ NODE_KINDS[selected.type].label }}</span>
+              <template v-if="!isTrigger(selected)">
+                <input class="cfg-name-input" v-model="selected.name" :placeholder="NODE_KINDS[selected.type].label" title="节点名称（执行详情页展示用）" @mousedown.stop />
+              </template>
+              <span class="cfg-id mono">{{ drainId(selected.id) }}</span>
+              <span class="toolbox-spacer"></span>
+              <button type="button" class="btn btn-sm btn-ghost" title="收起" @mousedown.stop @click="selectedId = ''">×</button>
+            </template>
           </div>
 
           <div class="float-body">
-            <template v-if="isTrigger(selected)">
+            <template v-if="selEdge && !selected">
+              <div class="field">
+                <label class="field-label">条件（JSONPath）</label>
+                <input class="input mono" :value="selEdge.cond?.path ?? ''" placeholder="如 $.trigger.branch，或 $.outputs.shell1.code" @input="setEdgeCond(selEdge, { path: $event.target.value })" />
+                <p class="field-hint">从触发载荷 / 上游节点输出 / 环境变量取值；留空表示无条件边（默认激活）。</p>
+              </div>
+              <div class="field" v-if="selEdge.cond">
+                <label class="field-label">比较符</label>
+                <select class="select" :value="selEdge.cond.op" @change="setEdgeCond(selEdge, { op: $event.target.value })">
+                  <option v-for="op in COND_OPS" :key="op" :value="op">{{ COND_OP_LABELS[op] }}（{{ op }}）</option>
+                </select>
+              </div>
+              <div class="field" v-if="selEdge.cond && !['exists', 'empty'].includes(selEdge.cond.op)">
+                <label class="field-label">比较值</label>
+                <input class="input mono" :value="selEdge.cond.val ?? ''" placeholder="字面量（字符串/数字/布尔）" @input="setEdgeCond(selEdge, { val: $event.target.value })" />
+              </div>
+              <div class="sql-actions" v-if="selEdge.cond">
+                <button type="button" class="btn btn-sm btn-ghost" @click="selEdge.cond = null">设为无条件边</button>
+              </div>
+              <p class="field-hint">若在「无条件边」与「条件边」间切换，请点选下方按钮或清空 path。</p>
+            </template>
+            <template v-else-if="isTrigger(selected)">
               <div class="trig-head">
                 <span class="mono-tag">触发源</span>
                 <div class="seg-tabs">
@@ -1193,7 +1282,7 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
               </template>
             </template>
 
-            <div v-else v-for="n in [selected]" :key="n.id">
+            <div v-else-if="selected" v-for="n in [selected]" :key="n.id">
               <template v-if="n.type === 'shell'">
                 <div class="field">
                   <label class="field-label">ECI 凭证 <span class="req">*</span></label>
@@ -1344,6 +1433,41 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
                   <label class="field-label">超时（秒）</label>
                   <input class="input mono" v-model.number="n.params.timeout" placeholder="300" />
                   <p class="field-hint">容器运行超时上限，到期未完成会被强制终止，单位秒</p>
+                </div>
+              </template>
+              <template v-else-if="n.type === 'branch'">
+                <p class="field-hint">条件分支：为出边设置条件——选中连线后在画布上点击连线，浮窗切换为边配置。未命中条件的边及其下游节点将被跳过（执行详情显示「已跳过」）。</p>
+                <p class="field-hint">不带条件的边恒激活，可作为默认兜底分支。</p>
+              </template>
+              <template v-else-if="n.type === 'join'">
+                <p class="field-hint">汇聚点：等待所有已激活上游完成后放行；作为循环出口时由循环自动收敛。</p>
+              </template>
+              <template v-else-if="n.type === 'loop'">
+                <div class="field">
+                  <label class="field-label">迭代来源</label>
+                  <div class="seg-tabs">
+                    <button type="button" class="seg-tab" :class="{ active: loopItemsModeOf(n) === 'count' }" @click="setLoopItemsMode(n, 'count')">固定次数</button>
+                    <button type="button" class="seg-tab" :class="{ active: loopItemsModeOf(n) === 'path' }" @click="setLoopItemsMode(n, 'path')">JSONPath 数组</button>
+                  </div>
+                  <input v-if="loopItemsModeOf(n) === 'count'" class="input mono" type="number" min="1" v-model.number="n.params.items.count" placeholder="循环次数，如 3" />
+                  <input v-else class="input mono" v-model="n.params.items.path" placeholder="从触发载荷/上游输出取数组，如 $.trigger.refs" @focus="onFieldFocus($event, n, 'items:path')" />
+                  <p class="field-hint">每轮注入 <code class="mono ph-code">${item}</code>（当前元素）与 <code class="mono ph-code">${iteration}</code>（1 起始序号）供循环体节点引用。</p>
+                </div>
+                <div class="field">
+                  <label class="field-label">输出累积</label>
+                  <div v-for="(a, i) in n.params.accumulate" :key="i" class="sql-out-row">
+                    <input class="input mono" v-model="a.key" placeholder="输出 key" />
+                    <select class="select" v-model="a.from">
+                      <option value="">循环体节点…</option>
+                      <option v-for="b in loopBody(n)" :key="b.id" :value="b.id">{{ b.name || drainId(b.id) }}</option>
+                    </select>
+                    <input class="input mono" v-model="a.field" placeholder="输出字段" />
+                    <button type="button" class="btn btn-sm btn-danger" @click="n.params.accumulate.splice(i, 1)">删</button>
+                  </div>
+                  <div class="sql-actions">
+                    <button type="button" class="btn btn-sm btn-ghost" @click="addAccumulate(n)">＋添加累积</button>
+                  </div>
+                  <p class="field-hint">每轮从所选循环体节点的输出取字段值累积成数组；循环结束后以 JSON 字符串注入该 key（如 <code class="mono ph-code">${shas}</code>）供下游引用。</p>
                 </div>
               </template>
               <template v-else-if="n.type === 'sql'">
@@ -1632,6 +1756,14 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
   border-radius: 8px; cursor: pointer; box-shadow: 0 4px 14px rgba(0,0,0,.3); z-index: 5;
 }
 .edge-del:hover { color: #ff6b6b; background: var(--bg-3); }
+.edge-cond {
+  position: absolute; transform: translate(-50%, -50%);
+  background: rgba(13, 17, 23, 0.85); color: var(--warn);
+  border: 1px solid var(--line); border-radius: 8px;
+  padding: 1px 6px; font-size: 11px; line-height: 16px;
+  cursor: pointer; pointer-events: auto; white-space: nowrap; z-index: 5;
+}
+.edge-cond-default { color: var(--text-3); }
 
 /* 右侧节点配置抽屉 */
 .cfg-kind {

@@ -27,6 +27,7 @@ const STATUS = {
   failed:    { label: "失败",   cls: "badge-err",      dot: "var(--err)" },
   rejected:  { label: "已拒绝", cls: "badge-err",      dot: "var(--err)" },
   cancelled: { label: "已取消", cls: "badge-neutral",  dot: "var(--text-3)" },
+  skipped:   { label: "已跳过", cls: "badge-neutral", dot: "var(--text-3)" },
   approve:   { label: "审批中", cls: "badge-warn",     dot: "var(--warn)" },
   eci:       { label: "运行中", cls: "badge-info",     dot: "var(--info)" },
 };
@@ -125,6 +126,7 @@ const canvasAccent = (s) => {
   const st = s?.status;
   if (["succeeded", "done", "completed"].includes(st)) return "var(--ok)";
   if (["failed", "rejected"].includes(st)) return "var(--err)";
+  if (["skipped", "cancelled"].includes(st)) return "var(--text-3)";
   if (canvasActive(s)) return "var(--warn)";
   return "var(--text-3)";
 };
@@ -132,6 +134,7 @@ const canvasFill = (s) => {
   if (canvasActive(s)) return "rgba(245,171,53,.06)";
   if (["succeeded", "done", "completed"].includes(s?.status)) return "rgba(40,167,69,.05)";
   if (["failed", "rejected"].includes(s?.status)) return "rgba(230,73,73,.05)";
+  if (["skipped", "cancelled"].includes(s?.status)) return "rgba(120, 130, 145, 0.05)";
   return "transparent";
 };
 watch(canvasNodes, (v) => {

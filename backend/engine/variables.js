@@ -1,7 +1,7 @@
 // backend/engine/variables.js
 // 变量机制：模板渲染 / env 依赖提取 / 节点输出 K=V 解析 / 静态作用域与保存校验。
 
-import { buildGraph, ancestors } from "./dag.js";
+import { buildGraph, ancestors, loopRegionOf } from "./dag.js";
 
 const RE = /\$\{([A-Za-z][A-Za-z0-9_.]*)\}/g;
 
@@ -88,7 +88,8 @@ export function globalKeysOf(spec) {
 }
 
 /**
- * 某节点静态可用变量集：全局 key ∪ 所有前驱节点（ancestors）在 outputs 里声明的 key。
+ * 某节点静态可用变量集：全局 key ∪ 所有前驱节点（ancestors）在 outputs 里声明的 key，
+ * 以及 loop 祖先节点的 accumulate 输出 key；若节点位于某 loop 祖先的循环体内，额外注入 item/iteration。
  * @param {object} graph buildGraph 的产物
  * @param {object} spec
  * @param {Function} ancestorsFn dag.js 的 ancestors
@@ -101,6 +102,17 @@ export function resolveScope(graph, spec, ancestorsFn, nodeId) {
     const node = graph.nodes.get(ancId);
     for (const o of node?.params?.outputs ?? []) {
       if (o?.key) scope.add(o.key);
+    }
+    // loop：accumulate 输出对循环体与下游可见；item/iteration 仅循环体内节点可用
+    if (node?.type === "loop") {
+      for (const acc of node?.params?.accumulate ?? []) {
+        if (acc?.key) scope.add(acc.key);
+      }
+      const region = loopRegionOf({ nodes: spec.nodes ?? [], edges: spec.edges ?? [], loopId: ancId });
+      if (region.bodyIds?.includes(nodeId)) {
+        scope.add("item");
+        scope.add("iteration");
+      }
     }
   }
   return scope;
