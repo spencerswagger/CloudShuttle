@@ -694,16 +694,23 @@ const addNode = (type, at) => {
 };
 
 // loop 表单辅助：迭代来源切换与循环体节点列表（前端只读计算，不校验——校验由后端保存/运行期负责）
-function loopItemsModeOf(n) { return n.params.items?.path ? "path" : "count"; }
+function loopItemsModeOf(n) {
+  n.params.items ?? (n.params.items = { count: 3 }); // 旧数据/手造数据兜底，防渲染读 undefined 崩溃
+  return n.params.items.path ? "path" : "count";
+}
+function addAccumulate(n) {
+  n.params.accumulate ?? (n.params.accumulate = []); // 兜底，防「＋添加累积」对缺失数组 push 崩溃
+  n.params.accumulate.push({ key: "", from: "", field: "" });
+}
 function setLoopItemsMode(n, mode) {
   n.params.items = mode === "count" ? { count: n.params.items?.count ?? 3 } : { path: n.params.items?.path ?? "$.trigger.items" };
 }
 function loopBody(n) {
   const byId = new Map(nodes.value.map((x) => [x.id, x]));
   const edges = spec.value.edges ?? [];
-  const succ = {}; const pred = {};
-  for (const x of nodes.value) { succ[x.id] = []; pred[x.id] = []; }
-  for (const e of edges) { succ[e.from].push(e.to); pred[e.to].push(e.from); }
+  const succ = {};
+  for (const x of nodes.value) { succ[x.id] = []; }
+  for (const e of edges) { succ[e.from].push(e.to); }
   const seen = new Set(); const joins = [];
   const stack = [...(succ[n.id] ?? [])];
   while (stack.length) {
@@ -1392,7 +1399,7 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
                     <button type="button" class="seg-tab" :class="{ active: loopItemsModeOf(n) === 'path' }" @click="setLoopItemsMode(n, 'path')">JSONPath 数组</button>
                   </div>
                   <input v-if="loopItemsModeOf(n) === 'count'" class="input mono" type="number" min="1" v-model.number="n.params.items.count" placeholder="循环次数，如 3" />
-                  <input v-else class="input mono" v-model="n.params.items.path" placeholder="从触发载荷/上游输出取数组，如 $.trigger.refs" @focus="onFieldFocus($event, n, 'items.path')" />
+                  <input v-else class="input mono" v-model="n.params.items.path" placeholder="从触发载荷/上游输出取数组，如 $.trigger.refs" @focus="onFieldFocus($event, n, 'items:path')" />
                   <p class="field-hint">每轮注入 <code class="mono ph-code">${item}</code>（当前元素）与 <code class="mono ph-code">${iteration}</code>（1 起始序号）供循环体节点引用。</p>
                 </div>
                 <div class="field">
@@ -1407,7 +1414,7 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
                     <button type="button" class="btn btn-sm btn-danger" @click="n.params.accumulate.splice(i, 1)">删</button>
                   </div>
                   <div class="sql-actions">
-                    <button type="button" class="btn btn-sm btn-ghost" @click="n.params.accumulate.push({ key: '', from: '', field: '' })">＋添加累积</button>
+                    <button type="button" class="btn btn-sm btn-ghost" @click="addAccumulate(n)">＋添加累积</button>
                   </div>
                   <p class="field-hint">每轮从所选循环体节点的输出取字段值累积成数组；循环结束后以 JSON 字符串注入该 key（如 <code class="mono ph-code">${shas}</code>）供下游引用。</p>
                 </div>
