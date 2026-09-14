@@ -274,12 +274,13 @@ async function buildApp() {
   const mutex = createMutex(redis);
   const eciProvider = createEciProvider({ create: createEciGroup });
   // 凭证类型判定 + 解密（企业应用凭证用 corp provider）
+  // 已软删除的凭证（deleted_at 非空）视为不存在：删除后流水线再执行对应节点会如实报错。
   async function getCredentialKind(name) {
-    const { rows } = await pool.query(`SELECT kind FROM credential WHERE name=$1`, [name]);
+    const { rows } = await pool.query(`SELECT kind FROM credential WHERE name=$1 AND deleted_at IS NULL`, [name]);
     return rows[0]?.kind ?? "";
   }
   async function getCredentialSecrets(name) {
-    const { rows } = await pool.query(`SELECT secret_enc FROM credential WHERE name=$1`, [name]);
+    const { rows } = await pool.query(`SELECT secret_enc FROM credential WHERE name=$1 AND deleted_at IS NULL`, [name]);
     if (!rows[0]) throw new Error(`credential not found: ${name}`);
     return sm4Decrypt(config.sm4Key, rows[0].secret_enc);
   }
@@ -437,6 +438,10 @@ async function buildApp() {
   // 构造执行元信息 Map，再按组件 origin 叠写 manual/webhook 变量，返回可直接交给
   // orchestrator.run(spec, environment) 的产物。
   async function hydrateForRun({ pipelineId, kind, formValue, webhookBody, authority, rerunOf }) {
+    // 软删除防线：已删除的流水线不再接受任何触发（webhook 在 hook.js 已拦截，这里兜住 manual/rerun）
+    const { rows: alive } = await pool.query(
+      `SELECT 1 FROM pipeline WHERE id=$1 AND deleted_at IS NULL`, [pipelineId]);
+    if (!alive[0]) throw new HttpError(404, "PIPELINE_NOT_FOUND", "流水线不存在或已删除");
     const trigger = kind === "manual"
       ? { trigger: "manual", params: formValue ?? {} }
       : kind === "webhook" ? { trigger: "webhook", body: webhookBody ?? {} }

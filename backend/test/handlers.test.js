@@ -53,6 +53,9 @@ test("handler 入口对坏 DAG 返回 400 BAD_DAG（配置错误不能被吞成 
   const { handler } = await import("../index.js");
   pool.query = async (sql, params) => {
     const s = String(sql).replace(/\s+/g, " ").trim();
+    if (/^SELECT 1 FROM pipeline WHERE id=\$1 AND deleted_at IS NULL$/.test(s)) {
+      return { rows: [{ id: 9 }] }; // 流水线仍活跃，允许继续走到 DAG 校验
+    }
     if (/^SELECT spec_json FROM pipeline_rev/.test(s)) {
       // n1→n2→n1 成环：validateSpec 必须在触发前拦截
       return { rows: [{ spec_json: { nodes: [{ id: "n1" }, { id: "n2" }], edges: [{ from: "n1", to: "n2" }, { from: "n2", to: "n1" }] } }] };

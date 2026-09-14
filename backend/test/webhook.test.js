@@ -292,7 +292,7 @@ test("R1+R2+R3 真走 handler 入口：中文名解码、secret 生效、401 如
   pool.query = async (sql, params) => {
     const s = String(sql).replace(/\s+/g, " ").trim();
     seen.push({ sql: s, params });
-    if (/^SELECT id, webhook_secret FROM pipeline WHERE name=\$1$/.test(s)) {
+    if (/^SELECT id, webhook_secret FROM pipeline WHERE name=\$1 AND deleted_at IS NULL$/.test(s)) {
       return { rows: [{ id: 77, webhook_secret: "s3cret" }] };
     }
     return { rows: [] };
@@ -337,8 +337,11 @@ function memRedis() {
 function triggerChainSql(execId, { name = "svcA", runNo = 1, secret = null } = {}) {
   pool.query = async (sql, params) => {
     const s = String(sql).replace(/\s+/g, " ").trim();
-    if (/^SELECT id, webhook_secret FROM pipeline WHERE name=\$1$/.test(s)) {
+    if (/^SELECT id, webhook_secret FROM pipeline WHERE name=\$1 AND deleted_at IS NULL$/.test(s)) {
       return { rows: [{ id: execId, webhook_secret: secret }] };
+    }
+    if (/^SELECT 1 FROM pipeline WHERE id=\$1 AND deleted_at IS NULL$/.test(s)) {
+      return { rows: [{ id: execId }] };
     }
     if (/^SELECT spec_json FROM pipeline_rev/.test(s)) {
       return { rows: [{ spec_json: { nodes: [{ id: "t", type: "trigger", params: {} }], edges: [] } }] };

@@ -144,8 +144,10 @@ export async function updateDeliveredCard({ credential, token, status, getCreden
 }
 
 // 按管道名解析 pipeline，返回 { pipelineId, webhookSecret }（轻量查询 webhook 触发定位）
+// 软删除的流水线（deleted_at 非空）不可再触发，返回未找到。
 export async function resolvePipelineByName(name) {
-  const { rows: r } = await pool.query(`SELECT id, webhook_secret FROM pipeline WHERE name=$1`, [name]);
+  const { rows: r } = await pool.query(
+    `SELECT id, webhook_secret FROM pipeline WHERE name=$1 AND deleted_at IS NULL`, [name]);
   if (!r[0]) throw new Error(`pipeline not found: ${name}`);
   return { pipelineId: r[0].id, webhookSecret: r[0].webhook_secret ?? "" };
 }
