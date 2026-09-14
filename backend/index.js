@@ -18,6 +18,9 @@ import { makeShellStep } from "./steps/shell.js";
 import { makeApprovalStep } from "./steps/approval.js";
 import { makeSqlStep } from "./steps/sql.js";
 import { makeTriggerStep } from "./steps/trigger.js";
+import { makeBranchStep } from "./steps/branch.js";
+import { makeJoinStep } from "./steps/join.js";
+import { makeLoopStep } from "./steps/loop.js";
 import { createConnection as createDbConnection } from "./providers/db.js";
 import { createOrchestrator } from "./engine/orchestrator.js";
 import { validateSpec } from "./engine/dag.js";
@@ -264,7 +267,7 @@ async function createEciGroup(params) {
 
 // 步骤类型注册表：buildApp 的 steps 装配与单测共用同一来源。
 // 新增步骤类型必须在 buildApp 的 steps 中实现，并在此登记（buildApp 启动时校验一致）。
-export const STEP_TYPES = ["trigger", "shell", "approval", "sql"];
+export const STEP_TYPES = ["trigger", "shell", "approval", "sql", "branch", "join", "loop"];
 
 async function buildApp() {
   const snapshotStore = createSnapshotStore(redis);
@@ -355,6 +358,9 @@ async function buildApp() {
       genToken: randomUUID, controlPlaneBase: resolveControlBase,
     }),
     sql: makeSqlStep({ getCredentialKind, getCredentialSecrets, createConnection: createDbConnection }),
+    branch: makeBranchStep(),
+    join: makeJoinStep(),
+    loop: makeLoopStep(),
   };
   // 防漂移：steps 实现集合必须与 STEP_TYPES 注册表一致（新增/删除步骤类型时两处同步，
   // 否则已登记的步骤类型缺失会在启动装配阶段即暴露，而不是运行期 404/无步骤可跑）。
