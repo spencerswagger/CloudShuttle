@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { evalCond, buildCondCtx, COND_OPS } from "./conditions.js";
 
 const ctx = buildCondCtx({
-  triggerRaw: { branch: "release", count: 3, tags: ["v1", "v2"], note: "" },
+  triggerRaw: { branch: "release", count: 3, tags: ["v1", "v2"], emptyTags: [], note: "" },
   nodeOutputs: { shell1: { sha: "abc123", rows: 5 } },
   env: { pipeline_name: "demo" },
 });
@@ -31,9 +31,10 @@ test("contains / starts_with / ends_with", () => {
   assert.equal(evalCond({ path: "$.trigger.branch", op: "ends_with", val: "ase" }, ctx), true);
 });
 
-test("exists / empty（数组与非空串）", () => {
+test("exists / empty（空串、空数组与缺失路径）", () => {
   assert.equal(evalCond({ path: "$.trigger.note", op: "exists" }, ctx), true);
   assert.equal(evalCond({ path: "$.trigger.note", op: "empty" }, ctx), true);
+  assert.equal(evalCond({ path: "$.trigger.emptyTags", op: "empty" }, ctx), true);
   assert.equal(evalCond({ path: "$.trigger.branch", op: "empty" }, ctx), false);
   assert.equal(evalCond({ path: "$.trigger.missing", op: "exists" }, ctx), false);
   assert.equal(evalCond({ path: "$.trigger.missing", op: "empty" }, ctx), true);
@@ -55,6 +56,9 @@ test("非法条件（缺 path / op 不在白名单）恒 false", () => {
 });
 
 test("JSONPath 异常静默 false（不抛错）", () => {
+  // "$$" 在 jsonpath-plus 10.4.0 下确实抛 TypeError，走 catch 分支返回 false
+  assert.equal(evalCond({ path: "$$", op: "eq", val: "x" }, ctx), false);
+  // 宽松容忍的畸形路径不抛错（返回整棵树），按宽松求值结果判断：首元素为 ctx 对象，eq "x" 为 false
   assert.equal(evalCond({ path: "$..[", op: "eq", val: "x" }, ctx), false);
 });
 

@@ -23,7 +23,9 @@ const OPS = {
 export const COND_OPS = Object.keys(OPS);
 
 /**
- * 对条件上下文树求值一条边条件。任何异常/非法输入一律返回 false，绝不抛错。
+ * 对条件上下文树求值一条边条件。
+ * op/path 校验失败、JSONPath 抛异常、正则编译失败等一律返回 false 且不抛错；
+ * 对 jsonpath-plus 宽松容忍的畸形路径（如 "$..["、 "$.["），按其宽松求值结果判断。
  * @param {{path?:string, op?:string, val?:*} | null | undefined} cond
  * @param {object} ctx 条件上下文树（buildCondCtx 产物）
  * @returns {boolean}
@@ -35,7 +37,7 @@ export function evalCond(cond, ctx) {
   let hit;
   try { hit = JSONPath({ path, json: ctx, wrap: false }); }
   catch { return false; }
-  // wrap:false 命中数组时多余的容器外层返回数组，取首元素（与 trigger.js 的 hitJsonPath 对齐）
+  // 命中结果可能是数组（含宽松求值返回整棵树的情形），统一取首元素作为比较值（与 trigger.js 的 hitJsonPath 对齐）
   if (Array.isArray(hit)) hit = hit[0];
   return OPS[op](hit, val);
 }
