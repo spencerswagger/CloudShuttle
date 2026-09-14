@@ -307,3 +307,150 @@ test("branch：边条件按 $.outputs.<nodeId>.<field>（node_outputs）求值",
   const skipped = records.filter((r) => r.status === "skipped").map((r) => r.nodeId);
   assert.deepEqual(skipped, ["s2"], "未命中边下游 s2 记 skipped");
 });
+
+// ---------- 控制节点：loop 迭代状态机 ----------
+
+function loopSpec() {
+  return {
+    nodes: [
+      { id: "t", type: "trigger", params: {} },
+      { id: "l", type: "loop", params: { items: { count: 3 }, accumulate: [{ key: "nums", from: "body", field: "n" }] } },
+      { id: "body", type: "sql", params: { statements: ["select ${iteration}"] } },
+      { id: "j", type: "join", params: {} },
+    ],
+    edges: [
+      { from: "t", to: "l" },
+      { from: "l", to: "body" },
+      { from: "body", to: "j" },
+    ],
+  };
+}
+
+test("loop：count 迭代 3 轮，item/iteration 逐轮注入，accumulate 累积为数组，join 后 completed", async () => {
+  const seenIter = [];
+  const outRows = [];
+  const adv = createAdvancer({
+    stepRun: async (node, ctx) => {
+      if (node.type === "sql") {
+        seenIter.push(ctx.environment.get("iteration"));
+        const n = Number(ctx.environment.get("iteration"));
+        return { kind: "done", output: { n: n * 10 } };
+      }
+      return { kind: "done", output: {} };
+    },
+    snapshot: async () => {}, log: async () => {},
+    record: async (r) => { if (r.status === "done") outRows.push(r); },
+  });
+  const spec = loopSpec();
+  let snap = { done: [], environment: {} };
+  let guard = 0;
+  let final = null;
+  for (;;) {
+    const out = await adv.advanceOnce({ spec, snap, execId: 9, environment: new Map() });
+    snap = out.snap;
+    if (out.snap?.status === "completed" || out.waiting) { final = out; break; }
+    if (++guard > 20) throw new Error("loop 推进未收敛");
+  }
+  assert.deepEqual(seenIter, ["1", "2", "3"], "迭代变量逐轮注入");
+  // 循环体每轮输出累积为数组（n=10,20,30 → nums=["10","20","30"]）
+  const loopRow = outRows.find((r) => r.nodeId === "l");
+  assert.ok(loopRow, "loop 节点在结束时补记执行记录");
+  assert.deepEqual(JSON.parse(loopRow.output.nums), [10, 20, 30]);
+  assert.equal(final.snap.status, "completed");
+});
+
+test("loop：JSONPath 取数组（items.path），遍历逐项注入 item", async () => {
+  const spec = {
+    nodes: [
+      { id: "t", type: "trigger", params: {} },
+      { id: "l", type: "loop", params: { items: { path: "$.trigger.refs" }, accumulate: [] } },
+      { id: "body", type: "sql", params: {} },
+      { id: "j", type: "join", params: {} },
+    ],
+    edges: [{ from: "t", to: "l" }, { from: "l", to: "body" }, { from: "body", to: "j" }],
+  };
+  const seenItems = [];
+  const adv = createAdvancer({
+    stepRun: async (node, ctx) => {
+      if (node.type === "sql") seenItems.push(ctx.environment.get("item"));
+      return { kind: "done", output: {} };
+    },
+    snapshot: async () => {}, log: async () => {},
+    record: async () => {},
+  });
+  let snap = { done: [], environment: {}, trigger_raw: { refs: ["a", "b"] } };
+  let guard = 0;
+  for (;;) {
+    const out = await adv.advanceOnce({ spec, snap, execId: 10, environment: new Map() });
+    snap = out.snap;
+    if (out.snap?.status === "completed" || out.waiting) break;
+    if (++guard > 20) throw new Error("loop 推进未收敛");
+  }
+  assert.deepEqual(seenItems, ["a", "b"]);
+});
+
+test("loop：items 为空数组 → body 全部 skipped，loop 完成，join 收敛后正常 completed", async () => {
+  const spec = {
+    nodes: [
+      { id: "t", type: "trigger", params: {} },
+      { id: "l", type: "loop", params: { items: { path: "$.trigger.refs" }, accumulate: [] } },
+      { id: "body", type: "sql", params: {} },
+      { id: "j", type: "join", params: {} },
+    ],
+    edges: [{ from: "t", to: "l" }, { from: "l", to: "body" }, { from: "body", to: "j" }],
+  };
+  const records = [];
+  const adv = createAdvancer({
+    stepRun: async () => ({ kind: "done", output: {} }),
+    snapshot: async () => {}, log: async () => {},
+    record: async (r) => records.push(r),
+  });
+  let snap = { done: [], environment: {}, trigger_raw: { refs: [] } };
+  let guard = 0;
+  let final = null;
+  for (;;) {
+    const out = await adv.advanceOnce({ spec, snap, execId: 11, environment: new Map() });
+    snap = out.snap;
+    if (out.snap?.status === "completed" || out.waiting) { final = out; break; }
+    if (++guard > 20) throw new Error("loop 推进未收敛");
+  }
+  assert.equal(final.snap.status, "completed");
+  const skipped = records.filter((r) => r.status === "skipped").map((r) => r.nodeId);
+  assert.deepEqual(skipped, ["body"], "空迭代时循环体被跳过");
+  const loopRow = records.find((r) => r.nodeId === "l" && r.status === "done");
+  assert.ok(loopRow, "loop 节点完成（空迭代输出为空）");
+});
+
+test("loop：循环结束后 item/iteration 从环境移除（不污染下游）", async () => {
+  const spec = {
+    nodes: [
+      { id: "t", type: "trigger", params: {} },
+      { id: "l", type: "loop", params: { items: { count: 1 }, accumulate: [] } },
+      { id: "body", type: "sql", params: {} },
+      { id: "j", type: "join", params: {} },
+      { id: "tail", type: "sql", params: { statements: ["select 1"] } },
+    ],
+    edges: [
+      { from: "t", to: "l" }, { from: "l", to: "body" }, { from: "body", to: "j" }, { from: "j", to: "tail" },
+    ],
+  };
+  let tailEnv = null;
+  const adv = createAdvancer({
+    stepRun: async (node, ctx) => {
+      if (node.id === "tail") tailEnv = { ...Object.fromEntries(ctx.environment) };
+      return { kind: "done", output: {} };
+    },
+    snapshot: async () => {}, log: async () => {},
+    record: async () => {},
+  });
+  let snap = { done: [], environment: {} };
+  let guard = 0;
+  for (;;) {
+    const out = await adv.advanceOnce({ spec, snap, execId: 12, environment: new Map() });
+    snap = out.snap;
+    if (out.snap?.status === "completed" || out.waiting) break;
+    if (++guard > 20) throw new Error("loop 推进未收敛");
+  }
+  assert.equal(tailEnv.item, undefined);
+  assert.equal(tailEnv.iteration, undefined);
+});

@@ -1,6 +1,7 @@
-import { buildGraph, nextReady } from "./dag.js";
+import { buildGraph, nextReady, loopRegionOf } from "./dag.js";
 import { renderParams } from "./variables.js";
 import { evalCond, buildCondCtx } from "./conditions.js";
+import { JSONPath } from "jsonpath-plus";
 
 // 推进逻辑：载入快照 → 找到下一个 ready 且未 done 节点 → 交给 stepRun
 // stepRun 返回：
@@ -29,6 +30,27 @@ export function normalizeWaiting(w) {
 // 注：mutex 参数保留注入位（单测沿用），但 advanceOnce 内部不再自行 acquire——续跑互斥由
 // orchestrator 层统一持有（同一把 key "exec-callback"），避免非可重入锁嵌套自锁（死锁）。
 export function createAdvancer({ stepRun, snapshot, record, recordRegistry = async () => {}, complete = async () => {}, log = async () => {}, mutex }) {
+  // loop items 解析：{count} 固定次数展开 [1..N]；{path} JSONPath 取数组。
+  // 空数组 → 0 次迭代（调用方负责把 body 标 skipped）。
+  function resolveLoopItems(items, ctx) {
+    if (items?.path) {
+      let hit;
+      try { hit = JSONPath({ path: items.path, json: ctx, wrap: false }); }
+      catch { hit = undefined; }
+      if (!Array.isArray(hit)) throw new Error(`loop items 路径未取到数组: ${items.path}`);
+      return hit;
+    }
+    const n = Number(items?.count);
+    if (!Number.isFinite(n) || n < 0 || Math.floor(n) !== n) throw new Error(`loop count 非法: ${items?.count}`);
+    return Array.from({ length: n }, (_, i) => i + 1);
+  }
+  // 把当前迭代的 item/iteration 写入环境（随快照 environment 持久化，回调续跑不丢）
+  function setIterVars(loopId, st, env) {
+    const it = st.items[st.idx];
+    env.set("item", typeof it === "string" ? it : JSON.stringify(it));
+    env.set("iteration", String(st.idx + 1));
+  }
+
   async function advanceOnce({ spec, snap, execId, environment }) {
     const graph = buildGraph(spec);
     const done = new Set(snap.done ?? []);
@@ -105,7 +127,26 @@ export function createAdvancer({ stepRun, snapshot, record, recordRegistry = asy
       if (res.kind === "done") {
         const node = graph.nodes.get(nodeId);
         if (node?.type === "loop") {
-          // loop 节点由引擎状态机驱动（Task 5），此处不 record、不注入输出
+          // 初始化迭代状态：算 bodyIds/items，loop 节点立即 done（放行 body），执行记录留到循环结束补记。
+          // 并行多个 loop 共享 item/iteration 变量名会互相覆盖（v1 不校验，普通节点约束已保证体内不嵌套）。
+          const condCtx = buildCondCtx({ triggerRaw: snap.trigger_raw, nodeOutputs, env: toFlat() });
+          const items = resolveLoopItems(node.params?.items, condCtx);
+          const { bodyIds, err } = loopRegionOf({ nodes: spec.nodes ?? [], edges: spec.edges ?? [], loopId: nodeId });
+          if (err) throw new Error(`loop 配置非法: ${err}`);
+          if (!items.length) {
+            // 空迭代：body 全部 skipped，loop 节点直接完成（done），join 下一轮自然收敛
+            for (const id of bodyIds) {
+              if (done.has(id)) continue;
+              done.add(id); skipped.add(id); nodeOutputs[id] = { skipped: true };
+              await record({ execId, nodeId: id, status: "skipped", output: { skipped: true } });
+            }
+            done.add(nodeId);
+            await record({ execId, nodeId, status: "done", output: {} });
+            continue;
+          }
+          loops[nodeId] = { items, idx: 0, bodyIds, acc: {} };
+          done.add(nodeId);
+          setIterVars(nodeId, loops[nodeId], env);
           continue;
         }
         nodeOutputs[nodeId] = res.output ?? {};
@@ -171,6 +212,31 @@ export function createAdvancer({ stepRun, snapshot, record, recordRegistry = asy
         nodeOutputs[id] = { skipped: true };
         await record({ execId, nodeId: id, status: "skipped", output: { skipped: true } });
         await log(execId, `⏭ 节点 ${id} 因上游条件分支未命中被跳过`);
+      }
+    }
+
+    // ---- 控制节点：loop 迭代边界（本轮 body 全部完成且无等待时推进/收敛） ----
+    for (const [loopId, st] of Object.entries(loops)) {
+      const bodyAllDone = st.bodyIds.every((id) => done.has(id));
+      if (!bodyAllDone) continue;
+      // 累积本轮输出
+      const loopNode = graph.nodes.get(loopId);
+      for (const acc of loopNode?.params?.accumulate ?? []) {
+        const v = nodeOutputs[acc.from]?.[acc.field];
+        if (v !== undefined && v !== null) (st.acc[acc.key] ??= []).push(v);
+      }
+      if (st.idx + 1 < st.items.length) {
+        st.idx++;
+        for (const id of st.bodyIds) done.delete(id); // 清掉 body 完成标记，下一轮重跑
+        setIterVars(loopId, st, env);
+      } else {
+        // 循环结束：loop 节点补记执行记录（累积输出），清理迭代变量，join 自然就绪
+        const out = Object.fromEntries(Object.entries(st.acc).map(([k, v]) => [k, JSON.stringify(v)]));
+        await record({ execId, nodeId: loopId, status: "done", output: out });
+        nodeOutputs[loopId] = out;
+        fillEnv(env, out);
+        for (const k of ["item", "iteration"]) env.delete(k);
+        delete loops[loopId];
       }
     }
 
