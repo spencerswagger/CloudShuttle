@@ -1,3 +1,7 @@
+// DAG 构建 / 推进 / 校验。conditions.js 提供边条件 op 白名单（COND_OPS），
+// 仅依赖 jsonpath-plus，不构成循环依赖。
+import { COND_OPS } from "./conditions.js";
+
 export function buildGraph(spec) {
   const nodes = new Map((spec.nodes ?? []).map((n) => [n.id, n]));
   const successors = {};
@@ -59,6 +63,21 @@ export function validateSpec(spec) {
     if (!ids.has(e.to)) { errors.push(`边的终点不存在: ${e.to}`); continue; }
     children[e.from].push(e.to);
   }
+  // 边条件格式（branch 出边 cond）
+  for (const e of edges) {
+    if (!e.cond) continue;
+    if (typeof e.cond.path !== "string" || !e.cond.path.trim()) {
+      errors.push(`边 ${e.from}→${e.to} 条件缺少 path`);
+    } else if (!COND_OPS.includes(e.cond.op)) {
+      errors.push(`边 ${e.from}→${e.to} 条件 op 非法: ${e.cond.op}`);
+    }
+  }
+  // loop 区域约束
+  for (const n of nodes) {
+    if (n.type !== "loop") continue;
+    const { err } = loopRegionOf({ nodes, edges, loopId: n.id });
+    if (err) errors.push(err);
+  }
   // DFS 三色法判环：0=未访问 1=访问中 2=已结束
   const color = {};
   for (const id of ids) color[id] = 0;
@@ -74,4 +93,46 @@ export function validateSpec(spec) {
   for (const id of ids) if (color[id] === 0) dfs(id);
   if (cycle) errors.push("检测到环（cycle），DAG 不允许环存在");
   return { ok: errors.length === 0, errors };
+}
+
+// 计算 loop 循环区域：loopId → { bodyIds, joinId }（或 { err }）。
+// 区域 = loop 可达、首个 join 之前的全部节点；仅支持单一收敛 join。
+// 循环体内不允许 trigger/branch/join/loop（仅普通节点）。
+export function loopRegionOf({ nodes, edges, loopId }) {
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const succ = {}; const pred = {};
+  for (const n of nodes) { succ[n.id] = []; pred[n.id] = []; }
+  for (const e of edges) { succ[e.from].push(e.to); pred[e.to].push(e.from); }
+  const seen = new Set();
+  const joins = [];
+  const stack = [...(succ[loopId] ?? [])];
+  while (stack.length) {
+    const id = stack.pop();
+    if (seen.has(id)) continue;
+    seen.add(id);
+    if (byId.get(id)?.type === "join") { joins.push(id); continue; } // 不穿过 join
+    for (const c of succ[id] ?? []) stack.push(c);
+  }
+  if (joins.length === 0) return { err: `loop 节点 ${loopId} 缺少收敛的 join 节点` };
+  if (joins.length > 1) return { err: `loop 节点 ${loopId} 区域存在多个 join 节点（${joins.join(",")}），仅支持单一收敛` };
+  const joinId = joins[0];
+  const bodyIds = [...seen].filter((id) => id !== joinId);
+  if (!bodyIds.length) return { err: `loop 节点 ${loopId} 出边不能直连 join，循环体至少 1 个节点` };
+  const FORBIDDEN = new Set(["trigger", "branch", "join", "loop"]);
+  for (const id of bodyIds) {
+    const t = byId.get(id)?.type;
+    if (FORBIDDEN.has(t)) return { err: `loop 节点 ${loopId} 循环体内不允许 ${t} 节点（${id}）` };
+  }
+  for (const p of pred[joinId] ?? []) {
+    if (!bodyIds.includes(p)) return { err: `join 节点 ${joinId} 的入边来自循环体外节点 ${p}` };
+  }
+  for (const c of succ[loopId] ?? []) {
+    if (!bodyIds.includes(c)) return { err: `loop 节点 ${loopId} 的出边指向循环体外节点 ${c}` };
+  }
+  for (const id of bodyIds) {
+    for (const c of succ[id] ?? []) {
+      if (c !== joinId && !bodyIds.includes(c)) return { err: `loop 节点 ${loopId} 循环体节点 ${id} 的出边离开循环区域（${c}）` };
+    }
+  }
+  return { bodyIds, joinId };
 }
