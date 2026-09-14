@@ -228,6 +228,9 @@ function commitName() {
 function cancelName() { nameEditing.value = false; }
 
 async function hydrate() {
+  // 新建保存后 router.replace 落到真实 id 会再次触发本 watcher：内存数据已是最新且刚持久化，直接跳过重载
+  // （避免关闭参数浮窗、清空 Webhook 会话）
+  if (current.value.id && current.value.id === editingId.value) return;
   if (!editingId.value) { current.value = newPipeline(); resetHookSession(); return; }
   try {
     const p = await getPipeline(editingId.value);
@@ -243,6 +246,8 @@ async function hydrate() {
         params: {}, name: "触发源", position: defaultNodePosition(),
       });
     }
+    const trg = current.value.spec_json.nodes.find((n) => isTrigger(n));
+    if (trg) triggerTab.value = trg.kind === "webhook" ? "webhook" : "manual";
     ensurePositions(); // 老数据节点补 position，保证画布可拖
     // 下拉数据懒加载：仅当节点实际用到镜像/凭证才请求，避免挂载即连拉 3 个接口
     const ns = current.value.spec_json?.nodes ?? [];
@@ -1049,7 +1054,7 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
         >
           <template #node-dag-node="{ data }">
             <div class="canvas-node" :data-type="data.n.type" :class="{ 'is-trigger': isTrigger(data.n) }">
-              <Handle type="target" :position="Position.Left" />
+              <Handle v-if="!isTrigger(data.n)" type="target" :position="Position.Left" />
               <span class="cn-ico" :style="{ color: NODE_KINDS[data.n.type].accent }">
                 <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path :d="NODE_KINDS[data.n.type].icon" /></svg>
               </span>
@@ -1090,7 +1095,7 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
           <div class="float-head" @mousedown="startFloatDrag">
             <span class="cfg-kind" :style="{ backgroundColor: NODE_KINDS[selected.type].accent }">{{ NODE_KINDS[selected.type].label }}</span>
             <template v-if="!isTrigger(selected)">
-              <input class="cfg-name-input" v-model="selected.name" :placeholder="NODE_KINDS[selected.type].label" title="节点名称（执行详情页展示用）" />
+              <input class="cfg-name-input" v-model="selected.name" :placeholder="NODE_KINDS[selected.type].label" title="节点名称（执行详情页展示用）" @mousedown.stop />
             </template>
             <span class="cfg-id mono">{{ drainId(selected.id) }}</span>
             <span class="toolbox-spacer"></span>
