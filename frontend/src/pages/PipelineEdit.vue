@@ -57,10 +57,10 @@ const selected = computed(() => nodes.value.find((x) => x.id === selectedId.valu
 function selectNode(id) { selectedId.value = id; }
 // 边选中态：点选边进入边条件配置（与节点选中互斥：选择边时收起节点浮窗）
 const selEdgeId = ref("");
-const selEdge = computed(() => spec.value.edges.find((e) => edgeIdOf(e) === selEdgeId.value) ?? null);
+const selEdge = computed(() => (spec.value.edges ?? []).find((e) => edgeIdOf(e) === selEdgeId.value) ?? null);
 function selectEdge(id) { selEdgeId.value = id; }
 // 边条件编辑：直接改 spec.edges 中对应边的 cond 字段（null 表示无条件边）
-function setEdgeCond(e, patch) { e.cond = { ...(e.cond ?? {}), ...patch }; }
+function setEdgeCond(e, patch) { e.cond = { op: "eq", ...(e.cond ?? {}), ...patch }; }
 
 // 节点没有 position（老数据）时的兜底排布；新节点用 defaultNodePosition 级联放置
 function ensurePositions() {
@@ -1192,7 +1192,7 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
               </div>
               <p class="field-hint">若在「无条件边」与「条件边」间切换，请点选下方按钮或清空 path。</p>
             </template>
-            <template v-if="isTrigger(selected)">
+            <template v-else-if="isTrigger(selected)">
               <div class="trig-head">
                 <span class="mono-tag">触发源</span>
                 <div class="seg-tabs">
@@ -1282,7 +1282,7 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
               </template>
             </template>
 
-            <div v-else v-for="n in [selected]" :key="n.id">
+            <div v-else-if="selected" v-for="n in [selected]" :key="n.id">
               <template v-if="n.type === 'shell'">
                 <div class="field">
                   <label class="field-label">ECI 凭证 <span class="req">*</span></label>
