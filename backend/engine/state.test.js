@@ -310,6 +310,33 @@ test("branch：边条件按 $.outputs.<nodeId>.<field>（node_outputs）求值",
 
 // ---------- 控制节点：loop 迭代状态机 ----------
 
+test("loop：非法 items（count 非数字）→ advanceOnce 以错误 reject，且 loop 节点有 failed 记录", async () => {
+  const spec = {
+    nodes: [
+      { id: "t", type: "trigger", params: {} },
+      { id: "l", type: "loop", params: { items: { count: "abc" }, accumulate: [] } },
+      { id: "body", type: "sql", params: {} },
+      { id: "j", type: "join", params: {} },
+    ],
+    edges: [{ from: "t", to: "l" }, { from: "l", to: "body" }, { from: "body", to: "j" }],
+  };
+  const records = [];
+  const adv = createAdvancer({
+    stepRun: async () => ({ kind: "done", output: {} }),
+    snapshot: async () => {}, log: async () => {},
+    record: async (r) => records.push(r),
+  });
+  // 首轮仅根节点 t 完成；第二轮 l 就绪，loop 初始化解析非法 count 抛错 → advanceOnce reject（而非裸 throw 逃逸后无失败落库）
+  const r1 = await adv.advanceOnce({ spec, snap: { done: [], environment: {} }, execId: 13, environment: new Map() });
+  await assert.rejects(
+    () => adv.advanceOnce({ spec, snap: r1.snap, execId: 13, environment: new Map() }),
+    /loop count 非法/
+  );
+  const failed = records.filter((r) => r.nodeId === "l" && r.status === "failed");
+  assert.equal(failed.length, 1, "loop 初始化失败应落 failed 记录");
+  assert.match(failed[0].output.error, /loop count 非法/);
+});
+
 function loopSpec() {
   return {
     nodes: [

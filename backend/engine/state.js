@@ -40,12 +40,14 @@ export function createAdvancer({ stepRun, snapshot, record, recordRegistry = asy
       if (!Array.isArray(hit)) throw new Error(`loop items 路径未取到数组: ${items.path}`);
       return hit;
     }
-    const n = Number(items?.count);
-    if (!Number.isFinite(n) || n < 0 || Math.floor(n) !== n) throw new Error(`loop count 非法: ${items?.count}`);
+    if (items?.count == null) throw new Error(`loop count 非法: ${items?.count}`);
+    const n = Number(items.count);
+    if (!Number.isFinite(n) || n < 0 || Math.floor(n) !== n) throw new Error(`loop count 非法: ${items.count}`);
+    if (n > 1000) throw new Error("loop count 过大（上限 1000）");
     return Array.from({ length: n }, (_, i) => i + 1);
   }
   // 把当前迭代的 item/iteration 写入环境（随快照 environment 持久化，回调续跑不丢）
-  function setIterVars(loopId, st, env) {
+  function setIterVars(st, env) {
     const it = st.items[st.idx];
     env.set("item", typeof it === "string" ? it : JSON.stringify(it));
     env.set("iteration", String(st.idx + 1));
@@ -129,24 +131,34 @@ export function createAdvancer({ stepRun, snapshot, record, recordRegistry = asy
         if (node?.type === "loop") {
           // 初始化迭代状态：算 bodyIds/items，loop 节点立即 done（放行 body），执行记录留到循环结束补记。
           // 并行多个 loop 共享 item/iteration 变量名会互相覆盖（v1 不校验，普通节点约束已保证体内不嵌套）。
-          const condCtx = buildCondCtx({ triggerRaw: snap.trigger_raw, nodeOutputs, env: toFlat() });
-          const items = resolveLoopItems(node.params?.items, condCtx);
-          const { bodyIds, err } = loopRegionOf({ nodes: spec.nodes ?? [], edges: spec.edges ?? [], loopId: nodeId });
-          if (err) throw new Error(`loop 配置非法: ${err}`);
-          if (!items.length) {
-            // 空迭代：body 全部 skipped，loop 节点直接完成（done），join 下一轮自然收敛
-            for (const id of bodyIds) {
-              if (done.has(id)) continue;
-              done.add(id); skipped.add(id); nodeOutputs[id] = { skipped: true };
-              await record({ execId, nodeId: id, status: "skipped", output: { skipped: true } });
+          // items 里的 ${n} 模板先经 renderParams 渲染（直接读原始 params 会让 Number("${n}")=NaN 误走错误路径）。
+          // 初始化失败（count 非法/path 非数组/region 非法）不在 stepRun 的每节点 try/catch 兜底内，若裸 throw
+          // 会直接逃出 advanceOnce → 生产链路 500 且执行永久卡在 queued/running（无失败落库）；
+          // 故先落 failed 记录再上抛，执行级失败落库由 orchestrator 层处理。
+          try {
+            const condCtx = buildCondCtx({ triggerRaw: snap.trigger_raw, nodeOutputs, env: toFlat() });
+            const items = resolveLoopItems(renderParams(node.params?.items ?? {}, env), condCtx);
+            const { bodyIds, err } = loopRegionOf({ nodes: spec.nodes ?? [], edges: spec.edges ?? [], loopId: nodeId });
+            if (err) throw new Error(`loop 配置非法: ${err}`);
+            if (!items.length) {
+              // 空迭代：body 全部 skipped，loop 节点直接完成（done），join 下一轮自然收敛
+              for (const id of bodyIds) {
+                if (done.has(id)) continue;
+                done.add(id); skipped.add(id); nodeOutputs[id] = { skipped: true };
+                await record({ execId, nodeId: id, status: "skipped", output: { skipped: true } });
+              }
+              done.add(nodeId);
+              nodeOutputs[nodeId] = {}; // 与正常结束分支一致：空迭代输出为空对象
+              await record({ execId, nodeId, status: "done", output: {} });
+            } else {
+              loops[nodeId] = { items, idx: 0, bodyIds, acc: {} };
+              done.add(nodeId);
+              setIterVars(loops[nodeId], env);
             }
-            done.add(nodeId);
-            await record({ execId, nodeId, status: "done", output: {} });
-            continue;
+          } catch (err) {
+            await record({ execId, nodeId, status: "failed", output: { error: err?.message ?? String(err) } });
+            throw err;
           }
-          loops[nodeId] = { items, idx: 0, bodyIds, acc: {} };
-          done.add(nodeId);
-          setIterVars(nodeId, loops[nodeId], env);
           continue;
         }
         nodeOutputs[nodeId] = res.output ?? {};
@@ -218,7 +230,7 @@ export function createAdvancer({ stepRun, snapshot, record, recordRegistry = asy
     // ---- 控制节点：loop 迭代边界（本轮 body 全部完成且无等待时推进/收敛） ----
     for (const [loopId, st] of Object.entries(loops)) {
       const bodyAllDone = st.bodyIds.every((id) => done.has(id));
-      if (!bodyAllDone) continue;
+      if (!bodyAllDone || waiting) continue;
       // 累积本轮输出
       const loopNode = graph.nodes.get(loopId);
       for (const acc of loopNode?.params?.accumulate ?? []) {
@@ -228,7 +240,7 @@ export function createAdvancer({ stepRun, snapshot, record, recordRegistry = asy
       if (st.idx + 1 < st.items.length) {
         st.idx++;
         for (const id of st.bodyIds) done.delete(id); // 清掉 body 完成标记，下一轮重跑
-        setIterVars(loopId, st, env);
+        setIterVars(st, env);
       } else {
         // 循环结束：loop 节点补记执行记录（累积输出），清理迭代变量，join 自然就绪
         const out = Object.fromEntries(Object.entries(st.acc).map(([k, v]) => [k, JSON.stringify(v)]));
