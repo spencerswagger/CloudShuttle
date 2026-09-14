@@ -376,3 +376,20 @@ test("drain：外部 environment 只在首轮合并（后续轮以快照环境�
     assert.equal(env.size, 0, "第二轮起外部 environment 不再重放（空 Map）");
   }
 });
+
+test("run：meta.triggerRaw 写入快照 trigger_raw；不带 meta 再跑不残留旧值", async () => {
+  // Task 7 主交付物：orchestrator.run 第三参 meta.triggerRaw 必须落到 snap.trigger_raw
+  // （$.trigger.* 边条件上下文的数据源）。旧实现未接线时快照里该字段为 undefined。
+  // 存量快照预置旧 trigger_raw：验证 run 先 clear 旧快照再重建，不带 meta 的后续运行不残留。
+  const seen = [];
+  const store = memStore({ done: [], waiting: null, trigger_raw: { refs: ["stale"] } });
+  const orch = createOrchestrator(baseDeps({
+    mutex: localMutex(),
+    snapshotStore: store,
+    advance: async ({ snap }) => { seen.push(snap); return { snap, waiting: null }; },
+  }));
+  await orch.run({ execId: 1 }, new Map(), { triggerRaw: { refs: ["a"] } });
+  assert.deepEqual(seen.at(-1).trigger_raw, { refs: ["a"] }, "meta.triggerRaw 应写入 snap.trigger_raw");
+  await orch.run({ execId: 1 }, new Map());
+  assert.equal(seen.at(-1).trigger_raw, undefined, "不带 meta 时快照无旧 trigger_raw 残留（run 已 clear 旧快照）");
+});

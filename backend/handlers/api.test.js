@@ -138,3 +138,35 @@ test("创建管道：DAG 非法（loop 体内嵌套 branch）保存报 400 BAD_D
     (e) => e.status === 400 && e.code === "BAD_DAG" && String(e.message).includes("循环体内不允许 branch")
   );
 });
+
+test("创建管道：悬挂边（终点不在 nodes）保存报 400 BAD_DAG 而非 500", async () => {
+  // 回归：旧实现 assertVarsResolved 先跑 → checkVars 内部 buildGraph 对不存在的端点
+  // 直接 `.push` 到 undefined → 裸 TypeError → 500；DAG 结构校验必须先行拦成 400。
+  const { createPipeline } = await import("./api.js");
+  const body = {
+    name: "dangling-edge",
+    spec_json: {
+      nodes: [{ id: "a", type: "sql", params: {} }],
+      edges: [{ from: "a", to: "missing" }],
+    },
+  };
+  await assert.rejects(
+    () => createPipeline(body),
+    (e) => e.status === 400 && e.code === "BAD_DAG" && String(e.message).includes("终点不存在")
+  );
+});
+
+test("更新管道：悬挂边（起点不在 nodes）保存报 400 BAD_DAG 而非 500", async () => {
+  const { updatePipeline } = await import("./api.js");
+  const body = {
+    name: "dangling-edge-upd",
+    spec_json: {
+      nodes: [{ id: "a", type: "sql", params: {} }],
+      edges: [{ from: "ghost", to: "a" }],
+    },
+  };
+  await assert.rejects(
+    () => updatePipeline(9, body),
+    (e) => e.status === 400 && e.code === "BAD_DAG" && String(e.message).includes("起点不存在")
+  );
+});

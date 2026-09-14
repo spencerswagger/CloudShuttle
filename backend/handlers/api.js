@@ -65,8 +65,11 @@ export async function getPipeline(id) {
 
 export async function createPipeline(body) {
   const specObj = resolveSpec(body);
-  assertVarsResolved(specObj);
+  // 结构校验先行、语义校验在后：悬挂边（端点不在 nodes）会让 checkVars 的 buildGraph
+  // 对 undefined 直接 push → 裸 TypeError → 500；必须先由 validateSpec 拦成 400 BAD_DAG，
+  // 与运行时（hydrateForRun）的校验契约保持一致。
   assertDagValid(specObj);
+  assertVarsResolved(specObj);
   const spec = JSON.stringify(specObj);
   // 每条管道的 webhook 触发独立密钥，创建时生成并存库
   const webhookSecret = randomUUID();
@@ -197,8 +200,9 @@ function oapiForm(data) { return new URLSearchParams(data).toString(); }
 // 注意：改名后 webhook 触发地址随 name 变化，需由前端提示用户重新复制地址。
 export async function updatePipeline(id, body) {
   const specObj = resolveSpec(body);
-  assertVarsResolved(specObj);
+  // 同 createPipeline：DAG 结构校验先行（悬挂边 400 BAD_DAG），变量语义校验在后
   assertDagValid(specObj);
+  assertVarsResolved(specObj);
   const spec = JSON.stringify(specObj);
   const { rows: r } = await pool.query(
     `UPDATE pipeline SET name=$2, description=$3, spec_json=$4::jsonb, rev=rev+1, updated_at=now()
