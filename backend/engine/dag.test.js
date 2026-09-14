@@ -78,3 +78,22 @@ test("validateSpec 校验 loop 区域约束（体内嵌套 / 缺 join）", () =>
   const out = validateSpec({ nodes, edges });
   assert.ok(out.errors.some((e) => e.includes("循环体内不允许 branch")));
 });
+
+test("validateSpec：loop 节点 + 悬挂边 → 返回 errors 而非抛异常", () => {
+  const nodes = [node("l", "loop"), node("s", "shell"), node("j", "join")];
+  const edges = [{ from: "l", to: "s" }, { from: "s", to: "j" }, { from: "l", to: "ghost" }];
+  const out = validateSpec({ nodes, edges });
+  assert.equal(out.ok, false);
+  assert.ok(out.errors.some((e) => /ghost/.test(e)), "应保留「边端点不存在」错误");
+});
+
+test("loopRegionOf 直调：含悬挂边不抛异常（返回 { err } 或正常结构）", () => {
+  // succ 侧悬挂边（from 不存在）与 pred 侧悬挂边（to 不存在）均不应抛
+  const nodes = [node("l", "loop"), node("j", "join")];
+  const edges = [{ from: "l", to: "ghost" }, { from: "ghost", to: "j" }];
+  let out;
+  assert.doesNotThrow(() => { out = loopRegionOf({ nodes, edges, loopId: "l" }); });
+  assert.ok(out && typeof out === "object", "应返回结果对象而非抛出");
+  // 悬挂边被跳过 → 无可达 join → 返回 err 结构
+  assert.ok(out.err !== undefined, "应返回 { err } 结构");
+});

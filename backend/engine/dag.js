@@ -98,11 +98,17 @@ export function validateSpec(spec) {
 // 计算 loop 循环区域：loopId → { bodyIds, joinId }（或 { err }）。
 // 区域 = loop 可达、首个 join 之前的全部节点；仅支持单一收敛 join。
 // 循环体内不允许 trigger/branch/join/loop（仅普通节点）。
+// Minor：循环体节点（bodyIds 内节点）的外部入边（来自区域外的边）v1 不做校验/语义未定义，默认放行。
 export function loopRegionOf({ nodes, edges, loopId }) {
   const byId = new Map(nodes.map((n) => [n.id, n]));
   const succ = {}; const pred = {};
   for (const n of nodes) { succ[n.id] = []; pred[n.id] = []; }
-  for (const e of edges) { succ[e.from].push(e.to); pred[e.to].push(e.from); }
+  for (const e of edges) {
+    // 悬挂边（端点不在 nodes 中）：跳过，validateSpec 已报「边端点不存在」错误，
+    // 且 DFS 可达性用不到坏边；不跳过会在未知端点处 push 到 undefined 抛异常（500）。
+    if (!byId.has(e.from) || !byId.has(e.to)) continue;
+    succ[e.from].push(e.to); pred[e.to].push(e.from);
+  }
   const seen = new Set();
   const joins = [];
   const stack = [...(succ[loopId] ?? [])];
