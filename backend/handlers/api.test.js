@@ -170,3 +170,32 @@ test("更新管道：悬挂边（起点不在 nodes）保存报 400 BAD_DAG 而�
     (e) => e.status === 400 && e.code === "BAD_DAG" && String(e.message).includes("起点不存在")
   );
 });
+
+test("创建管道：合法 loop 管道引用 ${iteration}/${shas} 不被 VAR_UNRESOLVED 拦截（能抓到旧实现）", async () => {
+  const { createPipeline } = await import("./api.js");
+  const body = {
+    name: "loop-vars",
+    spec_json: {
+      nodes: [
+        { id: "t", type: "trigger", params: {} },
+        { id: "l", type: "loop", params: { items: { count: 3 }, accumulate: [{ key: "shas", from: "body", field: "sha" }] } },
+        { id: "body", type: "sql", params: { statements: ["select ${iteration} ${item}"] } },
+        { id: "j", type: "join", params: {} },
+        { id: "tail", type: "sql", params: { statements: ["select ${shas}"] } },
+      ],
+      edges: [
+        { from: "t", to: "l" },
+        { from: "l", to: "body" },
+        { from: "body", to: "j" },
+        { from: "j", to: "tail" },
+      ],
+    },
+  };
+  // 修复前 assertVarsResolved 抛 422 VAR_UNRESOLVED；修复后越过变量校验走到 INSERT
+  // （无 DB 时被 ECONNREFUSED 等环境错误拦截也符合预期，关键是不再因 VAR_UNRESOLVED 失败）
+  try {
+    await createPipeline(body);
+  } catch (e) {
+    assert.notEqual(e?.code, "VAR_UNRESOLVED", `不应因变量未解析被拦截: ${e?.message}`);
+  }
+});

@@ -113,3 +113,52 @@ test("checkVars 引用自身声明的输出 报错", () => {
   const err = checkVars(spec, { ancestors });
   assert.ok(err && err.includes("branch"));
 });
+
+test("checkVars 合法 loop 管道：循环体内 ${item}/${iteration}、下游 ${shas}（accumulate 输出）不报错", () => {
+  const spec = {
+    nodes: [
+      { id: "t", type: "trigger", params: {} },
+      { id: "l", type: "loop", params: { items: { count: 3 }, accumulate: [{ key: "shas", from: "body", field: "sha" }] } },
+      { id: "body", type: "sql", params: { statements: ["select ${iteration} ${item}"] } },
+      { id: "j", type: "join", params: {} },
+      { id: "tail", type: "sql", params: { statements: ["select ${shas}"] } },
+    ],
+    edges: [
+      { from: "t", to: "l" },
+      { from: "l", to: "body" },
+      { from: "body", to: "j" },
+      { from: "j", to: "tail" },
+    ],
+  };
+  assert.equal(checkVars(spec, { ancestors }), null);
+});
+
+test("checkVars 无 loop 祖先的节点引用 ${item} 仍报错", () => {
+  const spec = {
+    nodes: [
+      { id: "t", type: "trigger", params: {} },
+      { id: "body", type: "sql", params: { statements: ["select ${item}"] } },
+    ],
+    edges: [{ from: "t", to: "body" }],
+  };
+  const err = checkVars(spec, { ancestors });
+  assert.ok(err && err.includes("item") && err.includes("body"));
+});
+
+test("checkVars 循环体外的下游节点引用 ${item} 仍报错（循环结束后运行时已清理）", () => {
+  const spec = {
+    nodes: [
+      { id: "l", type: "loop", params: { items: { count: 3 }, accumulate: [] } },
+      { id: "body", type: "sql", params: {} },
+      { id: "j", type: "join", params: {} },
+      { id: "tail", type: "sql", params: { statements: ["select ${item}"] } },
+    ],
+    edges: [
+      { from: "l", to: "body" },
+      { from: "body", to: "j" },
+      { from: "j", to: "tail" },
+    ],
+  };
+  const err = checkVars(spec, { ancestors });
+  assert.ok(err && err.includes("item") && err.includes("tail"));
+});
