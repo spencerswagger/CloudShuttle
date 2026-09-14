@@ -114,3 +114,8 @@ test("steps 类型注册表包含 sql（buildApp 装配来源，启动时校验�
   const { STEP_TYPES } = await import("../index.js");
   assert.ok(STEP_TYPES.includes("sql"));
 });
+
+test("steps 类型注册表包含控制节点三类型 branch/join/loop（已实现但未登记会漏检）", async () => {
+  const { STEP_TYPES } = await import("../index.js");
+  assert.ok(["branch", "join", "loop"].every((t) => STEP_TYPES.includes(t)));
+});
