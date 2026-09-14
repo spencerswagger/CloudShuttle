@@ -1,15 +1,20 @@
 -- deploy/seed.sql —— 预置镜像与示例管道（只植入一次，幂等可重入）
--- 预置镜像：exec_image.name 有 UNIQUE，ON CONFLICT DO NOTHING 天然幂等。
+-- 预置镜像：注意不能用 ON CONFLICT (name)——软删除迁移已把 exec_image.name
+--   的 UNIQUE 约束换成「部分唯一索引」（仅未删除行唯一），而 ON CONFLICT 的列推断
+--   只匹配唯一/排除约束、匹配不到索引，直接写会报 no unique constraint matching。
+--   改用逐行存在性守卫，对新库/存量库都幂等安全。
 -- 示例管道 demo-rollout：用存在性守卫保证全局仅创建一次（不会每次启动重复建），
 --   并同步写入 pipeline_rev，否则按 spec 加载时读不到 nodes。
 
-INSERT INTO exec_image(name, image, category, builtin) VALUES
+INSERT INTO exec_image(name, image, category, builtin)
+SELECT * FROM (VALUES
  ('Node 20','node:20-alpine','language',true),
  ('Golang 1.23','golang:1.23','language',true),
  ('Python 3.12','python:3.12-slim','language',true),
  ('Java 21','eclipse-temurin:21-jdk','language',true),
  ('Docker+Git 构建','cloudshuttle/runner:0.1','toolchain',true)
-ON CONFLICT (name) DO NOTHING;
+) v(name, image, category, builtin)
+WHERE NOT EXISTS (SELECT 1 FROM exec_image WHERE name = v.name AND deleted_at IS NULL);
 
 DO $$
 DECLARE
