@@ -202,13 +202,24 @@ test("branch：命中边 target 为 join 时 join 不被误判 dead（有激活�
     snapshot: async () => {}, log: async () => {},
     record: async (r) => records.push(r),
   });
-  // 第 1 轮：t、b 都 done；条件命中 → 无 skipped；j 未就绪
+  // 第 1 轮（严格单轮语义）：只有根节点 t 就绪完成，branch 不首轮就绪执行
   const r1 = await adv.advanceOnce({ spec, snap: { done: [], environment: {}, trigger_raw: { k: "ok" } }, execId: 1, environment: new Map() });
-  assert.equal(r1.snap.done.includes("j"), false);
-  assert.deepEqual(records.filter((r) => r.status === "skipped"), []);
-  // 第 2 轮：j 就绪并完成 → completed
-  const r2 = await adv.advanceOnce({ spec, snap: r1.snap, execId: 1, environment: new Map() });
-  assert.equal(r2.snap.status, "completed");
+  assert.ok(r1.snap.done.includes("t"), "首轮根节点 t 完成");
+  assert.ok(!r1.snap.done.includes("b"), "branch 不在首轮同轮执行（单轮语义）");
+  assert.deepEqual(records.filter((r) => r.status === "skipped"), [], "首轮无 skipped 记录");
+  // 循环推进直到 completed：b 第 2 轮、j 第 3 轮
+  let snap = r1.snap;
+  let final = null;
+  let guard = 0;
+  for (;;) {
+    const out = await adv.advanceOnce({ spec, snap, execId: 1, environment: new Map() });
+    snap = out.snap;
+    if (out.snap?.status === "completed" || out.waiting) { final = out; break; }
+    if (++guard > 8) throw new Error("推进未收敛");
+  }
+  assert.equal(final.snap.status, "completed");
+  assert.ok(final.snap.done.includes("j"), "join 最终完成（有激活入边，未被误判 dead）");
+  assert.deepEqual(records.filter((r) => r.status === "skipped"), [], "全程无 skipped 记录");
 });
 
 test("branch：条件未命中 → 下游全部 skipped，执行仍 completed（无匹配即跳过语义）", async () => {
@@ -231,13 +242,19 @@ test("branch：条件未命中 → 下游全部 skipped，执行仍 completed（
     snapshot: async () => {}, log: async () => {},
     record: async (r) => records.push(r),
   });
-  const r1 = await adv.advanceOnce({ spec, snap: { done: [], environment: {}, trigger_raw: { k: "no" } }, execId: 2, environment: new Map() });
-  // 本轮内 t/b done，s/j 被标记 skipped
-  assert.ok(r1.snap.done.includes("s"));
-  assert.ok(r1.snap.done.includes("j"));
+  // 循环推进直到 completed：t 第 1 轮、b 第 2 轮，b 完成轮 dead 传播把 s/j 标记 skipped
+  let snap = { done: [], environment: {}, trigger_raw: { k: "no" } };
+  let final = null;
+  let guard = 0;
+  for (;;) {
+    const out = await adv.advanceOnce({ spec, snap, execId: 2, environment: new Map() });
+    snap = out.snap;
+    if (out.snap?.status === "completed" || out.waiting) { final = out; break; }
+    if (++guard > 8) throw new Error("推进未收敛");
+  }
+  assert.equal(final.snap.status, "completed");
+  assert.ok(final.snap.done.includes("s"), "未命中边下游 s 记为 done(skipped)");
+  assert.ok(final.snap.done.includes("j"), "join j 记为 done(skipped)");
   const skippedIds = records.filter((r) => r.status === "skipped").map((r) => r.nodeId);
   assert.deepEqual(skippedIds.sort(), ["j", "s"]);
-  // 全部 done → 下一轮 completed
-  const r2 = await adv.advanceOnce({ spec, snap: r1.snap, execId: 2, environment: new Map() });
-  assert.equal(r2.snap.status, "completed");
 });

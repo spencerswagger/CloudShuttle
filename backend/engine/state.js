@@ -51,7 +51,7 @@ export function createAdvancer({ stepRun, snapshot, record, recordRegistry = asy
       // 且每个回调只移除自己的 nodeId；只要还有节点在等，本轮的推进就应让位（屏障语义），
       // 否则仍等着的节点会被当作 ready 重复派发（Task 2 收窄针对的重复派发隐患）。
       console.log(`[advance] exec=${execId} 存在等待回调的节点 node=${JSON.stringify(waiting)}，本次不推进，已结束节点数=${done.size}`);
-      return { spec, snap: { done, waiting, environment: toFlat() }, waiting };
+      return { spec, snap: { ...snap, done: [...done], waiting, environment: toFlat() }, waiting };
     }
 
     const ready = nextReady(graph, done);
@@ -122,34 +122,6 @@ export function createAdvancer({ stepRun, snapshot, record, recordRegistry = asy
           `ref=${res.ref ?? "-"}，等待外部回调`);
         await record({ execId, nodeId, status: res.kind, ref: res.ref });
         await log(execId, `⏸ 节点 ${nodeId} 进入${res.kind === "wait" ? "外部等待" : "派发"}状态，等待回调`);
-      }
-    }
-    // ---- 控制节点：branch 就绪即同轮链式执行（no-op step）----
-    // branch 的父节点全部 done 后立即在本轮内执行（剪枝随即生效，join 少等一轮、同轮收敛）；
-    // 仅对 branch 控制节点生效，普通节点仍严格按 nextReady 的单轮语义推进（既有测试锁定）。
-    for (;;) {
-      const rb = [...graph.nodes.values()].find(
-        (n) => n.type === "branch" && !done.has(n.id) && !skipped.has(n.id) &&
-          (graph.parents[n.id] ?? []).every((p) => done.has(p))
-      );
-      if (!rb) break;
-      try {
-        const renderedNode = { ...rb, params: renderParams(rb.params, env) };
-        const res = await stepRun(renderedNode, { done: [...done], spec, execId, environment: env, recordRegistry });
-        if (res?.kind === "done") {
-          done.add(rb.id);
-          nodeOutputs[rb.id] = res.output ?? {};
-          await record({ execId, nodeId: rb.id, status: "done", output: res.output, logs: res.logs });
-          await log(execId, `✔ 节点 ${rb.id} 完成（branch 就绪即执行）`);
-        } else {
-          // branch 理论上 no-op，防御性处理 dispatch/wait 分支（加入 waiting 集）
-          waitingNodes.push(rb.id);
-          await record({ execId, nodeId: rb.id, status: res.kind, ref: res.ref });
-          await log(execId, `⏸ 节点 ${rb.id} 进入${res.kind === "wait" ? "外部等待" : "派发"}状态（branch 就绪即执行）`);
-        }
-      } catch (err) {
-        console.error(`[advance] exec=${execId} 节点 ${rb.id} 执行失败: ${err?.message ?? err}`);
-        await record({ execId, nodeId: rb.id, status: "failed", output: { error: err?.message ?? String(err) } });
       }
     }
     if (waitingNodes.length) waiting = waitingNodes;
