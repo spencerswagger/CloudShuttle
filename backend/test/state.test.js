@@ -25,9 +25,9 @@ test("起点推进：shell 节点派发而非完成全部", async () => {
     record: async (r) => { recorded = r; },
   });
   const out = await adv.advanceOnce({ spec, snap: { done: new Set(), waiting: null } });
-  assert.equal(out.waiting, "n1");
+  assert.deepEqual(out.waiting, ["n1"], "waiting 集合化为数组");
   assert.equal(recorded.status, "dispatch"); // stepRun 派发并记 record
-  assert.ok(!out.snap.done.has("n1"));        // 未标记完成
+  assert.ok(!out.snap.done.includes("n1"));  // 未标记完成
 });
 
 test("空入边起点在无等待节点的图上同步完成", async () => {
@@ -37,7 +37,7 @@ test("空入边起点在无等待节点的图上同步完成", async () => {
     snapshot: async () => {}, record: async () => {},
   });
   const out = await adv.advanceOnce({ spec: spec2, snap: { done: new Set(), waiting: null } });
-  assert.ok(out.snap.done.has("a"));
+  assert.ok(out.snap.done.includes("a"));
   assert.equal(out.waiting, null);
 });
 

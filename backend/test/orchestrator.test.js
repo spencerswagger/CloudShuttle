@@ -32,13 +32,13 @@ test("webhook 触发的等价链路：装配层造好 spec 后 run 首次推进�
   const calls = [];
   const adv = async ({ spec, snap }) => {
     calls.push(["advance", spec.execId, snap]);
-    return { spec, snap: { done: [], waiting: "n1" }, waiting: "n1" };
+    return { spec, snap: { done: [], waiting: ["n1"] }, waiting: ["n1"] };
   };
   const deps = fakeDeps({ advance: adv });
   const orch = createOrchestrator(deps);
   const specWithExec = { ...(await deps.loadSpec(1, { trigger: "webhook", body: { ref: "main" } })), execId: 11 };
   const out = await orch.run(specWithExec);
-  assert.equal(out.waiting, "n1");
+  assert.deepEqual(out.waiting, ["n1"], "waiting 集合化为数组");
   // 新执行先清同 id 旧快照，再带着 execId 推进一次
   assert.deepEqual(deps.calls.filter((c) => c[0] === "clear"), [["clear", 11]]);
   assert.deepEqual(calls.map((c) => c[1]), [11]);
@@ -52,11 +52,11 @@ test("eciDone 标记节点后推进到审批卡点", async () => {
   deps.snapshotStore.save = async (id, s) => { saved = s; deps.calls.push(["save", id, s]); };
   const adv = async ({ spec, snap }) => {
     assert.ok(snap.done.includes("n1"));
-    return { spec, snap: { done: ["n1"], waiting: "n2" }, waiting: "n2" };
+    return { spec, snap: { done: ["n1"], waiting: ["n2"] }, waiting: ["n2"] };
   };
   const orch = createOrchestrator({ ...deps, advance: adv });
   const out = await orch.onEciDone({ execId: 1, nodeId: "n1" });
-  assert.equal(out.waiting, "n2");
+  assert.deepEqual(out.waiting, ["n2"]);
   // 快照在 advance 前已写回：n1 标记 done、waiting 清空
   assert.deepEqual(saved, { done: ["n1"], waiting: null });
 });
@@ -65,11 +65,16 @@ test("onApproval approve 续跑到下一节点", async () => {
   const deps = fakeDeps({ loadSpecForExec: async (execId) => ({ execId, ...spec }) });
   let saved = null;
   deps.snapshotStore.save = async (id, s) => { saved = s; deps.calls.push(["save", id, s]); };
-  const adv = async () => ({ waiting: "n2" });
+  const adv = async () => ({ waiting: ["n2"] });
   const orch = createOrchestrator({ ...deps, advance: adv });
   const out = await orch.onApproval({ execId: 1, nodeId: "n1", decision: "approve" });
-  assert.equal(out.waiting, "n2");
-  assert.deepEqual(saved, { done: ["n1"], waiting: null });
+  assert.deepEqual(out.waiting, ["n2"]);
+  // approve 分支把 decision 输出透传进快照（environment 合并 + node_outputs 写入），供后续节点/条件上下文使用
+  assert.deepEqual(saved, {
+    done: ["n1"], waiting: null,
+    environment: { decision: "approve" },
+    node_outputs: { n1: { decision: "approve" } },
+  });
 });
 
 test("onApproval reject 终止执行", async () => {
@@ -138,7 +143,7 @@ test("eciDone：解析 K=V output 写回 environment，后继节点可见（FC �
 
 test("跨回调续跑不丢 environment：markDone 后接续的 advance 入参仍含已累积变量", async () => {
   let captured = null;
-  const adv = async (arg) => { captured = arg; return { spec: arg.spec, snap: arg.snap, waiting: "n2" }; };
+  const adv = async (arg) => { captured = arg; return { spec: arg.spec, snap: arg.snap, waiting: ["n2"] }; };
   const deps = fakeDeps({ loadSpecForExec: async (execId) => ({ execId, ...spec }), advance: adv });
   // 模拟：run 已推进累积 x=1 写入快照 → 回调 onEciDone → 续跑 advance 仍带 x=1
   deps.snapshotStore.load = async () => ({ done: ["n1"], waiting: "n2", environment: { x: "1" } });

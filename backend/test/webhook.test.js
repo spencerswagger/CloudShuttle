@@ -15,6 +15,7 @@ import {
   webhook, dingtalkCardCb, recordProbe, probeStatement, probeBodyJson,
 } from "../handlers/hook.js";
 import { pool } from "../db/pg.js";
+import { redis } from "../db/redis.js";
 import { routeToHandler, isDispatched, parseEvent, qsOf, decodePathSegment } from "../index.js";
 
 // RE.webhookTrigger 的同形正则（测试侧不复用内部常量，显式写出以固化路径契约）
@@ -291,7 +292,7 @@ test("R1+R2+R3 真走 handler 入口：中文名解码、secret 生效、401 如
   pool.query = async (sql, params) => {
     const s = String(sql).replace(/\s+/g, " ").trim();
     seen.push({ sql: s, params });
-    if (/^SELECT id, webhook_secret FROM pipeline WHERE name=\$1$/.test(s)) {
+    if (/^SELECT id, webhook_secret FROM pipeline WHERE name=\$1 AND deleted_at IS NULL$/.test(s)) {
       return { rows: [{ id: 77, webhook_secret: "s3cret" }] };
     }
     return { rows: [] };
@@ -315,6 +316,112 @@ test("R1+R2+R3 真走 handler 入口：中文名解码、secret 生效、401 如
   assert.equal(probe.params[0], 77);
   assert.deepEqual(JSON.parse(probe.params[1]), { ref: "refs/heads/main" });
   assert.equal(probe.params[2], 401, "探针必须带上本次处理结果");
+});
+
+// ---------- Task 7：triggerRaw 装配链路（hydrateForRun → orchestrator.run → 快照 trigger_raw） ----------
+// hydrateForRun 是 buildApp 的内部函数，直接测需触发 buildApp（连 DB/Redis，重）；
+// 改为走真实 handler 入口 + 注入式 pool/redis mock：webhook/manual 触发跑完整链路后，
+// 断言落库快照的 trigger_raw 与触发输入一致（旧实现未装配 triggerRaw 时该字段为 undefined，
+// 本用例即失败，能抓到未接线实现）。
+function memRedis() {
+  const store = new Map();
+  return {
+    store,
+    set: async (k, v, ...rest) => { store.set(k, v); return "OK"; },
+    get: async (k) => store.get(k) ?? null,
+    del: async (k) => { store.delete(k); },
+  };
+}
+
+// 触发链路共用的 SQL 装配：单 trigger 节点（无外部副作用），其余查询走空行兜底
+function triggerChainSql(execId, { name = "svcA", runNo = 1, secret = null } = {}) {
+  pool.query = async (sql, params) => {
+    const s = String(sql).replace(/\s+/g, " ").trim();
+    if (/^SELECT id, webhook_secret FROM pipeline WHERE name=\$1 AND deleted_at IS NULL$/.test(s)) {
+      return { rows: [{ id: execId, webhook_secret: secret }] };
+    }
+    if (/^SELECT 1 FROM pipeline WHERE id=\$1 AND deleted_at IS NULL$/.test(s)) {
+      return { rows: [{ id: execId }] };
+    }
+    if (/^SELECT spec_json FROM pipeline_rev/.test(s)) {
+      return { rows: [{ spec_json: { nodes: [{ id: "t", type: "trigger", params: {} }], edges: [] } }] };
+    }
+    if (/^INSERT INTO execution\(/.test(s)) return { rows: [{ id: execId }] };
+    if (/^SELECT name FROM pipeline WHERE id=\$1$/.test(s)) return { rows: [{ name }] };
+    if (/^SELECT run_no, started_at FROM execution/.test(s)) return { rows: [{ run_no: runNo, started_at: null }] };
+    return { rows: [] };
+  };
+}
+
+// 注入式 mock redis：捕获 run 落库的 snap:<execId> 快照；用毕恢复原型方法
+function patchRedisWith(redisMock, savedSnapshots) {
+  const prev = { set: redis.set, get: redis.get, del: redis.del };
+  redis.set = async (k, v, ...rest) => {
+    if (String(k).startsWith("snap:")) savedSnapshots.push(JSON.parse(v));
+    return redisMock.set(k, v, ...rest);
+  };
+  redis.get = redisMock.get;
+  redis.del = redisMock.del;
+  return () => {
+    for (const m of ["set", "get", "del"]) {
+      if (prev[m] === undefined) delete redis[m];
+      else redis[m] = prev[m];
+    }
+  };
+}
+
+test("webhook 触发：orchestrator.run 收到 meta.triggerRaw = 请求 body，落库快照 trigger_raw 一致", async () => {
+  const { handler } = await import("../index.js");
+  const redisMock = memRedis();
+  const savedSnapshots = [];
+  const restoreRedis = patchRedisWith(redisMock, savedSnapshots);
+  triggerChainSql(42, { secret: "s3cret" });
+  let res;
+  try {
+    res = await handler({
+      httpMethod: "POST",
+      path: "/hook/webhook/svcA?secret=s3cret",
+      headers: { host: "ctl.example.com", "content-type": "application/json" },
+      body: JSON.stringify({ ref: "refs/heads/main" }),
+    });
+  } finally {
+    delete pool.query;
+    restoreRedis();
+  }
+  assert.equal(res.statusCode, 200, "密钥正确 + 合法 DAG 应触发成功");
+  assert.equal(savedSnapshots.length, 1, "run 完成时应落库一次快照");
+  assert.deepEqual(
+    savedSnapshots[0].trigger_raw,
+    { ref: "refs/heads/main" },
+    "快照 trigger_raw 必须等于 webhook 请求 body（hydrateForRun 的 webhookBody → meta.triggerRaw → snap.trigger_raw）"
+  );
+});
+
+test("manual 触发：hydrateForRun 三形态之 manual → meta.triggerRaw = 表单值，落库快照 trigger_raw 一致", async () => {
+  const { handler } = await import("../index.js");
+  const redisMock = memRedis();
+  const savedSnapshots = [];
+  const restoreRedis = patchRedisWith(redisMock, savedSnapshots);
+  triggerChainSql(43, { name: "svcA", runNo: 2 });
+  let res;
+  try {
+    res = await handler({
+      httpMethod: "POST",
+      path: "/api/pipelines/9/run",
+      headers: { host: "ctl.example.com", "content-type": "application/json" },
+      body: JSON.stringify({ params: { branch: "release" } }),
+    });
+  } finally {
+    delete pool.query;
+    restoreRedis();
+  }
+  assert.equal(res.statusCode, 200, "manual 触发应成功");
+  assert.equal(savedSnapshots.length, 1, "run 完成时应落库一次快照");
+  assert.deepEqual(
+    savedSnapshots[0].trigger_raw,
+    { branch: "release" },
+    "快照 trigger_raw 必须等于 manual 表单值 formValue"
+  );
 });
 
 // ---------- R4/R5：改名生效与返显去敏 ----------

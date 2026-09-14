@@ -8,7 +8,7 @@ import { HttpError } from "../errors.js";
 import { buildDbConfig, createConnection } from "../providers/db.js";
 import { randomUUID } from "node:crypto";
 import { checkVars, resolveScope } from "../engine/variables.js";
-import { buildGraph, ancestors } from "../engine/dag.js";
+import { buildGraph, ancestors, validateSpec } from "../engine/dag.js";
 
 const rows = (r) => r.rows;
 
@@ -27,6 +27,12 @@ function assertVarsResolved(spec) {
   if (err) throw new HttpError(422, "VAR_UNRESOLVED", err, "unknown variable");
 }
 
+// 保存前 DAG 校验（节点唯一/边端点/无环/边条件格式/loop 区域）；非法直接 400
+function assertDagValid(spec) {
+  const checked = validateSpec(spec);
+  if (!checked.ok) throw new HttpError(400, "BAD_DAG", "DAG 校验失败：" + checked.errors.join("；"));
+}
+
 // 把当前 spec 对应版本登记进 pipeline_rev（历史版本表）
 async function snapshotRev(pipelineId, rev, spec) {
   await pool.query(
@@ -43,14 +49,14 @@ export const PIPELINE_COLUMNS = "id, name, description, spec_json, rev, created_
 
 export async function listPipelines() {
   return rows(
-    await pool.query(`SELECT ${PIPELINE_COLUMNS} FROM pipeline ORDER BY id`)
+    await pool.query(`SELECT ${PIPELINE_COLUMNS} FROM pipeline WHERE deleted_at IS NULL ORDER BY id`)
   );
 }
 
 // 详情（编辑返显用）：单条流水线，含完整 spec_json
 export async function getPipeline(id) {
   const { rows } = await pool.query(
-    `SELECT ${PIPELINE_COLUMNS} FROM pipeline WHERE id=$1`,
+    `SELECT ${PIPELINE_COLUMNS} FROM pipeline WHERE id=$1 AND deleted_at IS NULL`,
     [id]
   );
   if (!rows[0]) throw new HttpError(404, "PIPELINE_NOT_FOUND", "流水线不存在");
@@ -59,6 +65,10 @@ export async function getPipeline(id) {
 
 export async function createPipeline(body) {
   const specObj = resolveSpec(body);
+  // 结构校验先行、语义校验在后：悬挂边（端点不在 nodes）会让 checkVars 的 buildGraph
+  // 对 undefined 直接 push → 裸 TypeError → 500；必须先由 validateSpec 拦成 400 BAD_DAG，
+  // 与运行时（hydrateForRun）的校验契约保持一致。
+  assertDagValid(specObj);
   assertVarsResolved(specObj);
   const spec = JSON.stringify(specObj);
   // 每条管道的 webhook 触发独立密钥，创建时生成并存库
@@ -84,7 +94,7 @@ export function buildWebhookUrl({ base = "", name, secret }) {
 // name 与 secret 同一条 SELECT 读出；url 由后端生成，前端只展示/复制。
 export async function getWebhookSecret(id, { base = "" } = {}) {
   const { rows: r } = await pool.query(
-    `SELECT name, webhook_secret FROM pipeline WHERE id=$1`,
+    `SELECT name, webhook_secret FROM pipeline WHERE id=$1 AND deleted_at IS NULL`,
     [id]
   );
   if (!r[0]) return null;
@@ -100,7 +110,7 @@ export async function getWebhookSecret(id, { base = "" } = {}) {
 export async function resetWebhookSecret(id, { base = "" } = {}) {
   const secret = randomUUID();
   const { rows: r } = await pool.query(
-    `UPDATE pipeline SET webhook_secret=$2 WHERE id=$1 RETURNING name`,
+    `UPDATE pipeline SET webhook_secret=$2 WHERE id=$1 AND deleted_at IS NULL RETURNING name`,
     [id, secret]
   );
   if (!r[0]) return null;
@@ -190,11 +200,13 @@ function oapiForm(data) { return new URLSearchParams(data).toString(); }
 // 注意：改名后 webhook 触发地址随 name 变化，需由前端提示用户重新复制地址。
 export async function updatePipeline(id, body) {
   const specObj = resolveSpec(body);
+  // 同 createPipeline：DAG 结构校验先行（悬挂边 400 BAD_DAG），变量语义校验在后
+  assertDagValid(specObj);
   assertVarsResolved(specObj);
   const spec = JSON.stringify(specObj);
   const { rows: r } = await pool.query(
     `UPDATE pipeline SET name=$2, description=$3, spec_json=$4::jsonb, rev=rev+1, updated_at=now()
-      WHERE id=$1 RETURNING ${PIPELINE_COLUMNS}`,
+      WHERE id=$1 AND deleted_at IS NULL RETURNING ${PIPELINE_COLUMNS}`,
     [id, body?.name, body?.description ?? null, spec]
   );
   if (r[0]) await snapshotRev(id, r[0].rev, spec);
@@ -216,30 +228,21 @@ export async function getNodeScope(id, nodeId) {
   return { keys: [...scope].sort() };
 }
 
+// 软删除流水线：只打 deleted_at 标记，历史执行/执行日志/rev 全量保留（原物理删除会因
+// execution_log 外键失败 500，且丢失审计轨迹）。活跃行不再唯一冲突，允许删除后同名重建。
 export async function deletePipeline(id) {
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    await client.query(
-      `DELETE FROM webhook_registry WHERE exec_id IN (SELECT id FROM execution WHERE pipeline_id=$1)`, [id]);
-    await client.query(
-      `DELETE FROM execution_node WHERE exec_id IN (SELECT id FROM execution WHERE pipeline_id=$1)`, [id]);
-    await client.query(`DELETE FROM execution WHERE pipeline_id=$1`, [id]);
-    await client.query(`DELETE FROM pipeline_rev WHERE pipeline_id=$1`, [id]);
-    const { rows: r } = await client.query(`DELETE FROM pipeline WHERE id=$1 RETURNING id`, [id]);
-    await client.query("COMMIT");
-    return rows({ rows: r })[0];
-  } catch (e) {
-    await client.query("ROLLBACK");
-    throw e;
-  } finally {
-    client.release();
-  }
+  const { rows: r } = await pool.query(
+    `UPDATE pipeline SET deleted_at=now() WHERE id=$1 AND deleted_at IS NULL RETURNING id`,
+    [id]
+  );
+  return rows({ rows: r })[0];
 }
 
 export async function deleteCredential(id) {
   const { rows: r } = await pool.query(
-    `DELETE FROM credential WHERE id=$1 RETURNING id,name`, [id]);
+    `UPDATE credential SET deleted_at=now() WHERE id=$1 AND deleted_at IS NULL RETURNING id,name`,
+    [id]
+  );
   return rows({ rows: r })[0];
 }
 
@@ -288,14 +291,14 @@ export const testCredentialConnection = makeTestCredentialConnection({ createCon
 // ---------- 凭证（不回显 secret_enc 明文） ----------
 export async function listCredentials() {
   return rows(
-    await pool.query(`SELECT id, name, kind, display_meta, created_at FROM credential ORDER BY id`)
+    await pool.query(`SELECT id, name, kind, display_meta, created_at FROM credential WHERE deleted_at IS NULL ORDER BY id`)
   );
 }
 
 // 详情（编辑返显用）：不回显 secret_enc 明文
 export async function getCredential(id) {
   const { rows } = await pool.query(
-    `SELECT id, name, kind, display_meta, created_at FROM credential WHERE id=$1`, [id]
+    `SELECT id, name, kind, display_meta, created_at FROM credential WHERE id=$1 AND deleted_at IS NULL`, [id]
   );
   if (!rows[0]) throw new HttpError(404, "CREDENTIAL_NOT_FOUND", "凭证不存在");
   return rows[0];
@@ -353,14 +356,14 @@ export async function updateCredential(id, body, deps) {
       throw new HttpError(500, "SERVICE_MISCONFIG", "系统加解密配置缺失，请联系管理员处理",
         "SM4_KEY not configured; cannot update credential secret");
     }
-    const { rows: cur } = await pool.query(`SELECT secret_enc FROM credential WHERE id=$1`, [id]);
+    const { rows: cur } = await pool.query(`SELECT secret_enc FROM credential WHERE id=$1 AND deleted_at IS NULL`, [id]);
     const orig = cur[0] ? sm4Decrypt(config.sm4Key, cur[0].secret_enc) : {};
     // 敏感项留空则沿用原值；校验并复用原 routeKey 重新注册（forceUpdate 覆盖），并刷新展示信息
     const merged = { ...orig, ...(body?.secret && typeof body.secret === "object" ? body.secret : {}) };
     const r = await enrollDingtalk(merged, merged.cardCallbackRouteKey, deps);
     const enc = sm4Encrypt(config.sm4Key, r.secret);
     const { rows: rr } = await pool.query(
-      `UPDATE credential SET name=$2, secret_enc=$3, display_meta=$4::jsonb, updated_at=now() WHERE id=$1 RETURNING id,name,kind`,
+      `UPDATE credential SET name=$2, secret_enc=$3, display_meta=$4::jsonb, updated_at=now() WHERE id=$1 AND deleted_at IS NULL RETURNING id,name,kind`,
       [id, body?.name, enc, r.meta]
     );
     if (!rr[0]) throw new HttpError(404, "CREDENTIAL_NOT_FOUND", "凭证不存在");
@@ -376,8 +379,8 @@ export async function updateCredential(id, body, deps) {
     enc = sm4Encrypt(config.sm4Key, secret);
   }
   const sql = enc
-    ? `UPDATE credential SET name=$2, secret_enc=$3, updated_at=now() WHERE id=$1 RETURNING id,name,kind`
-    : `UPDATE credential SET name=$2, updated_at=now() WHERE id=$1 RETURNING id,name,kind`;
+    ? `UPDATE credential SET name=$2, secret_enc=$3, updated_at=now() WHERE id=$1 AND deleted_at IS NULL RETURNING id,name,kind`
+    : `UPDATE credential SET name=$2, updated_at=now() WHERE id=$1 AND deleted_at IS NULL RETURNING id,name,kind`;
   const args = enc ? [id, body?.name, enc] : [id, body?.name];
   const { rows: r } = await pool.query(sql, args);
   if (!r[0]) throw new HttpError(404, "CREDENTIAL_NOT_FOUND", "凭证不存在");
@@ -386,12 +389,12 @@ export async function updateCredential(id, body, deps) {
 
 // ---------- 镜像 ----------
 export async function listImages() {
-  return rows(await pool.query("SELECT * FROM exec_image ORDER BY category,id"));
+  return rows(await pool.query("SELECT * FROM exec_image WHERE deleted_at IS NULL ORDER BY category,id"));
 }
 
 // 详情（编辑返显用）
 export async function getImage(id) {
-  const { rows } = await pool.query(`SELECT * FROM exec_image WHERE id=$1`, [id]);
+  const { rows } = await pool.query(`SELECT * FROM exec_image WHERE id=$1 AND deleted_at IS NULL`, [id]);
   if (!rows[0]) throw new HttpError(404, "IMAGE_NOT_FOUND", "镜像不存在");
   return rows[0];
 }
@@ -406,7 +409,7 @@ export async function createImage(body) {
 
 export async function updateImage(id, body) {
   const { rows: r } = await pool.query(
-    `UPDATE exec_image SET name=$2, image=$3, category=$4 WHERE id=$1 RETURNING *`,
+    `UPDATE exec_image SET name=$2, image=$3, category=$4 WHERE id=$1 AND deleted_at IS NULL RETURNING *`,
     [id, body?.name, body?.image, body?.category ?? "通用"]
   );
   if (!r[0]) throw new HttpError(404, "IMAGE_NOT_FOUND", "镜像不存在");
@@ -414,7 +417,7 @@ export async function updateImage(id, body) {
 }
 
 export async function deleteImage(id) {
-  const { rows: r } = await pool.query(`DELETE FROM exec_image WHERE id=$1 RETURNING id`, [id]);
+  const { rows: r } = await pool.query(`UPDATE exec_image SET deleted_at=now() WHERE id=$1 RETURNING id`, [id]);
   if (!r[0]) throw new HttpError(404, "IMAGE_NOT_FOUND", "镜像不存在");
   return r[0];
 }
@@ -452,18 +455,21 @@ export async function getExecution(id) {
   );
   const nodes = rev[0]?.spec_json?.nodes ?? [];
   const nodeMap = new Map(nodes.map((n) => [n.id, n]));
+  // 并入节点在 spec 里的 position（画布优先用，没有则前端 layoutDag 自动布局；只读透出，不改库）
   const stepsWith = steps.map((s) => {
     const node = nodeMap.get(s.node_id);
     return node
-      ? { ...s, name: node.name ?? "", params: node.params ?? {}, stepType: node.type }
+      ? { ...s, name: node.name ?? "", params: node.params ?? {}, stepType: node.type, position: node.position }
       : s;
   });
+  // 画布边：节点依赖边规约直通（{from,to} → 前端转 vf {source,target}）。rev 已在上方查出，不重复查库。
+  const edges = rev[0]?.spec_json?.edges ?? [];
   // 调度日志：非节点执行日志，按时间正序
   const { rows: schedules } = await pool.query(
     `SELECT ts, message FROM execution_log WHERE exec_id=$1 ORDER BY id`,
     [id]
   );
-  return { ...rows[0], steps: stepsWith, schedules };
+  return { ...rows[0], steps: stepsWith, schedules, edges };
 }
 
 export async function executionPipelineId(id) {

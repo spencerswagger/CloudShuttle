@@ -17,7 +17,9 @@ test("credential 表可写入加密字段", async (t) => {
     return;
   }
   try {
-    await c.query(`CREATE TABLE IF NOT EXISTS credential_stub (LIKE credential) INCLUDING ALL`);
+    // 先清掉上次运行的残留 stub 表，保证可重复执行（含上次失败留下的脏数据）
+    await c.query(`DROP TABLE IF EXISTS credential_stub`);
+    await c.query(`CREATE TABLE IF NOT EXISTS credential_stub (LIKE credential INCLUDING ALL)`);
     const r = await c.query(
       `INSERT INTO credential_stub(name, kind, secret_enc) VALUES($1,$2,$3) RETURNING id`,
       ["test", "docker-registry", "ENCRYPTED"]

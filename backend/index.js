@@ -17,8 +17,13 @@ import { createAdvancer } from "./engine/state.js";
 import { makeShellStep } from "./steps/shell.js";
 import { makeApprovalStep } from "./steps/approval.js";
 import { makeSqlStep } from "./steps/sql.js";
+import { makeTriggerStep } from "./steps/trigger.js";
+import { makeBranchStep } from "./steps/branch.js";
+import { makeJoinStep } from "./steps/join.js";
+import { makeLoopStep } from "./steps/loop.js";
 import { createConnection as createDbConnection } from "./providers/db.js";
 import { createOrchestrator } from "./engine/orchestrator.js";
+import { validateSpec } from "./engine/dag.js";
 import { assembleTriggerEnv } from "./engine/trigger.js";
 import { randomUUID } from "node:crypto";
 import axios from "axios";
@@ -262,19 +267,20 @@ async function createEciGroup(params) {
 
 // 步骤类型注册表：buildApp 的 steps 装配与单测共用同一来源。
 // 新增步骤类型必须在 buildApp 的 steps 中实现，并在此登记（buildApp 启动时校验一致）。
-export const STEP_TYPES = ["shell", "approval", "sql"];
+export const STEP_TYPES = ["trigger", "shell", "approval", "sql", "branch", "join", "loop"];
 
 async function buildApp() {
   const snapshotStore = createSnapshotStore(redis);
   const mutex = createMutex(redis);
   const eciProvider = createEciProvider({ create: createEciGroup });
   // 凭证类型判定 + 解密（企业应用凭证用 corp provider）
+  // 已软删除的凭证（deleted_at 非空）视为不存在：删除后流水线再执行对应节点会如实报错。
   async function getCredentialKind(name) {
-    const { rows } = await pool.query(`SELECT kind FROM credential WHERE name=$1`, [name]);
+    const { rows } = await pool.query(`SELECT kind FROM credential WHERE name=$1 AND deleted_at IS NULL`, [name]);
     return rows[0]?.kind ?? "";
   }
   async function getCredentialSecrets(name) {
-    const { rows } = await pool.query(`SELECT secret_enc FROM credential WHERE name=$1`, [name]);
+    const { rows } = await pool.query(`SELECT secret_enc FROM credential WHERE name=$1 AND deleted_at IS NULL`, [name]);
     if (!rows[0]) throw new Error(`credential not found: ${name}`);
     return sm4Decrypt(config.sm4Key, rows[0].secret_enc);
   }
@@ -343,6 +349,7 @@ async function buildApp() {
     };
   }
   const steps = {
+    trigger: makeTriggerStep(),
     shell: makeShellStep({
       eciProvider, genToken: randomUUID, controlPlaneBase: resolveControlBase,
       getEci: getEciConfig,
@@ -352,6 +359,9 @@ async function buildApp() {
       genToken: randomUUID, controlPlaneBase: resolveControlBase,
     }),
     sql: makeSqlStep({ getCredentialKind, getCredentialSecrets, createConnection: createDbConnection }),
+    branch: makeBranchStep(),
+    join: makeJoinStep(),
+    loop: makeLoopStep(),
   };
   // 防漂移：steps 实现集合必须与 STEP_TYPES 注册表一致（新增/删除步骤类型时两处同步，
   // 否则已登记的步骤类型缺失会在启动装配阶段即暴露，而不是运行期 404/无步骤可跑）。
@@ -359,6 +369,7 @@ async function buildApp() {
     if (!steps[t]) throw new Error(`步骤类型 ${t} 已登记 STEP_TYPES 但未在 buildApp.steps 中装配`);
   }
   const advancer = createAdvancer({
+    mutex,
     stepRun: async (node, ctx) => {
       console.log(`[step] exec=${ctx.execId} node=${node.id} type=${node.type}`);
       try {
@@ -411,6 +422,9 @@ async function buildApp() {
     advance: advancer.advanceOnce,
     record: writeNodeRecord,
     schedLog,
+    // 回调续跑互斥锁（与 state.js 同一把 key）：多 ECI 并发回调到达时串行化
+    // 「markDone + 续跑」临界区，防止推进重复/快照 lost-update
+    mutex,
     // 审批拒绝 / ECI 失败回调等场景：把 execution 终态落为 failed（否则一直停在 running）
     failExecution: async (execId) => {
       await pool.query(
@@ -424,17 +438,28 @@ async function buildApp() {
   // 构造执行元信息 Map，再按组件 origin 叠写 manual/webhook 变量，返回可直接交给
   // orchestrator.run(spec, environment) 的产物。
   async function hydrateForRun({ pipelineId, kind, formValue, webhookBody, authority, rerunOf }) {
+    // 软删除防线：已删除的流水线不再接受任何触发（webhook 在 hook.js 已拦截，这里兜住 manual/rerun）
+    const { rows: alive } = await pool.query(
+      `SELECT 1 FROM pipeline WHERE id=$1 AND deleted_at IS NULL`, [pipelineId]);
+    if (!alive[0]) throw new HttpError(404, "PIPELINE_NOT_FOUND", "流水线不存在或已删除");
     const trigger = kind === "manual"
       ? { trigger: "manual", params: formValue ?? {} }
       : kind === "webhook" ? { trigger: "webhook", body: webhookBody ?? {} }
       : {};
     // rerun 场景：把被重跑的原执行 id 一并留痕进新执行的 trigger，标识其 provenance
     if (rerunOf != null) trigger.rerunOf = rerunOf;
+    // 触发源原始输入：webhook=原始 body、manual=表单值；传给 orchestrator.run 的 meta.triggerRaw，
+    // 作为快照 trigger_raw 的取值源（$.trigger.* 边条件上下文），无输入时缺省为 undefined。
+    const triggerRaw = kind === "webhook" ? webhookBody : kind === "manual" ? formValue : undefined;
     const spec = await loadPipelineRev(pipelineId, trigger, authority ? { authority } : undefined);
+    // 统一校验点：manual / rerun / webhook 三条触发路径都经 hydrateForRun 组装 spec，
+    // 运行前先做 DAG 校验（节点 id 唯一、边端点存在、无环），有错直接拒跑并给出人读错误。
+    const checked = validateSpec(spec);
+    if (!checked.ok) throw new HttpError(400, "BAD_DAG", "DAG 校验失败：" + checked.errors.join("；"));
     await schedLog(spec.execId, `★ 触发执行（${kind}${rerunOf != null ? `，重跑自 #${rerunOf}` : ""}）`);
     const initEnv = await buildInitialEnvironment({ execId: spec.execId, pipelineId });
     const environment = assembleTriggerEnv({ spec, formValue, webhookBody, initEnv });
-    return { spec, environment };
+    return { spec, environment, triggerRaw };
   }
   return {
     orchestrator, snapshotStore, mutex, getCredentialSecrets,
@@ -533,8 +558,8 @@ const DISPATCH = {
   "api.cancelExecution": async ({ path }) => ok(api.cancelExecution(Number(m(path, RE.executionCancel)))),
   "api.runPipeline": async ({ app, path, body }) => {
     const id = Number(RE.pipelineRun.exec(path)?.[1]);
-    const { spec, environment } = await app.hydrateForRun({ pipelineId: id, kind: "manual", formValue: body?.params });
-    const out = await app.orchestrator.run(spec, environment);
+    const { spec, environment, triggerRaw } = await app.hydrateForRun({ pipelineId: id, kind: "manual", formValue: body?.params });
+    const out = await app.orchestrator.run(spec, environment, { triggerRaw });
     return {
       status: 200,
       body: {
@@ -552,10 +577,10 @@ const DISPATCH = {
     const kind = origTrigger.trigger === "webhook" ? "webhook" : "manual";
     const formValue = kind === "manual" ? origTrigger.params : undefined;
     const webhookBody = kind === "webhook" ? origTrigger.body : undefined;
-    const { spec, environment } = await app.hydrateForRun({
+    const { spec, environment, triggerRaw } = await app.hydrateForRun({
       pipelineId: orig.pipeline_id, kind, formValue, webhookBody, rerunOf: id,
     });
-    const out = await app.orchestrator.run(spec, environment);
+    const out = await app.orchestrator.run(spec, environment, { triggerRaw });
     return {
       status: 200,
       body: {
@@ -617,10 +642,10 @@ const DISPATCH = {
     // 套了会把任何拒绝都包成 HTTP 200，第三方与本方探针语义同时失真（与 R3 的 http_status 同源）
     return hook.webhook(
       async ({ pipelineId, payload, authority }) => {
-        const { spec, environment } = await app.hydrateForRun({
+        const { spec, environment, triggerRaw } = await app.hydrateForRun({
           pipelineId, kind: "webhook", webhookBody: payload, authority,
         });
-        return app.orchestrator.run(spec, environment);
+        return app.orchestrator.run(spec, environment, { triggerRaw });
       },
       {
         // 管道名是百分号编码的路径段，先还原再查库；secret 在 query 里，从 rawPath 读

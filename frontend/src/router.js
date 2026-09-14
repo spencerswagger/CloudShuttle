@@ -5,8 +5,8 @@ const routes = [
 
   // 流水线
   { path: "/pipelines", component: () => import("./pages/PipelineList.vue") },
-  { path: "/pipelines/new", component: () => import("./pages/PipelineEdit.vue") },
-  { path: "/pipelines/:id(\\d+)", component: () => import("./pages/PipelineEdit.vue") },
+  { path: "/pipelines/new", component: () => import("./pages/PipelineEdit.vue"), meta: { noSidebar: true } },
+  { path: "/pipelines/:id(\\d+)", component: () => import("./pages/PipelineEdit.vue"), meta: { noSidebar: true } },
 
   // 凭证
   { path: "/credentials", component: () => import("./pages/CredentialList.vue") },
