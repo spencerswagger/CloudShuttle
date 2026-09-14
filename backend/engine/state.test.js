@@ -258,3 +258,52 @@ test("branch：条件未命中 → 下游全部 skipped，执行仍 completed（
   const skippedIds = records.filter((r) => r.status === "skipped").map((r) => r.nodeId);
   assert.deepEqual(skippedIds.sort(), ["j", "s"]);
 });
+
+test("branch：边条件按 $.outputs.<nodeId>.<field>（node_outputs）求值", async () => {
+  const spec = {
+    nodes: [
+      { id: "t", type: "trigger", params: {} },
+      { id: "p", type: "shell", params: {} },
+      { id: "b", type: "branch", params: {} },
+      { id: "s1", type: "sql", params: {} },
+      { id: "s2", type: "sql", params: {} },
+      { id: "j", type: "join", params: {} },
+    ],
+    edges: [
+      { from: "t", to: "p" },
+      { from: "p", to: "b" },
+      { from: "b", to: "s1", cond: { path: "$.outputs.p.code", op: "eq", val: "0" } },
+      { from: "b", to: "s2", cond: { path: "$.outputs.p.code", op: "eq", val: "1" } },
+      { from: "s1", to: "j" },
+      { from: "s2", to: "j" },
+    ],
+  };
+  const ran = [];
+  const records = [];
+  const adv = createAdvancer({
+    stepRun: async (node) => {
+      ran.push(node.id);
+      // shell 节点 p 产出 { code: "0" }，供 branch 边条件经 node_outputs 取数
+      if (node.id === "p") return { kind: "done", output: { code: "0" } };
+      return { kind: "done", output: {} };
+    },
+    snapshot: async () => {}, log: async () => {},
+    record: async (r) => records.push(r),
+  });
+  // 第 1 轮 t、第 2 轮 p（产出 code=0）、第 3 轮 b 按 node_outputs.p.code 求值 → s1 执行 / s2 skipped、
+  // 之后 j 收敛：循环推进直到 completed
+  let snap = { done: [], environment: {} };
+  let guard = 0;
+  let final = null;
+  for (;;) {
+    const out = await adv.advanceOnce({ spec, snap, execId: 1, environment: new Map() });
+    snap = out.snap;
+    if (out.snap?.status === "completed" || out.waiting) { final = out; break; }
+    if (++guard > 8) throw new Error("推进未收敛");
+  }
+  assert.equal(final.snap.status, "completed");
+  assert.ok(ran.includes("s1"), "node_outputs 命中分支 s1 应执行");
+  assert.ok(!ran.includes("s2"), "node_outputs 未命中分支 s2 不应执行");
+  const skipped = records.filter((r) => r.status === "skipped").map((r) => r.nodeId);
+  assert.deepEqual(skipped, ["s2"], "未命中边下游 s2 记 skipped");
+});

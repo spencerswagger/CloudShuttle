@@ -136,10 +136,11 @@ export function createAdvancer({ stepRun, snapshot, record, recordRegistry = asy
         for (const e of spec.edges ?? []) if (e.from === id) inactive.add(edgeKey(e));
       }
     }
-    // 1) 已完成且未被跳过的 branch 节点：逐出边求值
+    // 1) 已完成且未被跳过的 branch 节点：逐出边求值。
+    // 条件上下文（trigger_raw/node_outputs/env）与单个 branch 无关，每轮构建一次复用。
+    const condCtx = buildCondCtx({ triggerRaw: snap.trigger_raw, nodeOutputs, env: toFlat() });
     for (const bn of graph.nodes.values()) {
       if (bn.type !== "branch" || !done.has(bn.id) || skipped.has(bn.id)) continue;
-      const condCtx = buildCondCtx({ triggerRaw: snap.trigger_raw, nodeOutputs, env: toFlat() });
       for (const e of spec.edges ?? []) {
         if (e.from !== bn.id) continue;
         if (e.cond && !evalCond(e.cond, condCtx)) inactive.add(edgeKey(e));
