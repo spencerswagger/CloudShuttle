@@ -44,6 +44,21 @@ export function createOrchestrator({
     }
   }
 
+  // 一次唤醒内连续推进同步节点：直到进入外部等待 / 全部完成 / 本轮无进展（死锁护栏）。
+  // 控制节点（branch 剪枝、loop 迭代）依赖它在一个 FC 调用内跑完同步链路。
+  async function drainAdvance({ spec, snap, execId, environment }) {
+    let last = { snap, waiting: snap?.waiting ?? null };
+    let prevDone = new Set(snap?.done ?? []);
+    for (;;) {
+      last = await advance({ spec, snap: last.snap, execId, environment });
+      if (last.waiting) return last;                       // 有外部等待 → 断点返回（FC 释放）
+      if (last.snap?.status === "completed") return last;  // 全部完成
+      const now = last.snap?.done ?? [];
+      if (now.length === prevDone.size) return last;       // 本轮无进展 → 死锁护栏
+      prevDone = new Set(now);
+    }
+  }
+
   // 把扁平环境源（快照 environment 对象 + 可选外部 Map/对象）构造成内部 Map，值统一转字符串。
   // 语义与 state.js 保持一致：快照环境作基础值，外部显式传入的同名变量覆盖优先。
   function buildEnv(snapEnv, extra) {
@@ -59,7 +74,7 @@ export function createOrchestrator({
     return env;
   }
 
-  async function run(spec, environment) {
+  async function run(spec, environment, meta = {}) {
     // 新执行必须从空快照启动：openExecution 新造的自增 id 可能因 bootstrap 重跑
     // 序列而被复用，redis 里同 id 残留的 snap 快照（7 天 TTL 不清）会被误读成旧 waiting，
     // 导致全新运行 BLOCKED-BY-WAIT。故每次新运行先清一次，保证各执行完全独立。
@@ -71,8 +86,19 @@ export function createOrchestrator({
       const stored = (await snapshotStore.load(spec.execId)) ?? {};
       // 恢复快照 environment（扁平对象）为基础值，再叠写外部显式传入的 environment（同名覆盖优先）
       const env = buildEnv(stored.environment, environment);
-      const snap = { ...stored, environment: stored.environment ?? {} };
-      return advance({ spec, snap, execId: spec.execId, environment: env });
+      const snap = {
+        ...stored,
+        environment: stored.environment ?? {},
+        trigger_raw: meta.triggerRaw ?? stored.trigger_raw,
+      };
+      try {
+        return await drainAdvance({ spec, snap, execId: spec.execId, environment: env });
+      } catch (err) {
+        // 推进异常（如 loop 初始化失败已 record 节点 failed）：执行必须落 failed，不留 running 孤儿
+        console.error(`[orchestrator] run advance 异常 exec=${spec.execId}：${err?.message ?? err}`);
+        await failExecution(spec.execId);
+        throw err;
+      }
     });
   }
 
@@ -87,11 +113,16 @@ export function createOrchestrator({
     // waiting 集合化：仅移除本次回调对应的 nodeId；其余仍等待的节点保留（多 ECI 各自回调各自清）
     const waiting = normalizeWaiting(snap.waiting);
     const rest = waiting ? waiting.filter((id) => id !== nodeId) : null;
-    const next = { done: [...done], waiting: rest?.length ? rest : null };
+    // 透传快照其余字段（loops/node_outputs/trigger_raw/skipped），只覆盖本回调相关的部分——
+    // 否则循环体内回调续跑会丢迭代状态与条件上下文
+    const next = { ...snap, done: [...done], waiting: rest?.length ? rest : null };
     // 合并快照 environment：透传旧变量 + 本次回调新输出，确保后续 advance/回调读到完整累积变量；
     // 两者皆空时省略该字段（与历史快照形态保持一致，避免多余写）
     if (snap.environment || (output && Object.keys(output).length)) {
       next.environment = { ...(snap.environment ?? {}), ...(output ?? {}) };
+    }
+    if (!failed && output && typeof output === "object" && Object.keys(output).length) {
+      next.node_outputs = { ...(snap.node_outputs ?? {}), [nodeId]: output };
     }
     if (failed) next.status = "failed";
     await snapshotStore.save(execId, next);
@@ -118,9 +149,9 @@ export function createOrchestrator({
         const next = await markDone(nodeId, execId, false, parsed);
         await record({ execId, nodeId, status: "succeeded", output: parsed, logs });
         const spec = await loadSpecForExec(execId);
-        // 把解析出的 K=V 写回 environment（对后继节点可见），再向后继 advance
+        // 把解析出的 K=V 写回 environment（对后继节点可见），再向后继 drain 推进（同步链一次跑完）
         const env = buildEnv(next.environment, parsed);
-        return advance({ spec, snap: next, execId, environment: env });
+        return drainAdvance({ spec, snap: next, execId, environment: env });
       });
     },
     // ECI 失败回调 → 该节点终态失败，整个执行结束
@@ -146,12 +177,12 @@ export function createOrchestrator({
           return { status: "failed", done: next.done };
         }
         console.log(`[orchestrator] exec=${execId} 审批节点 ${nodeId} 已通过 → 标记完成并继续推进下一个节点`);
-        const next = await markDone(nodeId, execId, false);
+        const next = await markDone(nodeId, execId, false, { decision: "approve" });
         await record({ execId, nodeId, status: "succeeded", output: { decision: "approve" } });
         await schedLog(execId, `✆ 审批通过（节点 ${nodeId}），继续推进后续节点`);
         const spec = await loadSpecForExec(execId);
         // 续跑不丢 environment：从 markDone 透传回的快照 environment 重建 Map，供 state.advanceOnce 继续引用
-        return advance({ spec, snap: next, execId, environment: buildEnv(next.environment, null) });
+        return drainAdvance({ spec, snap: next, execId, environment: buildEnv(next.environment, null) });
       });
     },
   };

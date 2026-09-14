@@ -212,3 +212,91 @@ test("并行回调：中间回调的输出持久化，下游变量解析成功�
     "下游 c 渲染后 ${x} 已替换为 1（中间回调输出未丢失，${y} 同步替换为 2）"
   );
 });
+
+test("drain：run 一次调用内连续推进同步链直到完成（sql→sql 不再卡住）", async () => {
+  const spec = {
+    execId: 21,
+    nodes: [
+      { id: "a", type: "sql", params: { statements: ["select 1"] } },
+      { id: "b", type: "sql", params: { statements: ["select 2"] } },
+    ],
+    edges: [{ from: "a", to: "b" }],
+  };
+  const ran = [];
+  const advancer = createAdvancer({
+    stepRun: async (node) => { ran.push(node.id); return { kind: "done", output: { n: node.id } }; },
+    snapshot: async () => {}, log: async () => {}, record: async () => {},
+  });
+  const orch = createOrchestrator({
+    loadSpec: async () => spec,
+    snapshotStore: { save: async () => {}, load: async () => ({}), clear: async () => {} },
+    advance: advancer.advanceOnce,
+    record: async () => {},
+  });
+  const out = await orch.run(spec);
+  assert.deepEqual(ran.sort(), ["a", "b"], "同步链在单次 run 内推进完毕");
+  assert.equal(out.snap.status, "completed");
+});
+
+test("drain：waiting 非空时立即停止（ECI/审批断点语义不变）", async () => {
+  let calls = 0;
+  const adv = async () => { calls++; return { snap: { done: ["a"], waiting: ["b"] }, waiting: ["b"] }; };
+  const orch = createOrchestrator({
+    loadSpec: async () => ({ execId: 1, nodes: [], edges: [] }),
+    snapshotStore: { save: async () => {}, load: async () => ({}), clear: async () => {} },
+    advance: adv, record: async () => {},
+  });
+  await orch.run({ execId: 1 });
+  assert.equal(calls, 1, "waiting 即断点，不继续推进");
+});
+
+test("drain：本轮无任何进展时停止（死锁护栏，不无限循环）", async () => {
+  let calls = 0;
+  const adv = async () => { calls++; return { snap: { done: ["a"], waiting: null }, waiting: null }; };
+  const orch = createOrchestrator({
+    loadSpec: async () => ({ execId: 1, nodes: [], edges: [] }),
+    snapshotStore: { save: async () => {}, load: async () => ({}), clear: async () => {} },
+    advance: adv, record: async () => {},
+  });
+  await orch.run({ execId: 1 });
+  assert.ok(calls >= 1 && calls <= 2, "无进展立即停止，不无限循环");
+});
+
+test("markDone 透传快照其余字段（loops/node_outputs/trigger_raw 不丢）", async () => {
+  const saved = [];
+  const orch = createOrchestrator({
+    loadSpec: async () => ({ execId: 1, nodes: [], edges: [] }),
+    snapshotStore: {
+      save: async (id, s) => saved.push(s),
+      load: async () => ({
+        done: [], waiting: ["body"], environment: { item: "a" },
+        loops: { l1: { items: ["a", "b"], idx: 0, bodyIds: ["body"], acc: {} } },
+        node_outputs: { prev: { x: "1" } },
+        trigger_raw: { refs: ["a", "b"] },
+        skipped: [],
+      }),
+      clear: async () => {},
+    },
+    advance: async () => ({ snap: {}, waiting: null }),
+    record: async () => {},
+  });
+  await orch.onEciDone({ execId: 1, nodeId: "body", output: "n=5" });
+  const last = saved.at(-1);
+  assert.deepEqual(last.loops, { l1: { items: ["a", "b"], idx: 0, bodyIds: ["body"], acc: {} } }, "loops 透传");
+  assert.equal(last.node_outputs.body.n, "5", "回调输出写入 node_outputs");
+  assert.deepEqual(last.trigger_raw, { refs: ["a", "b"] }, "trigger_raw 透传");
+  assert.equal(last.skipped.length, 0);
+});
+
+test("run：advance 抛错时执行落为 failed 再上抛（loop 初始化失败不留孤儿 running）", async () => {
+  const failed = [];
+  const orch = createOrchestrator({
+    loadSpec: async () => ({ execId: 1, nodes: [], edges: [] }),
+    snapshotStore: { save: async () => {}, load: async () => ({}), clear: async () => {} },
+    advance: async () => { throw new Error("loop count 非法"); },
+    record: async () => {},
+    failExecution: async (execId) => failed.push(execId),
+  });
+  await assert.rejects(() => orch.run({ execId: 1 }), /loop count 非法/);
+  assert.deepEqual(failed, [1], "执行标记为 failed");
+});
