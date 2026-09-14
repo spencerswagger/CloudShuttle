@@ -2,7 +2,7 @@
   <div class="shell">
     <div class="grid-bg"></div>
 
-    <aside class="sidebar">
+    <aside v-if="!route.meta.noSidebar" class="sidebar">
       <div class="brand">
         <div class="brand-mark" aria-hidden="true">
           <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
@@ -38,7 +38,7 @@
       </div>
     </aside>
 
-    <main class="main">
+    <main class="main" :class="{ 'main--bare': route.meta.noSidebar }">
       <RouterView />
     </main>
   </div>
@@ -67,8 +67,11 @@
 </template>
 
 <script setup>
+import { useRoute } from "vue-router";
 import { toasts } from "./lib/notify.js";
 import { pending } from "./lib/busy.js";
+
+const route = useRoute();
 
 const copyId = async (reqId) => {
   try { await navigator.clipboard.writeText(reqId); } catch { /* 无剪贴板权限时忽略 */ }
@@ -155,6 +158,7 @@ const nav = [
   height: 100%;
   padding: 28px 34px 48px;
 }
+.main--bare { padding: 0; overflow: hidden; }
 
 /* ---- 全局错误提示 toast ---- */
 .toasts {
