@@ -1,5 +1,6 @@
 import { buildGraph, nextReady } from "./dag.js";
 import { renderParams } from "./variables.js";
+import { evalCond, buildCondCtx } from "./conditions.js";
 
 // 推进逻辑：载入快照 → 找到下一个 ready 且未 done 节点 → 交给 stepRun
 // stepRun 返回：
@@ -31,6 +32,11 @@ export function createAdvancer({ stepRun, snapshot, record, recordRegistry = asy
   async function advanceOnce({ spec, snap, execId, environment }) {
     const graph = buildGraph(spec);
     const done = new Set(snap.done ?? []);
+    // 快照字段归一化：条件上下文（trigger_raw/node_outputs）、loop 迭代状态（loops，Task 5 使用）、
+    // 被跳过节点集合（skipped）——均为每轮幂等重算的输入，缺省给空值。
+    const nodeOutputs = snap.node_outputs ?? {};
+    const loops = snap.loops ?? {};
+    const skipped = new Set(snap.skipped ?? []);
     // waiting 集合化：兼容旧快照字符串格式（normalizeWaiting 归一为数组/null）
     let waiting = normalizeWaiting(snap.waiting);
 
@@ -97,6 +103,12 @@ export function createAdvancer({ stepRun, snapshot, record, recordRegistry = asy
         continue;
       }
       if (res.kind === "done") {
+        const node = graph.nodes.get(nodeId);
+        if (node?.type === "loop") {
+          // loop 节点由引擎状态机驱动（Task 5），此处不 record、不注入输出
+          continue;
+        }
+        nodeOutputs[nodeId] = res.output ?? {};
         done.add(nodeId);
         fillEnv(env, res.output);
         console.log(`[advance] exec=${execId} ✔ 节点 ${nodeId} 就地完成，已写入节点记录`);
@@ -112,18 +124,100 @@ export function createAdvancer({ stepRun, snapshot, record, recordRegistry = asy
         await log(execId, `⏸ 节点 ${nodeId} 进入${res.kind === "wait" ? "外部等待" : "派发"}状态，等待回调`);
       }
     }
+    // ---- 控制节点：branch 就绪即同轮链式执行（no-op step）----
+    // branch 的父节点全部 done 后立即在本轮内执行（剪枝随即生效，join 少等一轮、同轮收敛）；
+    // 仅对 branch 控制节点生效，普通节点仍严格按 nextReady 的单轮语义推进（既有测试锁定）。
+    for (;;) {
+      const rb = [...graph.nodes.values()].find(
+        (n) => n.type === "branch" && !done.has(n.id) && !skipped.has(n.id) &&
+          (graph.parents[n.id] ?? []).every((p) => done.has(p))
+      );
+      if (!rb) break;
+      try {
+        const renderedNode = { ...rb, params: renderParams(rb.params, env) };
+        const res = await stepRun(renderedNode, { done: [...done], spec, execId, environment: env, recordRegistry });
+        if (res?.kind === "done") {
+          done.add(rb.id);
+          nodeOutputs[rb.id] = res.output ?? {};
+          await record({ execId, nodeId: rb.id, status: "done", output: res.output, logs: res.logs });
+          await log(execId, `✔ 节点 ${rb.id} 完成（branch 就绪即执行）`);
+        } else {
+          // branch 理论上 no-op，防御性处理 dispatch/wait 分支（加入 waiting 集）
+          waitingNodes.push(rb.id);
+          await record({ execId, nodeId: rb.id, status: res.kind, ref: res.ref });
+          await log(execId, `⏸ 节点 ${rb.id} 进入${res.kind === "wait" ? "外部等待" : "派发"}状态（branch 就绪即执行）`);
+        }
+      } catch (err) {
+        console.error(`[advance] exec=${execId} 节点 ${rb.id} 执行失败: ${err?.message ?? err}`);
+        await record({ execId, nodeId: rb.id, status: "failed", output: { error: err?.message ?? String(err) } });
+      }
+    }
     if (waitingNodes.length) waiting = waitingNodes;
 
-    // 所有节点均已完成任务：标记执行整体完成，并更新流水线的运行状态为 completed
-    if (done.size === graph.nodes.size && !waiting) {
-      await snapshot(execId, { done: [...done], waiting: null, status: "completed", environment: toFlat() });
-      console.log(`[advance] exec=${execId} ✅ 全部 ${graph.nodes.size} 个节点已完成 → 执行标记为 completed，更新流水线运行状态`);
-      await complete({ execId, status: "completed" });
-      return { spec, snap: { done, waiting: null, status: "completed", environment: toFlat() }, waiting: null };
+    // ---- 控制节点：branch 边条件求值 + dead/skipped 传播（每轮幂等重算） ----
+    const inactive = new Set(); // "from>to" 边未激活标记
+    const edgeKey = (e) => `${e.from}>${e.to}`;
+    // 0) 被跳过的 branch：其全部出边视为未激活（从未执行）
+    for (const id of skipped) {
+      const bn = graph.nodes.get(id);
+      if (bn?.type === "branch") {
+        for (const e of spec.edges ?? []) if (e.from === id) inactive.add(edgeKey(e));
+      }
+    }
+    // 1) 已完成且未被跳过的 branch 节点：逐出边求值
+    for (const bn of graph.nodes.values()) {
+      if (bn.type !== "branch" || !done.has(bn.id) || skipped.has(bn.id)) continue;
+      const condCtx = buildCondCtx({ triggerRaw: snap.trigger_raw, nodeOutputs, env: toFlat() });
+      for (const e of spec.edges ?? []) {
+        if (e.from !== bn.id) continue;
+        if (e.cond && !evalCond(e.cond, condCtx)) inactive.add(edgeKey(e));
+      }
+    }
+    if (inactive.size) {
+      // 2) 不动点传播 dead：节点所有入边都未激活（或来自 dead）→ 该节点 dead，其出边也变未激活
+      const dead = new Set();
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const n of graph.nodes.values()) {
+          if (done.has(n.id) || dead.has(n.id)) continue;
+          const parents = graph.parents[n.id] ?? [];
+          if (!parents.length) continue; // 根节点（无入边）永不 dead
+          const allInactive = parents.every((p) => dead.has(p) || inactive.has(`${p}>${n.id}`));
+          if (allInactive) {
+            dead.add(n.id);
+            changed = true;
+            for (const e of spec.edges ?? []) if (e.from === n.id) inactive.add(edgeKey(e));
+          }
+        }
+      }
+      // 3) dead 节点记为 done(skipped)
+      for (const id of dead) {
+        done.add(id);
+        skipped.add(id);
+        nodeOutputs[id] = { skipped: true };
+        await record({ execId, nodeId: id, status: "skipped", output: { skipped: true } });
+        await log(execId, `⏭ 节点 ${id} 因上游条件分支未命中被跳过`);
+      }
     }
 
-    await snapshot(execId, { done: [...done], waiting, environment: toFlat() });
-    return { spec, snap: { done, waiting, environment: toFlat() }, waiting };
+    // 所有节点均已完成任务：标记执行整体完成，并更新流水线的运行状态为 completed
+    // 全量快照：必须携带 trigger_raw/node_outputs/loops/skipped，否则下一轮（含 drain 循环、
+    // 测试回传）会丢条件上下文与迭代状态——这是 branch/loop 语义成立的关键。
+    const fullSnap = () => ({
+      done: [...done], waiting, environment: toFlat(),
+      trigger_raw: snap.trigger_raw, node_outputs: nodeOutputs,
+      loops, skipped: [...skipped],
+    });
+    if (done.size === graph.nodes.size && !waiting) {
+      await snapshot(execId, { ...fullSnap(), status: "completed" });
+      console.log(`[advance] exec=${execId} ✅ 全部 ${graph.nodes.size} 个节点已完成 → 执行标记为 completed，更新流水线运行状态`);
+      await complete({ execId, status: "completed" });
+      return { spec, snap: { ...fullSnap(), status: "completed" }, waiting: null };
+    }
+
+    await snapshot(execId, fullSnap());
+    return { spec, snap: fullSnap(), waiting };
   }
 
   return { advanceOnce };
