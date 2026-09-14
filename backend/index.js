@@ -17,6 +17,7 @@ import { createAdvancer } from "./engine/state.js";
 import { makeShellStep } from "./steps/shell.js";
 import { makeApprovalStep } from "./steps/approval.js";
 import { makeSqlStep } from "./steps/sql.js";
+import { makeTriggerStep } from "./steps/trigger.js";
 import { createConnection as createDbConnection } from "./providers/db.js";
 import { createOrchestrator } from "./engine/orchestrator.js";
 import { validateSpec } from "./engine/dag.js";
@@ -263,7 +264,7 @@ async function createEciGroup(params) {
 
 // 步骤类型注册表：buildApp 的 steps 装配与单测共用同一来源。
 // 新增步骤类型必须在 buildApp 的 steps 中实现，并在此登记（buildApp 启动时校验一致）。
-export const STEP_TYPES = ["shell", "approval", "sql"];
+export const STEP_TYPES = ["trigger", "shell", "approval", "sql"];
 
 async function buildApp() {
   const snapshotStore = createSnapshotStore(redis);
@@ -344,6 +345,7 @@ async function buildApp() {
     };
   }
   const steps = {
+    trigger: makeTriggerStep(),
     shell: makeShellStep({
       eciProvider, genToken: randomUUID, controlPlaneBase: resolveControlBase,
       getEci: getEciConfig,
