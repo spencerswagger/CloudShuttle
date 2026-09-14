@@ -55,6 +55,12 @@ const spec = computed(() => current.value.spec_json);
 const selectedId = ref("");
 const selected = computed(() => nodes.value.find((x) => x.id === selectedId.value) ?? null);
 function selectNode(id) { selectedId.value = id; }
+// 边选中态：点选边进入边条件配置（与节点选中互斥：选择边时收起节点浮窗）
+const selEdgeId = ref("");
+const selEdge = computed(() => spec.value.edges.find((e) => edgeIdOf(e) === selEdgeId.value) ?? null);
+function selectEdge(id) { selEdgeId.value = id; }
+// 边条件编辑：直接改 spec.edges 中对应边的 cond 字段（null 表示无条件边）
+function setEdgeCond(e, patch) { e.cond = { ...(e.cond ?? {}), ...patch }; }
 
 // 节点没有 position（老数据）时的兜底排布；新节点用 defaultNodePosition 级联放置
 function ensurePositions() {
@@ -82,7 +88,7 @@ const vfEdges = computed(() => (spec.value.edges ?? []).map((e) => ({
   source: e.from,
   target: e.to,
   type: "default",
-  data: { from: e.from, to: e.to },
+  data: { from: e.from, to: e.to, cond: e.cond },
   markerEnd: { type: MarkerType.ArrowClosed, color: "#54d0c6" },
   style: { stroke: "var(--line-strong)", strokeWidth: 1.6 },
 })));
@@ -147,8 +153,13 @@ function removeEdgeByData({ from, to }) {
 function onNodeClick({ event, node }) {
   if (event.target?.closest?.(".vue-flow__handle")) return; // 拖手柄连线时不弹出面板
   selectNode(node.id);
+  selEdgeId.value = ""; // 选中节点时收起边配置
 }
-function onPaneClick() { selectedId.value = ""; }
+function onPaneClick() { selectedId.value = ""; selEdgeId.value = ""; }
+function onEdgeClick({ edge }) {
+  selectedId.value = ""; // 选边时收起节点浮窗
+  selEdgeId.value = edge.id;
+}
 
 // 边的悬停删除键：hover 边时显示（移入按钮有小延迟，保证能点到）
 const hoverEdgeId = ref("");
@@ -357,6 +368,8 @@ function fit(el) { if (!el) return; el.style.height = "auto"; el.style.height = 
 function autofit(ev) { fit(ev.target); }
 function fitAll() { document.querySelectorAll("textarea.autofit").forEach(fit); }
 
+const COND_OPS = ["eq", "ne", "gt", "ge", "lt", "le", "contains", "starts_with", "ends_with", "exists", "empty", "regex"];
+const COND_OP_LABELS = { eq: "等于", ne: "不等于", gt: "大于", ge: "大于等于", lt: "小于", le: "小于等于", contains: "包含", starts_with: "以…开头", ends_with: "以…结尾", exists: "存在", empty: "为空", regex: "正则匹配" };
 const NODE_KINDS = {
   trigger:  { label: "触发源",   accent: "var(--warn)", icon: "M5 3h14v18l-7-4-7 4z" },
   shell:    { label: "Shell 执行",   accent: "var(--accent)",  icon: "M4 5l6 7-6 7m8 0h8" },
@@ -1087,6 +1100,7 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
           @connect="onConnect"
           @node-click="onNodeClick"
           @pane-click="onPaneClick"
+          @edge-click="onEdgeClick"
           @edge-mouse-enter="onEdgeMouseEnter"
           @edge-mouse-leave="onEdgeMouseLeave"
         >
@@ -1117,6 +1131,14 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
                 @mouseenter="onEdgeDelMouseEnter(slot.id)">
                 <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
               </div>
+              <div v-if="slot.data?.cond" class="edge-cond nodrag" :style="edgeDelStyle(slot)"
+                title="点击边配置条件" @click.stop="selectEdge(slot.id)">
+                <span class="mono">{{ slot.data.cond.op }} {{ String(slot.data.cond.val ?? "") }}</span>
+              </div>
+              <div v-else-if="hoverEdgeId !== slot.id" class="edge-cond edge-cond-default nodrag" :style="edgeDelStyle(slot)"
+                title="无条件边（默认激活）" @click.stop="selectEdge(slot.id)">
+                <span class="mono">默认</span>
+              </div>
             </EdgeLabelRenderer>
           </template>
         </VueFlow>
@@ -1127,20 +1149,49 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
         </div>
       </main>
 
-      <!-- 悬浮参数浮窗：仅选中节点时显示，可拖动/关闭 -->
+      <!-- 悬浮参数浮窗：选中节点或边时显示，可拖动/关闭 -->
       <Transition name="float">
-        <div v-if="selected" class="param-float" :style="floatPos" @mousedown.stop>
+        <div v-if="selected || selEdge" class="param-float" :style="floatPos" @mousedown.stop>
           <div class="float-head" @mousedown="startFloatDrag">
-            <span class="cfg-kind" :style="{ backgroundColor: NODE_KINDS[selected.type].accent }">{{ NODE_KINDS[selected.type].label }}</span>
-            <template v-if="!isTrigger(selected)">
-              <input class="cfg-name-input" v-model="selected.name" :placeholder="NODE_KINDS[selected.type].label" title="节点名称（执行详情页展示用）" @mousedown.stop />
+            <template v-if="selEdge && !selected">
+              <span class="cfg-kind" style="background: var(--line-strong)">边条件</span>
+              <span class="cfg-id mono">{{ drainId(selEdge.from) }} → {{ drainId(selEdge.to) }}</span>
+              <span class="toolbox-spacer"></span>
+              <button type="button" class="btn btn-sm btn-ghost" title="收起" @mousedown.stop @click="selEdgeId = ''">×</button>
             </template>
-            <span class="cfg-id mono">{{ drainId(selected.id) }}</span>
-            <span class="toolbox-spacer"></span>
-            <button type="button" class="btn btn-sm btn-ghost" title="收起" @mousedown.stop @click="selectedId = ''">×</button>
+            <template v-else>
+              <span class="cfg-kind" :style="{ backgroundColor: NODE_KINDS[selected.type].accent }">{{ NODE_KINDS[selected.type].label }}</span>
+              <template v-if="!isTrigger(selected)">
+                <input class="cfg-name-input" v-model="selected.name" :placeholder="NODE_KINDS[selected.type].label" title="节点名称（执行详情页展示用）" @mousedown.stop />
+              </template>
+              <span class="cfg-id mono">{{ drainId(selected.id) }}</span>
+              <span class="toolbox-spacer"></span>
+              <button type="button" class="btn btn-sm btn-ghost" title="收起" @mousedown.stop @click="selectedId = ''">×</button>
+            </template>
           </div>
 
           <div class="float-body">
+            <template v-if="selEdge && !selected">
+              <div class="field">
+                <label class="field-label">条件（JSONPath）</label>
+                <input class="input mono" :value="selEdge.cond?.path ?? ''" placeholder="如 $.trigger.branch，或 $.outputs.shell1.code" @input="setEdgeCond(selEdge, { path: $event.target.value })" />
+                <p class="field-hint">从触发载荷 / 上游节点输出 / 环境变量取值；留空表示无条件边（默认激活）。</p>
+              </div>
+              <div class="field" v-if="selEdge.cond">
+                <label class="field-label">比较符</label>
+                <select class="select" :value="selEdge.cond.op" @change="setEdgeCond(selEdge, { op: $event.target.value })">
+                  <option v-for="op in COND_OPS" :key="op" :value="op">{{ COND_OP_LABELS[op] }}（{{ op }}）</option>
+                </select>
+              </div>
+              <div class="field" v-if="selEdge.cond && !['exists', 'empty'].includes(selEdge.cond.op)">
+                <label class="field-label">比较值</label>
+                <input class="input mono" :value="selEdge.cond.val ?? ''" placeholder="字面量（字符串/数字/布尔）" @input="setEdgeCond(selEdge, { val: $event.target.value })" />
+              </div>
+              <div class="sql-actions" v-if="selEdge.cond">
+                <button type="button" class="btn btn-sm btn-ghost" @click="selEdge.cond = null">设为无条件边</button>
+              </div>
+              <p class="field-hint">若在「无条件边」与「条件边」间切换，请点选下方按钮或清空 path。</p>
+            </template>
             <template v-if="isTrigger(selected)">
               <div class="trig-head">
                 <span class="mono-tag">触发源</span>
@@ -1705,6 +1756,14 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
   border-radius: 8px; cursor: pointer; box-shadow: 0 4px 14px rgba(0,0,0,.3); z-index: 5;
 }
 .edge-del:hover { color: #ff6b6b; background: var(--bg-3); }
+.edge-cond {
+  position: absolute; transform: translate(-50%, -50%);
+  background: rgba(13, 17, 23, 0.85); color: var(--warn);
+  border: 1px solid var(--line); border-radius: 8px;
+  padding: 1px 6px; font-size: 11px; line-height: 16px;
+  cursor: pointer; pointer-events: auto; white-space: nowrap; z-index: 5;
+}
+.edge-cond-default { color: var(--text-3); }
 
 /* 右侧节点配置抽屉 */
 .cfg-kind {
