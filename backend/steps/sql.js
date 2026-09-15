@@ -34,21 +34,38 @@ function readableError(err) {
   return msg;
 }
 
-// 输出绑定：无 column → 最后一条语句的受影响/返回行数；有 column → 最后结果集首行该列。
+// 输出绑定：
+//   mode=rows   → 完整结果集：把最后结果集的全部行作为数组输出（loop 可用「输出变量」来源引用，体内 ${item.<列>}）
+//   column 有值 → 最后结果集首行该列（标量）
+//   其余（无 column）→ 最后一条语句的受影响/返回行数（count）
+// rows 的数组同时落 node_outputs（真数组，供 JSONPath/loop 迭代）与 env（JSON 字符串，供 ${key} 原样渲染）。
 export function buildOutput(outputs, lastResult) {
   const out = {};
-  const first = (lastResult?.rows?.[0] ?? {});
   for (const o of Array.isArray(outputs) ? outputs : []) {
     const key = o?.key;
     if (!key) continue;
-    if (o?.column) {
-      const v = first[o.column];
+    if (o?.mode === "rows") {
+      out[key] = (lastResult?.rows ?? []).map((r) =>
+        Object.fromEntries(
+          Object.entries(r ?? {}).map(([k, v]) => [k, serializeCell(v)])
+        )
+      );
+    } else if (o?.column) {
+      const v = (lastResult?.rows?.[0] ?? {})[o.column];
       out[key] = v === undefined ? "" : String(v);
     } else {
       out[key] = String(lastResult?.rowCount ?? 0);
     }
   }
   return out;
+}
+
+// 单元格序列化：null 保持 null；Date 转 ISO；对象/数组 JSON 化；其余 String（pg 的 BIGINT numeric 是 string，直传）。
+function serializeCell(v) {
+  if (v === null || v === undefined) return null;
+  if (v instanceof Date) return v.toISOString();
+  if (typeof v === "object") return JSON.stringify(v);
+  return String(v);
 }
 
 // 依赖注入：getCredentialKind/getCredentialSecrets 沿 shell/approval 既有模式注入；createConnection 由 providers/db 提供。

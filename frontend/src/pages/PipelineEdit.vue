@@ -6,6 +6,7 @@ import { VueFlow, Handle, Position, useVueFlow, MarkerType, BaseEdge, EdgeLabelR
 import "@vue-flow/core/dist/style.css";
 import MarkdownIt from "markdown-it";
 import { layoutDag, wouldCycle } from "../lib/dagLayout.js";
+import { loopRegions } from "../lib/loopRegions.js";
 import { notify } from "../lib/notify.js";
 import { buildMappingDraft } from "../lib/webhookDraft.js";
 import { getPipeline, createPipeline, updatePipeline, getPipelineHook, resetWebhookSecret, fetchWebhookProbe } from "../api/pipeline.js";
@@ -49,7 +50,7 @@ const current = ref(newPipeline());
 const nodes = computed(() => current.value.spec_json.nodes);
 
 // ---------- DAG 自由画布：spec.nodes / spec.edges 是唯一数据源，VueFlow 视图由它们派生 ----------
-const { fitView, screenToFlowCoordinate } = useVueFlow();
+const { fitView, screenToFlowCoordinate, viewport } = useVueFlow();
 const spec = computed(() => current.value.spec_json);
 // 右侧配置面板选中节点（画布点击驱动；会话态，不入库）
 const selectedId = ref("");
@@ -707,16 +708,9 @@ const addNode = (type, at) => {
 };
 
 // loop 表单辅助：迭代来源切换与循环体节点列表（前端只读计算，不校验——校验由后端保存/运行期负责）
-function loopItemsModeOf(n) {
-  n.params.items ?? (n.params.items = { count: 3 }); // 旧数据/手造数据兜底，防渲染读 undefined 崩溃
-  return n.params.items.path ? "path" : "count";
-}
 function addAccumulate(n) {
   n.params.accumulate ?? (n.params.accumulate = []); // 兜底，防「＋添加累积」对缺失数组 push 崩溃
   n.params.accumulate.push({ key: "", from: "", field: "" });
-}
-function setLoopItemsMode(n, mode) {
-  n.params.items = mode === "count" ? { count: n.params.items?.count ?? 3 } : { path: n.params.items?.path ?? "$.trigger.items" };
 }
 function loopBody(n) {
   const byId = new Map(nodes.value.map((x) => [x.id, x]));
@@ -736,6 +730,123 @@ function loopBody(n) {
   if (joins.length !== 1) return [];
   return [...seen].filter((id) => id !== joins[0]).map((id) => byId.get(id)).filter(Boolean);
 }
+
+// ---------- loop 迭代来源「输出变量」：前驱 SQL 节点声明为完整结果集的输出 ----------
+function loopItemsModeOf(n) {
+  n.params.items ?? (n.params.items = { count: 3 }); // 旧数据/手造数据兜底，防渲染读 undefined 崩溃
+  if ("var" in n.params.items) return "var";
+  return n.params.items.path ? "path" : "count";
+}
+function setLoopItemsMode(n, mode) {
+  const it = n.params.items ?? {};
+  if (mode === "count") n.params.items = { count: it.count ?? 3 };
+  else if (mode === "var") n.params.items = it.var ? { var: it.var, path: it.path ?? "" } : { var: null, path: "" };
+  else n.params.items = { path: it.path ?? "$.trigger.items" };
+}
+function pickLoopVar(n, val) {
+  const [from, ...rest] = String(val ?? "").split(":");
+  const key = rest.join(":");
+  if (!from || !key) { n.params.items = { var: null, path: "" }; return; }
+  n.params.items = { var: { from, key }, path: `$.outputs.${from}.${key}` };
+}
+function itemsVarKey(n) {
+  const v = n.params.items?.var;
+  return v ? `${v.from}:${v.key}` : "";
+}
+// 可选来源 = loop 的所有上游（祖先闭包）里 sql 节点的「完整结果集」输出 key
+const loopVarOptions = computed(() => {
+  const n = selected.value;
+  if (!n || n.type !== "loop") return [];
+  const byId = new Map(nodes.value.map((x) => [x.id, x]));
+  const pred = {};
+  for (const x of nodes.value) pred[x.id] = [];
+  for (const e of spec.value.edges ?? []) {
+    if (byId.has(e.from)) (pred[e.to] ??= []).push(e.from);
+  }
+  const seen = new Set();
+  const stack = [...(pred[n.id] ?? [])];
+  while (stack.length) {
+    const id = stack.pop();
+    if (seen.has(id)) continue;
+    seen.add(id);
+    stack.push(...(pred[id] ?? []));
+  }
+  const opts = [];
+  for (const id of seen) {
+    const anc = byId.get(id);
+    if (anc?.type !== "sql") continue;
+    for (const o of anc.params?.outputs ?? []) {
+      const key = o?.key?.trim();
+      if (key && sqlOutModeOf(o) === "rows") opts.push({ from: id, key, label: `${anc.name || drainId(id)}.${key}` });
+    }
+  }
+  return opts;
+});
+
+// ---------- SQL 输出绑定：数量 / 列值 / 完整结果集 ----------
+function sqlOutModeOf(o) {
+  if (!o) return "count";
+  if (o.mode === "rows") return "rows";
+  if (o.mode === "col" || o.column) return "col";
+  return "count";
+}
+function setSqlOutMode(o, mode) {
+  o.mode = mode;
+  if (mode !== "col") delete o.column; // 数量/完整结果集不绑定列名
+}
+
+// ---------- 画布循环体容器：区域包围盒（flow 坐标）随拖拽/连线/布局联动 ----------
+const loopBoxes = ref([]);
+const nodeFlowSize = reactive({}); // node_id → {w,h}（DOM 实测 /zoom，flow 单位）
+async function measureNodeFlowSize() {
+  await nextTick();
+  const zoom = viewport.value?.zoom ?? 1;
+  for (const el of document.querySelectorAll(".canvas-zone .vue-flow__node")) {
+    const id = el.dataset?.id;
+    if (!id) continue;
+    const r = el.getBoundingClientRect();
+    nodeFlowSize[id] = { w: r.width / zoom, h: r.height / zoom };
+  }
+}
+function computeLoopBoxes() {
+  const regions = loopRegions(spec.value);
+  const byId = new Map(nodes.value.map((n) => [n.id, n]));
+  const boxes = [];
+  for (const r of regions) {
+    const ids = [r.loopId, ...r.bodyIds, r.joinId];
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const id of ids) {
+      const n = byId.get(id);
+      if (!n) continue;
+      const size = nodeFlowSize[id] ?? { w: 180, h: 60 };
+      const px = n.position?.x ?? 0, py = n.position?.y ?? 0;
+      minX = Math.min(minX, px); minY = Math.min(minY, py);
+      maxX = Math.max(maxX, px + size.w); maxY = Math.max(maxY, py + size.h);
+    }
+    if (!Number.isFinite(minX)) continue;
+    const padX = 30, padTop = 16, padBottom = 22;
+    boxes.push({
+      loopId: r.loopId, joinId: r.joinId,
+      x: minX - padX, y: minY - padTop,
+      w: maxX - minX + padX * 2, h: maxY - minY + padTop + padBottom,
+    });
+  }
+  loopBoxes.value = boxes;
+}
+async function refreshLoopBoxes() {
+  await measureNodeFlowSize();
+  computeLoopBoxes();
+}
+// 结构/位置变化联动：拖拽（positions）、连线/删线、增删节点、自动布局后重算容器
+let boxTimer = null;
+function scheduleLoopBoxes() {
+  clearTimeout(boxTimer);
+  boxTimer = setTimeout(refreshLoopBoxes, 60);
+}
+watch(() => nodes.value.map((n) => [n.id, n.position?.x, n.position?.y]), scheduleLoopBoxes, { deep: true });
+watch(() => spec.value?.edges?.map((e) => `${e.from}>${e.to}`), scheduleLoopBoxes);
+watch(() => nodes.value.length, scheduleLoopBoxes);
+onMounted(refreshLoopBoxes);
 
 const save = async ({ stay = false } = {}) => {
   if (!current.value.name.trim()) { notify({ type: "error", message: "请先填写流水线名称" }); return false; }
@@ -1143,6 +1254,17 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
           </template>
         </VueFlow>
 
+        <!-- 循环体容器：按 loop→body→join 区域叠加半透明包围盒（flow 坐标，随视口 transform） -->
+        <div v-if="loopBoxes.length" class="loop-bands"
+          :style="'transform: translate(' + (viewport.x ?? 0) + 'px,' + (viewport.y ?? 0) + 'px) scale(' + (viewport.zoom ?? 1) + ')'">
+          <div v-for="b in loopBoxes" :key="b.loopId" class="loop-box"
+            :style="{ left: b.x + 'px', top: b.y + 'px', width: b.w + 'px', height: b.h + 'px' }">
+            <span class="loop-tag">↻ 循环体</span>
+            <span class="loop-badge loop-start">循环开始</span>
+            <span class="loop-badge loop-end">汇聚结束</span>
+          </div>
+        </div>
+
         <div v-if="!current.spec_json.nodes.some((n) => !isTrigger(n))" class="empty">
           <p class="display" style="font-size:15px;color:var(--text-2);margin:0 0 6px">从左侧节点库添加节点</p>
           <p>点击添加，或拖入画布指定落点；节点右侧手柄拖到目标节点左侧手柄建立依赖。</p>
@@ -1447,11 +1569,20 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
                   <label class="field-label">迭代来源</label>
                   <div class="seg-tabs">
                     <button type="button" class="seg-tab" :class="{ active: loopItemsModeOf(n) === 'count' }" @click="setLoopItemsMode(n, 'count')">固定次数</button>
+                    <button type="button" class="seg-tab" :class="{ active: loopItemsModeOf(n) === 'var' }" @click="setLoopItemsMode(n, 'var')">上游结果集</button>
                     <button type="button" class="seg-tab" :class="{ active: loopItemsModeOf(n) === 'path' }" @click="setLoopItemsMode(n, 'path')">JSONPath 数组</button>
                   </div>
                   <input v-if="loopItemsModeOf(n) === 'count'" class="input mono" type="number" min="1" v-model.number="n.params.items.count" placeholder="循环次数，如 3" />
+                  <template v-else-if="loopItemsModeOf(n) === 'var'">
+                    <select class="select mono" :value="itemsVarKey(n)" @change="pickLoopVar(n, $event.target.value)">
+                      <option value="">选择上游 SQL 结果集输出…</option>
+                      <option v-for="op in loopVarOptions" :key="op.from + ':' + op.key" :value="op.from + ':' + op.key">{{ op.label }}</option>
+                    </select>
+                    <p v-if="!loopVarOptions.length" class="field-hint err-hint">没有可选结果集：请先在循环节点上游的 SQL 节点把某输出设为「完整结果集」</p>
+                    <p v-else class="field-hint">逐行读取上游 SQL 查询出的实际记录，每行一轮迭代。</p>
+                  </template>
                   <input v-else class="input mono" v-model="n.params.items.path" placeholder="从触发载荷/上游输出取数组，如 $.trigger.refs" @focus="onFieldFocus($event, n, 'items:path')" />
-                  <p class="field-hint">每轮注入 <code class="mono ph-code">${item}</code>（当前元素）与 <code class="mono ph-code">${iteration}</code>（1 起始序号）供循环体节点引用。</p>
+                  <p class="field-hint">每轮注入 <code class="mono ph-code">${item}</code>（当前元素；结果集行可用 <code class="mono ph-code">${item.列名}</code>）与 <code class="mono ph-code">${iteration}</code>（1 起始序号）供循环体节点引用。</p>
                 </div>
                 <div class="field">
                   <label class="field-label">输出累积</label>
@@ -1494,13 +1625,18 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
                   <label class="field-label">输出变量</label>
                   <div v-for="(o, i) in n.params.outputs" :key="i" class="sql-out-row">
                     <input class="input mono" v-model="o.key" placeholder="变量 key" />
-                    <input class="input mono" v-model="o.column" placeholder="列名（可选，绑最后结果集首行）" />
+                    <select class="select sql-out-mode" :value="sqlOutModeOf(o)" @change="setSqlOutMode(o, $event.target.value)">
+                      <option value="count">数量</option>
+                      <option value="col">列值</option>
+                      <option value="rows">完整结果集</option>
+                    </select>
+                    <input v-if="sqlOutModeOf(o) === 'col'" class="input mono" v-model="o.column" placeholder="列名（绑最后结果集首行）" />
                     <button type="button" class="btn btn-sm btn-danger" @click="n.params.outputs.splice(i, 1)">删</button>
                   </div>
                   <div class="sql-actions">
-                    <button type="button" class="btn btn-sm btn-ghost" @click="n.params.outputs.push({ key: '', column: '' })">＋添加输出</button>
+                    <button type="button" class="btn btn-sm btn-ghost" @click="n.params.outputs.push({ key: '', mode: 'count' })">＋添加输出</button>
                   </div>
-                  <p class="field-hint">填写列名时按该列取值；不填列名则输出最后一条语句的影响/返回行数</p>
+                  <p class="field-hint">数量=最后语句影响/返回行数；列值=最后结果集首行该列；完整结果集=整个结果集数组，可被循环节点逐行迭代（循环体内用 <code class="mono ph-code">${item.列名}</code> 取当前行）。</p>
                 </div>
                 <div class="field">
                   <label class="field-label">超时（秒，可选）</label>
@@ -1698,6 +1834,27 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
 .cflow { position: absolute; inset: 0; }
 .canvas-zone .vue-flow__node { cursor: grab; }
 .canvas-zone .vue-flow__node.dragging { cursor: grabbing; }
+/* 循环体容器：覆盖层与画布同坐标系（transform 由 viewport 驱动），置于节点之上但不可交互 */
+.loop-bands { position: absolute; inset: 0; pointer-events: none; z-index: 6; transform-origin: 0 0; }
+.loop-box {
+  position: absolute;
+  border: 1.5px dashed rgba(245, 171, 53, .5);
+  border-radius: 14px;
+  background: rgba(245, 171, 53, .05);
+}
+.loop-tag {
+  position: absolute; top: -10px; left: 12px; padding: 1px 9px;
+  font-size: 11px; font-weight: 600; line-height: 18px; color: var(--ember);
+  background: var(--bg-2); border: 1px solid rgba(245, 171, 53, .5); border-radius: 8px;
+  box-shadow: var(--shadow);
+}
+.loop-badge {
+  position: absolute; bottom: -9px; padding: 1px 8px;
+  font-size: 10px; font-weight: 600; line-height: 16px; border-radius: 7px; white-space: nowrap;
+  box-shadow: var(--shadow);
+}
+.loop-badge.loop-start { left: 10px; color: #fff; background: rgba(245, 171, 53, .92); }
+.loop-badge.loop-end { right: 12px; color: #063b3a; background: rgba(84, 208, 198, .95); }
 
 /* 悬浮参数浮窗（可拖动/关闭，仅选中节点时显示） */
 .param-float {

@@ -47,10 +47,28 @@ export function createAdvancer({ stepRun, snapshot, record, recordRegistry = asy
     return Array.from({ length: n }, (_, i) => i + 1);
   }
   // 把当前迭代的 item/iteration 写入环境（随快照 environment 持久化，回调续跑不丢）
+  // item 为对象/数组时：除保留 ${item} 的 JSON 原文外，递归展平 item.<字段路径> 键，
+  // 让循环体内可直接写 ${item.id} / ${item.name} 之类的字段引用。
   function setIterVars(st, env) {
     const it = st.items[st.idx];
     env.set("item", typeof it === "string" ? it : JSON.stringify(it));
+    if (it && typeof it === "object") flattenItem(it, "item", env);
     env.set("iteration", String(st.idx + 1));
+  }
+  function flattenItem(value, prefix, env, depth = 0) {
+    if (depth > 6 || value === null || typeof value !== "object") return;
+    for (const [k, v] of Object.entries(value)) {
+      if (k === "__proto__" || k === "constructor") continue;
+      const key = `${prefix}.${k}`;
+      if (v === null) { env.set(key, "null"); continue; }
+      if (typeof v === "object") {
+        if (Array.isArray(v) || !(v instanceof Date)) { env.set(key, JSON.stringify(v)); }
+        else env.set(key, v.toISOString());
+        flattenItem(v, key, env, depth + 1);
+      } else {
+        env.set(key, String(v));
+      }
+    }
   }
 
   async function advanceOnce({ spec, snap, execId, environment }) {
