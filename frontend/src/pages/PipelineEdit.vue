@@ -731,57 +731,14 @@ function loopBody(n) {
   return [...seen].filter((id) => id !== joins[0]).map((id) => byId.get(id)).filter(Boolean);
 }
 
-// ---------- loop 迭代来源「输出变量」：前驱 SQL 节点声明为完整结果集的输出 ----------
+// loop 表单辅助：迭代来源切换与循环体节点列表（前端只读计算，不校验——校验由后端保存/运行期负责）
 function loopItemsModeOf(n) {
   n.params.items ?? (n.params.items = { count: 3 }); // 旧数据/手造数据兜底，防渲染读 undefined 崩溃
-  if ("var" in n.params.items) return "var";
   return n.params.items.path ? "path" : "count";
 }
 function setLoopItemsMode(n, mode) {
-  const it = n.params.items ?? {};
-  if (mode === "count") n.params.items = { count: it.count ?? 3 };
-  else if (mode === "var") n.params.items = it.var ? { var: it.var, path: it.path ?? "" } : { var: null, path: "" };
-  else n.params.items = { path: it.path ?? "$.trigger.items" };
+  n.params.items = mode === "count" ? { count: n.params.items?.count ?? 3 } : { path: n.params.items?.path ?? "$.trigger.items" };
 }
-function pickLoopVar(n, val) {
-  const [from, ...rest] = String(val ?? "").split(":");
-  const key = rest.join(":");
-  if (!from || !key) { n.params.items = { var: null, path: "" }; return; }
-  n.params.items = { var: { from, key }, path: `$.outputs.${from}.${key}` };
-}
-function itemsVarKey(n) {
-  const v = n.params.items?.var;
-  return v ? `${v.from}:${v.key}` : "";
-}
-// 可选来源 = loop 的所有上游（祖先闭包）里 sql 节点的「完整结果集」输出 key
-const loopVarOptions = computed(() => {
-  const n = selected.value;
-  if (!n || n.type !== "loop") return [];
-  const byId = new Map(nodes.value.map((x) => [x.id, x]));
-  const pred = {};
-  for (const x of nodes.value) pred[x.id] = [];
-  for (const e of spec.value.edges ?? []) {
-    if (byId.has(e.from)) (pred[e.to] ??= []).push(e.from);
-  }
-  const seen = new Set();
-  const stack = [...(pred[n.id] ?? [])];
-  while (stack.length) {
-    const id = stack.pop();
-    if (seen.has(id)) continue;
-    seen.add(id);
-    stack.push(...(pred[id] ?? []));
-  }
-  const opts = [];
-  for (const id of seen) {
-    const anc = byId.get(id);
-    if (anc?.type !== "sql") continue;
-    for (const o of anc.params?.outputs ?? []) {
-      const key = o?.key?.trim();
-      if (key && sqlOutModeOf(o) === "rows") opts.push({ from: id, key, label: `${anc.name || drainId(id)}.${key}` });
-    }
-  }
-  return opts;
-});
 
 // ---------- SQL 输出绑定：数量 / 列值 / 完整结果集 ----------
 function sqlOutModeOf(o) {
@@ -1569,20 +1526,11 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
                   <label class="field-label">迭代来源</label>
                   <div class="seg-tabs">
                     <button type="button" class="seg-tab" :class="{ active: loopItemsModeOf(n) === 'count' }" @click="setLoopItemsMode(n, 'count')">固定次数</button>
-                    <button type="button" class="seg-tab" :class="{ active: loopItemsModeOf(n) === 'var' }" @click="setLoopItemsMode(n, 'var')">上游结果集</button>
                     <button type="button" class="seg-tab" :class="{ active: loopItemsModeOf(n) === 'path' }" @click="setLoopItemsMode(n, 'path')">JSONPath 数组</button>
                   </div>
                   <input v-if="loopItemsModeOf(n) === 'count'" class="input mono" type="number" min="1" v-model.number="n.params.items.count" placeholder="循环次数，如 3" />
-                  <template v-else-if="loopItemsModeOf(n) === 'var'">
-                    <select class="select mono" :value="itemsVarKey(n)" @change="pickLoopVar(n, $event.target.value)">
-                      <option value="">选择上游 SQL 结果集输出…</option>
-                      <option v-for="op in loopVarOptions" :key="op.from + ':' + op.key" :value="op.from + ':' + op.key">{{ op.label }}</option>
-                    </select>
-                    <p v-if="!loopVarOptions.length" class="field-hint err-hint">没有可选结果集：请先在循环节点上游的 SQL 节点把某输出设为「完整结果集」</p>
-                    <p v-else class="field-hint">逐行读取上游 SQL 查询出的实际记录，每行一轮迭代。</p>
-                  </template>
-                  <input v-else class="input mono" v-model="n.params.items.path" placeholder="从触发载荷/上游输出取数组，如 $.trigger.refs" @focus="onFieldFocus($event, n, 'items:path')" />
-                  <p class="field-hint">每轮注入 <code class="mono ph-code">${item}</code>（当前元素；结果集行可用 <code class="mono ph-code">${item.列名}</code>）与 <code class="mono ph-code">${iteration}</code>（1 起始序号）供循环体节点引用。</p>
+                  <input v-else class="input mono" v-model="n.params.items.path" placeholder="从触发载荷/上游输出取数组，如 $.trigger.refs 或 $.outputs.节点id.变量key" @focus="onFieldFocus($event, n, 'items:path')" />
+                  <p class="field-hint">每轮注入 <code class="mono ph-code">${item}</code>（当前元素；SQL「完整结果集」输出经 <code class="mono ph-code">$.outputs.节点id.变量key</code> 取数时，行对象字段可用 <code class="mono ph-code">${item.列名}</code>）与 <code class="mono ph-code">${iteration}</code>（1 起始序号）供循环体节点引用。</p>
                 </div>
                 <div class="field">
                   <label class="field-label">输出累积</label>
@@ -1614,7 +1562,7 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
                 <div class="field">
                   <label class="field-label">SQL 语句（在一个事务内逐条执行）<span class="req">*</span></label>
                   <div v-for="(stmt, i) in n.params.statements" :key="i" class="sql-stmt-row">
-                    <textarea class="textarea mono" v-model="n.params.statements[i]" rows="3" placeholder="支持 ${变量}，引用前驱节点输出或触发参数"></textarea>
+                    <textarea class="textarea mono" v-model="n.params.statements[i]" rows="2" placeholder="支持 ${变量}，引用前驱节点输出或触发参数"></textarea>
                     <button type="button" class="btn btn-sm btn-danger" @click="n.params.statements.splice(i, 1)">删</button>
                   </div>
                   <div class="sql-actions">
@@ -1624,13 +1572,13 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
                 <div class="field">
                   <label class="field-label">输出变量</label>
                   <div v-for="(o, i) in n.params.outputs" :key="i" class="sql-out-row">
-                    <input class="input mono" v-model="o.key" placeholder="变量 key" />
-                    <select class="select sql-out-mode" :value="sqlOutModeOf(o)" @change="setSqlOutMode(o, $event.target.value)">
+                    <input class="input mono sql-key" v-model="o.key" placeholder="变量 key" />
+                    <select class="select sql-mode" :value="sqlOutModeOf(o)" @change="setSqlOutMode(o, $event.target.value)">
                       <option value="count">数量</option>
                       <option value="col">列值</option>
                       <option value="rows">完整结果集</option>
                     </select>
-                    <input v-if="sqlOutModeOf(o) === 'col'" class="input mono" v-model="o.column" placeholder="列名（绑最后结果集首行）" />
+                    <input v-if="sqlOutModeOf(o) === 'col'" class="input mono sql-col" v-model="o.column" placeholder="列名（绑最后结果集首行）" />
                     <button type="button" class="btn btn-sm btn-danger" @click="n.params.outputs.splice(i, 1)">删</button>
                   </div>
                   <div class="sql-actions">
@@ -1858,12 +1806,25 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
 
 /* 悬浮参数浮窗（可拖动/关闭，仅选中节点时显示） */
 .param-float {
-  position: fixed; width: 440px; max-width: calc(100vw - 40px); max-height: calc(100vh - 130px);
+  position: fixed; width: 480px; max-width: calc(100vw - 40px); max-height: calc(100vh - 130px);
   display: flex; flex-direction: column; z-index: 50;
   background: linear-gradient(180deg, var(--bg-2), var(--bg-1));
   border: 1px solid var(--line-strong); border-radius: 14px; box-shadow: 0 18px 48px rgba(0,0,0,.5);
   overflow: hidden;
 }
+/* 节点参数面板交互优化：紧凑输入、稳定行内宽度、减少纵向滚动 */
+.param-float .float-body { padding: 12px 14px; }
+.param-float .field { margin-bottom: 12px; }
+.param-float .field-label { margin-bottom: 6px; }
+.param-float .field-hint { margin-top: 4px; }
+.param-float .input, .param-float .select, .param-float .textarea { padding: 8px 10px; font-size: 12.5px; }
+.param-float input[type="number"] { width: 140px; }
+.param-float .seg-tab { padding: 5px 12px; }
+.param-float .sql-out-row { gap: 6px; align-items: center; }
+.param-float .sql-out-row .sql-key { flex: 1 1 70px; min-width: 60px; }
+.param-float .sql-out-row .sql-mode { flex: 0 0 104px; width: 104px; padding: 8px 26px 8px 10px; font-size: 12px; }
+.param-float .sql-out-row .sql-col { flex: 1 1 70px; min-width: 60px; }
+.param-float .sql-out-row .select { flex: 1 1 90px; min-width: 80px; }
 .float-head { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; padding: 10px 12px; border-bottom: 1px solid var(--line); cursor: grab; }
 .float-head:active { cursor: grabbing; }
 .float-body { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 14px; }
