@@ -7,12 +7,13 @@ import "@vue-flow/core/dist/style.css";
 import MarkdownIt from "markdown-it";
 import { getExecution, cancelExecution, rerunExecution } from "../api/execution.js";
 import { layoutDag } from "../lib/dagLayout.js";
+import { loopRegions } from "../lib/loopRegions.js";
 import { notify } from "../lib/notify.js";
 
 const route = useRoute();
 const router = useRouter();
 
-const { fitView } = useVueFlow();
+const { fitView, viewport } = useVueFlow();
 
 const exec = ref(null);
 const loading = ref(true);
@@ -119,6 +120,31 @@ const canvasVfEdges = computed(() => canvasEdges.value.map((e) => ({
   markerEnd: { type: MarkerType.ArrowClosed, color: "#54d0c6" },
   style: { stroke: "var(--accent)", strokeWidth: 1.5 },
 })));
+// 循环体容器（与编辑画布一致）：按 exec spec 的 stepType 判定 loop/join 区域，包围盒用布局常量
+const execLoopBoxes = computed(() => {
+  const spec = {
+    nodes: steps.value.map((s) => ({ id: s.node_id, type: s.stepType ?? s.type })),
+    edges: canvasEdges.value,
+  };
+  const boxes = [];
+  for (const r of loopRegions(spec)) {
+    const ids = [r.loopId, ...r.bodyIds, r.joinId];
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const id of ids) {
+      const p = positions.value[id] ?? { x: 40, y: 40 };
+      minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
+      maxX = Math.max(maxX, p.x + 176); maxY = Math.max(maxY, p.y + CANVAS_H); // cn-node 实测宽 176
+    }
+    if (!Number.isFinite(minX)) continue;
+    const padX = 30, padTop = 16, padBottom = 22;
+    boxes.push({
+      loopId: r.loopId,
+      x: minX - padX, y: minY - padTop,
+      w: maxX - minX + padX * 2, h: maxY - minY + padTop + padBottom,
+    });
+  }
+  return boxes;
+});
 // 并行高亮：同时处于活跃（运行/审批/ECI/派发/等待）的节点一律加高亮 ring。
 const ACTIVE_STATUS = new Set(["running", "eci", "approve", "dispatch", "wait"]);
 const canvasActive = (s) => ACTIVE_STATUS.has(s?.status);
@@ -313,6 +339,16 @@ const rerun = async () => {
               </div>
             </template>
           </VueFlow>
+          <!-- 循环体容器：与编辑画布一致的区域可视化 -->
+          <div v-if="execLoopBoxes.length" class="loop-bands"
+            :style="'transform: translate(' + (viewport.x ?? 0) + 'px,' + (viewport.y ?? 0) + 'px) scale(' + (viewport.zoom ?? 1) + ')'">
+            <div v-for="b in execLoopBoxes" :key="b.loopId" class="loop-box"
+              :style="{ left: b.x + 'px', top: b.y + 'px', width: b.w + 'px', height: b.h + 'px' }">
+              <span class="loop-tag">↻ 循环体</span>
+              <span class="loop-badge loop-start">循环开始</span>
+              <span class="loop-badge loop-end">汇聚结束</span>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -419,9 +455,30 @@ const rerun = async () => {
 .steps-card, .log-card, .canvas-card { padding: 20px 22px; }
 .log-card, .canvas-card { margin-bottom: 14px; }
 .topo-hint { font-size: 11px; }
-.topo-canvas { height: 320px; min-height: 220px; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--bg-0); }
+.topo-canvas { height: 320px; min-height: 220px; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--bg-0); position: relative; }
 .topo-canvas :deep(.vue-flow) { height: 100%; }
 .topo-canvas :deep(.vue-flow__node) { cursor: pointer; }
+/* 循环体容器：与编辑画布一致 */
+.loop-bands { position: absolute; inset: 0; pointer-events: none; z-index: 6; transform-origin: 0 0; }
+.loop-box {
+  position: absolute;
+  border: 1.5px dashed rgba(245, 171, 53, .5);
+  border-radius: 14px;
+  background: rgba(245, 171, 53, .05);
+}
+.loop-tag {
+  position: absolute; top: -10px; left: 12px; padding: 1px 9px;
+  font-size: 11px; font-weight: 600; line-height: 18px; color: var(--ember);
+  background: var(--bg-2); border: 1px solid rgba(245, 171, 53, .5); border-radius: 8px;
+  box-shadow: var(--shadow);
+}
+.loop-badge {
+  position: absolute; bottom: -9px; padding: 1px 8px;
+  font-size: 10px; font-weight: 600; line-height: 16px; border-radius: 7px; white-space: nowrap;
+  box-shadow: var(--shadow);
+}
+.loop-badge.loop-start { left: 10px; color: #fff; background: rgba(245, 171, 53, .92); }
+.loop-badge.loop-end { right: 12px; color: #063b3a; background: rgba(84, 208, 198, .95); }
 
 .cn-node {
   width: 176px; min-height: 60px; padding: 9px 11px 10px;

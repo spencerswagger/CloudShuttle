@@ -119,6 +119,21 @@ test("输出绑定：无 column → affectedRows；有 column → 首行该列�
   assert.deepEqual(buildOutput([{ key: "x", column: "a" }, { key: "y", column: "missing" }], { rows: [{ a: "v1" }], rowCount: 1 }), { x: "v1", y: "" });
 });
 
+test("输出绑定 rows 模式：完整结果集数组（值序列化）、空结果集 []、未声明模式仍走 count", async () => {
+  const rows = [
+    { id: 1, name: "a", note: null, meta: { x: 1 }, when: new Date("2026-01-01T00:00:00.000Z") },
+    { id: 2, name: "b", note: "ok", meta: null, when: null },
+  ];
+  const out = buildOutput([{ key: "list", mode: "rows" }], { rows, rowCount: 2 });
+  assert.deepEqual(out.list, [
+    { id: "1", name: "a", note: null, meta: '{"x":1}', when: "2026-01-01T00:00:00.000Z" },
+    { id: "2", name: "b", note: "ok", meta: null, when: null },
+  ]);
+  assert.deepEqual(buildOutput([{ key: "empty", mode: "rows" }], { rows: [], rowCount: 0 }).empty, []);
+  // 未声明 mode=rows 的行：无 column → count；rows 模式与 count 模式同节点可混用
+  assert.equal(buildOutput([{ key: "c" }, { key: "list2", mode: "rows" }], { rows: [{ a: 1 }], rowCount: 7 }).c, "7");
+});
+
 test("变量渲染：statements 内 ${var} 经 renderParams 替换后交给节点", async () => {
   const conn = fakeConn({ rowsFor: { "WHERE name = 张三": [] } });
   const rendered = renderParams(

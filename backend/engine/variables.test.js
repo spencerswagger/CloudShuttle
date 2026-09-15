@@ -133,6 +133,31 @@ test("checkVars 合法 loop 管道：循环体内 ${item}/${iteration}、下游 
   assert.equal(checkVars(spec, { ancestors }), null);
 });
 
+test("checkVars 循环体内 `${item.<字段>}`（结果集行字段）放行；体外仍报未定义", () => {
+  const inBody = {
+    nodes: [
+      { id: "t", type: "trigger", params: {} },
+      { id: "l", type: "loop", params: { items: { count: 3 }, accumulate: [] } },
+      { id: "body", type: "sql", params: { statements: ["UPDATE demo SET flag='${item.id}-${item.name}'"] } },
+      { id: "j", type: "join", params: {} },
+    ],
+    edges: [{ from: "t", to: "l" }, { from: "l", to: "body" }, { from: "body", to: "j" }],
+  };
+  assert.equal(checkVars(inBody, { ancestors }), null, "体内 item.<字段> 应放行");
+  const outBody = {
+    nodes: [
+      { id: "t", type: "trigger", params: {} },
+      { id: "l", type: "loop", params: { items: { count: 3 }, accumulate: [] } },
+      { id: "body", type: "sql", params: { statements: ["select 1"] } },
+      { id: "j", type: "join", params: {} },
+      { id: "tail", type: "sql", params: { statements: ["select ${item.id}"] } },
+    ],
+    edges: [{ from: "t", to: "l" }, { from: "l", to: "body" }, { from: "body", to: "j" }, { from: "j", to: "tail" }],
+  };
+  const err = checkVars(outBody, { ancestors });
+  assert.ok(err && err.includes("item.id") && err.includes("tail"), "循环体外引用 item.<字段> 应报错");
+});
+
 test("checkVars 无 loop 祖先的节点引用 ${item} 仍报错", () => {
   const spec = {
     nodes: [

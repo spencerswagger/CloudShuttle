@@ -187,6 +187,10 @@ export function checkVars(spec, { ancestors: _ancestors } = {}) {
     if (deps.size === 0) continue;
     const scope = resolveScope(graph, spec, _ancestors ?? ancestors, node.id);
     for (const dep of deps) {
+      // 循环体内：item 整个引用或 item.<字段> 字段引用均视为已定义（字段动态来自结果集行对象）
+      if (dep === "item" || dep.startsWith("item.")) {
+        if (scope.has("item")) continue;
+      }
       if (!scope.has(dep)) return `节点 ${node.id} 引用了未定义变量 ${dep}`;
     }
   }

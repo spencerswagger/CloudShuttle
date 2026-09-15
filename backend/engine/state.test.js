@@ -416,6 +416,55 @@ test("loop：JSONPath 取数组（items.path），遍历逐项注入 item", asyn
   assert.deepEqual(seenItems, ["a", "b"]);
 });
 
+test("loop：items 取上游 SQL 结果集数组（$.outputs.<id>.<key>），体内 `${item.<字段>}` 已展平注入", async () => {
+  const spec = {
+    nodes: [
+      { id: "t", type: "trigger", params: {} },
+      { id: "q", type: "sql", params: { statements: ["SELECT id, name FROM demo"], outputs: [{ key: "rows", mode: "rows" }] } },
+      { id: "l", type: "loop", params: { items: { path: "$.outputs.q.rows" }, accumulate: [] } },
+      { id: "body", type: "sql", params: { statements: ["UPDATE demo SET flag='${item.id}'"] } },
+      { id: "j", type: "join", params: {} },
+    ],
+    edges: [
+      { from: "t", to: "q" }, { from: "q", to: "l" }, { from: "l", to: "body" }, { from: "body", to: "j" },
+    ],
+  };
+  const seen = [];
+  const adv = createAdvancer({
+    stepRun: async (node, ctx) => {
+      if (node.id === "q") {
+        // 模拟 SQL 步骤 rows 模式输出：真数组落 node_outputs
+        return { kind: "done", output: { rows: [{ id: 3, name: "c" }, { id: 1, name: "a" }, { id: 2, name: "b" }] } };
+      }
+      if (node.id === "body") {
+        seen.push({
+          item: ctx.environment.get("item"),
+          id: ctx.environment.get("item.id"),
+          name: ctx.environment.get("item.name"),
+          iter: ctx.environment.get("iteration"),
+        });
+        return { kind: "done", output: {} };
+      }
+      return { kind: "done", output: {} };
+    },
+    snapshot: async () => {}, log: async () => {},
+    record: async () => {},
+  });
+  let snap = { done: [], environment: {} };
+  let guard = 0;
+  for (;;) {
+    const out = await adv.advanceOnce({ spec, snap, execId: 21, environment: new Map() });
+    snap = out.snap;
+    if (out.snap?.status === "completed" || out.waiting) break;
+    if (++guard > 20) throw new Error("loop 推进未收敛");
+  }
+  assert.deepEqual(seen, [
+    { item: '{"id":3,"name":"c"}', id: "3", name: "c", iter: "1" },
+    { item: '{"id":1,"name":"a"}', id: "1", name: "a", iter: "2" },
+    { item: '{"id":2,"name":"b"}', id: "2", name: "b", iter: "3" },
+  ], "按结果集顺序逐轮迭代，item.<字段> 可引用且 iteration 递增");
+});
+
 test("loop：items 为空数组 → body 全部 skipped，loop 完成，join 收敛后正常 completed", async () => {
   const spec = {
     nodes: [
