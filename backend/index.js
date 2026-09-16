@@ -8,6 +8,7 @@ import { config } from "./config.js";
 import EciModule from "@alicloud/eci20180808";
 const { default: EciClient, CreateContainerGroupRequest } = EciModule;
 import { createEciProvider, buildCreateEciRequest, describeEciSpecs, probeEciNetworks, ECI_PRESET_CHOICES } from "./providers/eci.js";
+import { createK8sProvider, parseKubeconfig, k8sErrorHint } from "./providers/k8s.js";
 import { createDingtalkCorpProvider } from "./providers/dingtalk-corp.js";
 import { createDingtalkTokenCache } from "./providers/dingtalk-token.js";
 import { createDingtalkEnroll } from "./providers/dingtalk-enroll.js";
@@ -15,6 +16,7 @@ import { createSnapshotStore } from "./engine/snapshot.js";
 import { createMutex } from "./engine/mutex.js";
 import { createAdvancer } from "./engine/state.js";
 import { makeShellStep } from "./steps/shell.js";
+import { makeJobStep } from "./steps/job.js";
 import { makeApprovalStep } from "./steps/approval.js";
 import { makeSqlStep } from "./steps/sql.js";
 import { makeTriggerStep } from "./steps/trigger.js";
@@ -267,7 +269,7 @@ async function createEciGroup(params) {
 
 // 步骤类型注册表：buildApp 的 steps 装配与单测共用同一来源。
 // 新增步骤类型必须在 buildApp 的 steps 中实现，并在此登记（buildApp 启动时校验一致）。
-export const STEP_TYPES = ["trigger", "shell", "approval", "sql", "branch", "join", "loop"];
+export const STEP_TYPES = ["trigger", "shell", "job", "approval", "sql", "branch", "join", "loop"];
 
 async function buildApp() {
   const snapshotStore = createSnapshotStore(redis);
@@ -311,7 +313,7 @@ async function buildApp() {
   }
   // 拉取型的内部端点：run.sh 按 token 拉取本轮 job 的 command/timeout/outputKeys/env
   async function getJob({ token }) {
-    const row = await internal.lookupRegistry({ token, kind: "eci" });
+    const row = await internal.lookupRegistry({ token, kinds: ["eci", "job"] });
     if (!row) return { status: 401, body: { ok: false, error: "invalid token" } };
     const execId = Number(row.exec_id);
     const nodeId = row.node_id;
@@ -348,11 +350,33 @@ async function buildApp() {
       accessKeySecret: secret.accessKeySecret,
     };
   }
+  // Kubernetes 凭证解析：job 节点经 params.credential 引用 k8s 凭证（kubeconfig YAML + 可选默认命名空间）
+  async function getK8sConfig(name) {
+    if (!name) throw new Error("Job 节点未选择 Kubernetes 凭证");
+    const kind = await getCredentialKind(name);
+    if (kind !== "k8s") {
+      throw new Error(`凭证 "${name}" 不是 Kubernetes 凭证（当前类型：${kind || "未找到"}），请选择 k8s 类型凭证`);
+    }
+    const secret = await getCredentialSecrets(name);
+    try {
+      const kube = parseKubeconfig(secret?.kubeconfig);
+      // 凭证可选默认命名空间优先于 kubeconfig 上下文里的 namespace
+      const ns = String(secret?.namespace ?? "").trim();
+      if (ns) kube.namespace = ns;
+      return kube;
+    } catch (err) {
+      throw new Error(`kubeconfig 解析失败：${k8sErrorHint(err)}`);
+    }
+  }
   const steps = {
     trigger: makeTriggerStep(),
     shell: makeShellStep({
       eciProvider, genToken: randomUUID, controlPlaneBase: resolveControlBase,
       getEci: getEciConfig,
+    }),
+    job: makeJobStep({
+      k8sProvider: createK8sProvider(), genToken: randomUUID, controlPlaneBase: resolveControlBase,
+      getK8s: getK8sConfig,
     }),
     approval: makeApprovalStep({
       dingtalkCorpProvider, getCredentialKind, getCredentialSecrets,

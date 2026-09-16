@@ -22,8 +22,8 @@ const pageTitle = computed(() => (isNew.value ? "新建凭证" : `编辑凭证${
 const kindMeta = computed(() => credKind(form.value.kind));
 const kindFields = computed(() => kindMeta.value?.fields ?? []);
 const isDingtalk = computed(() => form.value.kind === "dingtalk-corp");
-// 数据库类凭证（mysql/pg）才显示「测试连接」
-const isDbKind = computed(() => form.value.kind === "mysql" || form.value.kind === "pg");
+// 可测试连接的凭证类型（mysql/pg 数据库 + k8s 集群）才显示「测试连接」
+const isDbKind = computed(() => ["mysql", "pg", "k8s"].includes(form.value.kind));
 
 // ---- kvlist（额外连接参数）动态键=值列表 ----
 // 行模型 {key, value}，存放于 form.secret[f.k]（数组）；后端 buildDbConfig 会忽略空 key 行
@@ -61,17 +61,17 @@ watch(() => form.value.kind, () => {
 });
 const testConnection = async () => {
   if (testing.value) return;
-  // 必填项缺失直接提示，不发起注定失败的建连
+  // 必填项缺失直接提示，不发起注定失败的建连（kvlist 行不参与首检）
   const missing = kindFields.value
-    .filter((f) => f.required && !f.type && !String(form.value.secret[f.k] ?? "").trim())
+    .filter((f) => f.required && f.type !== "kvlist" && !String(form.value.secret[f.k] ?? "").trim())
     .map((f) => f.label);
   if (missing.length) {
     testResult.value = { ok: false, message: "请先填写：" + missing.join("、") };
     return;
   }
-  // 编辑态密码留空：后端不回显，测试会按空密码建连，先明确告知
+  // 编辑态数据库密码留空：后端不回显，测试会按空密码建连，先明确告知
   const pwd = form.value.secret?.password;
-  if (!isNew.value && !String(pwd ?? "").trim()) {
+  if (!isNew.value && ["mysql", "pg"].includes(form.value.kind) && !String(pwd ?? "").trim()) {
     testResult.value = { ok: false, message: "密码未填写（仅展示一次），测试将按空密码进行，可能失败" };
     return;
   }
@@ -210,7 +210,18 @@ const doDelete = async () => {
         </section>
 
         <template v-for="f in kindFields" :key="f.k">
-          <div v-if="f.type === 'kvlist'" class="field">
+          <div v-if="f.type === 'textarea'" class="field">
+            <label class="field-label">{{ f.label }}<span v-if="f.required" class="req">*</span></label>
+            <textarea
+              class="textarea mono cfg-ta"
+              rows="13"
+              v-model="form.secret[f.k]"
+              :placeholder="isNew ? f.ph : (f.secret ? '留空则保持不变（仅展示一次）' : f.ph)"
+              spellcheck="false"
+            ></textarea>
+            <p v-if="f.hint" class="field-hint">{{ f.hint }}</p>
+          </div>
+          <div v-else-if="f.type === 'kvlist'" class="field">
             <label class="field-label">{{ f.label }}</label>
             <div v-for="(row, i) in (form.secret[f.k] || [])" :key="i" class="kv-row">
               <input class="input kv-key" v-model="row.key" placeholder="键（如 ssl）" />

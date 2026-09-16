@@ -107,6 +107,20 @@ export const CRED_KINDS = [
       { k: "extra", type: "kvlist", label: "额外连接参数", hint: "键=值，可添加多条；如 ssl=true / application_name=my-app / statement_timeout=5000" },
     ],
   },
+  {
+    value: "k8s",
+    label: "Kubernetes 集群",
+    icon: "M12 2l8.5 5v10L12 22l-8.5-5V7L12 2zm4 6.5l-4-2.3-4 2.3v4.6l4 2.3 4-2.3V8.5z",
+    hint: "kubeconfig 凭证（JOB 节点用 k8s Job 承载 runner 执行）。填一份完整 kubeconfig YAML（token / 客户端证书 / basic 鉴权皆可，SM4 加密落库），集群 API server 需对控制面网络可达；命名空间未在节点上指定时默认用这里填的。",
+    guide: [
+      { title: "获取 kubeconfig", text: "ACK：集群 → 基本信息 → 连接信息 → 复制公网/内网 kubeconfig；自建集群导出 kubeconfig 文件内容", url: "https://cs.console.aliyun.com" },
+      { title: "网络可达", text: "确认集群 API server 地址（cluster.server）能被控制面（FC）访问：公网端点或与 FC 同 VPC；内网地址在表单里会被打码展示", url: "https://cs.console.aliyun.com" },
+    ],
+    fields: [
+      { k: "kubeconfig", type: "textarea", label: "kubeconfig（YAML）", ph: "粘贴完整 kubeconfig 内容，如：\napiVersion: v1\nkind: Config\ncurrent-context: dev\nclusters:…", required: true, secret: true },
+      { k: "namespace", label: "默认命名空间（可选）", ph: "如 default / build，JOB 节点未指定时使用" },
+    ],
+  },
 ];
 export const credKind = (v) => CRED_KINDS.find((k) => k.value === v);
 export const credKindLabel = (v) => credKind(v)?.label ?? v;

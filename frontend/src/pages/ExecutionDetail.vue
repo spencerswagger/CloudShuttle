@@ -65,8 +65,8 @@ const effType = (s) => {
   if (s.type || s.stepType) return s.type || s.stepType;
   return s.params ? (Array.isArray(s.params.statements) ? "sql" : s.params.command ? "shell" : (s.params.message || s.params.robot) ? "approval" : "") : "";
 };
-const KIND_LABEL = { shell: "Shell 执行", approval: "人工审批", sql: "SQL 执行" };
-const KIND_ACCENT = { shell: "var(--accent)", approval: "var(--ember)", sql: "var(--accent)" };
+const KIND_LABEL = { shell: "Shell 执行", job: "Job 执行", approval: "人工审批", sql: "SQL 执行" };
+const KIND_ACCENT = { shell: "var(--accent)", job: "var(--accent)", approval: "var(--ember)", sql: "var(--accent)" };
 const kindLabel = (s) => KIND_LABEL[effType(s)] || effType(s) || "节点";
 const kindAccent = (s) => KIND_ACCENT[effType(s)] || "var(--text-2)";
 
@@ -192,6 +192,11 @@ const stepSub = (s) => {
     if (p?.cpu || p?.memory) parts.push(`${p?.cpu || "?"} vCPU · ${p?.memory || "?"} GiB`);
     if (p?.regionId) parts.push(p.regionId);
     if (!parts.length) parts.push("运行 Shell 命令");
+  } else if (t === "job") {
+    if (p?.credential) parts.push(`簇 ${p.credential}`);
+    if (p?.namespace) parts.push(p.namespace);
+    if (p?.image) parts.push(`镜像 ${p.image}`);
+    if (!parts.length) parts.push("K8s Job 执行");
   } else if (t === "sql") {
     if (p?.credential) parts.push(`库 ${p.credential}`);
     if (Array.isArray(p?.statements)) parts.push(`${p.statements.length} 条语句`);

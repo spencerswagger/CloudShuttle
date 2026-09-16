@@ -15,8 +15,8 @@ export function outputKeysOf(p) {
   return keys.length ? keys : ["step_out"];
 }
 
-// 把扁平环境地图（Map 或对象）转换为 [{k,v}, ...] 数组，供 ECI 以环境变量读取。
-function envToEntries(environment) {
+// 把扁平环境地图（Map 或对象）转换为 [{k,v}, ...] 数组，供 ECI/k8s Job 以环境变量读取。
+export function envToEntries(environment) {
   if (environment instanceof Map) {
     return [...environment].map(([k, v]) => ({ k, v: String(v) }));
   }

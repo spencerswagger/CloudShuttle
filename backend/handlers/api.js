@@ -6,6 +6,7 @@ import { config } from "../config.js";
 import { sm4Encrypt, sm4Decrypt } from "../crypto/sm4.js";
 import { HttpError } from "../errors.js";
 import { buildDbConfig, createConnection } from "../providers/db.js";
+import { parseKubeconfig, createK8sProvider, k8sErrorHint } from "../providers/k8s.js";
 import { randomUUID } from "node:crypto";
 import { checkVars, resolveScope } from "../engine/variables.js";
 import { buildGraph, ancestors, validateSpec } from "../engine/dag.js";
@@ -269,8 +270,19 @@ export function buildTestConfig(kind, secret) {
 // 测试数据库连接：用草稿 secret（含额外参数）建连并跑 SELECT 1，成功能返回耗时；
 // 失败抛可读错误（DISPATCH 捕获后降级为 200 + {ok:false,message}，参照 eciProbeNetworks）。
 // 工厂注入 createConnection 便于单测验证「cfg 原样透传」；opts.raw 让建连层跳过二次合并（否则 ssl 等丢失）。
-export function makeTestCredentialConnection({ createConnection: open }) {
+export function makeTestCredentialConnection({ createConnection: open, pingK8s }) {
   return async function testCredentialConnection({ kind, secret }) {
+    if (kind === "k8s") {
+      // Kubernetes：解析 kubeconfig + 连通性探测（能列出 namespaces 即视为可达）
+      try {
+        const kube = parseKubeconfig(secret?.kubeconfig);
+        const start = Date.now();
+        await (pingK8s ?? createK8sProvider().ping)(kube);
+        return { ok: true, latencyMs: Date.now() - start };
+      } catch (err) {
+        throw new Error(`Kubernetes 集群连接失败：${k8sErrorHint(err) || "未知错误"}`);
+      }
+    }
     if (kind !== "mysql" && kind !== "pg") {
       throw new HttpError(400, "BAD_DB_KIND", `不支持的数据库类型：${kind || "未填写"}`);
     }
