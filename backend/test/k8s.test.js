@@ -126,6 +126,18 @@ test("k8sJobManifest：env 元素 {k, fromSecret} → valueFrom.secretKeyRef（�
   ]);
 });
 
+test("k8sJobManifest：resources（CPU/内存）→ requests 与 limits 同值；未填则不设置", () => {
+  const m = k8sJobManifest({
+    name: "cs1-n1", namespace: "ns",
+    image: "node:20", command: "x",
+    resources: { cpu: "1", memory: "2Gi" },
+  });
+  const c = m.spec.template.spec.containers[0];
+  assert.deepEqual(c.resources, { requests: { cpu: "1", memory: "2Gi" }, limits: { cpu: "1", memory: "2Gi" } });
+  const m2 = k8sJobManifest({ name: "x", namespace: "ns", image: "i", command: "c" });
+  assert.equal(m2.spec.template.spec.containers[0].resources, undefined);
+});
+
 test("buildSecretVolumes：单卷 + subPath 挂载；无挂载返回空", () => {
   const { volumes, volumeMounts } = buildSecretVolumes("secret-cs1-n1", [
     { key: "ssh_id_rsa", subPath: "ssh_id_rsa", mountPath: "/root/.ssh/id_rsa" },

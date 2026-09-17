@@ -171,10 +171,57 @@ test("shell 节点：未选凭证 / 凭证非 k8s → 可读错误", async () =>
   );
 });
 
-test("buildWrapperCommand：包含用户命令、输出/日志 base64、成功/失败回调与退出码", () => {
+test("shell 节点：资源规格（CPU/内存）透传 createJob（requests 与 limits 同值由 provider 侧落实）", async () => {
+  const calls = [];
+  const k8sProvider = {
+    createJob: async (a) => { calls.push(a); return { name: a.name, uid: "u1" }; },
+  };
+  const step = makeStep(k8sProvider);
+  await step(
+    { id: "n1", params: { credential: K8S_CRED, image: "node:20", command: "echo x", cpu: "1", memory: "2Gi" } },
+    { execId: 21, environment: new Map(), recordRegistry: async () => {} }
+  );
+  assert.deepEqual(calls[0].resources, { cpu: "1", memory: "2Gi" });
+  // 未填资源不设置
+  const calls2 = [];
+  const step2 = makeStep({ createJob: async (a) => { calls2.push(a); return { name: a.name }; } });
+  await step2(
+    { id: "n9", params: { credential: K8S_CRED, image: "node:20", command: "echo x" } },
+    { execId: 22, environment: new Map(), recordRegistry: async () => {} }
+  );
+  assert.equal(calls2[0].resources, undefined);
+});
+
+test("shell 节点：配置 CALLBACK_BASE_INTERNAL 后回调/引导变量走内网前缀，未配置仍走外网", async () => {
+  const calls = [];
+  const step = makeStep(
+    { createJob: async (a) => { calls.push(a); return { name: a.name }; } },
+    { callbackBaseInternal: "http://fc-internal:9000" }
+  );
+  await step(
+    { id: "n1", params: { credential: K8S_CRED, image: "node:20", command: "echo x" } },
+    { execId: 23, environment: new Map(), recordRegistry: async () => {} }
+  );
+  assert.match(calls[0].command, /http:\/\/fc-internal:9000\/_\/hook\/ecidone\/23/, "回调 URL 应使用内网前缀");
+  const cbBase = calls[0].env.find((e) => e.k === "CLOUDSHUTTLE_CB_BASE");
+  assert.equal(cbBase?.v, "http://fc-internal:9000");
+  // 未配置内网前缀：仍用外网 controlPlaneBase
+  const calls2 = [];
+  await makeStep({ createJob: async (a) => { calls2.push(a); return { name: a.name }; } })(
+    { id: "n2", params: { credential: K8S_CRED, image: "node:20", command: "echo x" } },
+    { execId: 24, environment: new Map(), recordRegistry: async () => {} }
+  );
+  assert.match(calls2[0].command, /https:\/\/cp\.example\.com\/_\/hook\/ecidone\/24/);
+});
+
+test("buildWrapperCommand：包含用户命令、日志完整回传（3MB 上限+截断标记）、成功/失败回调与退出码", () => {
   const w = buildWrapperCommand("npm run build", { base: "https://cp", execId: 12, token: "tk", secret: "sk" });
   assert.match(w, /npm run build/);
-  assert.match(w, /head -c 204800 .*CLOUDSHUTTLE_OUT_FILE/, "输出文件 base64 前截断防超 body 上限");
+  assert.match(w, /wc -c < \/tmp\/run\.log/, "通过 wc 判断日志是否超限，避免大日志丢回调");
+  assert.match(w, /-gt 3145728/, "日志上限 3MB");
+  assert.match(w, /CS_LOG_TRUNCATED/, "超限时写截断标记");
+  assert.match(w, /base64 -w0 < "\$CLOUDSHUTTLE_OUT_FILE"/, "输出 base64 完整回传");
+  assert.match(w, /--data-binary @\/tmp\/cb\.json/, "body 用文件组装，绕开 ARG_MAX");
   assert.match(w, /exit \$rc/);
   assert.match(w, /\/_\/hook\/ecidone\/12\?token=tk&secret=sk/);
   assert.match(w, /\/_\/hook\/fail\/12\?token=tk&secret=sk/);

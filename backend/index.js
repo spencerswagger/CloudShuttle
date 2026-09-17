@@ -299,6 +299,7 @@ async function buildApp() {
     trigger: makeTriggerStep(),
     shell: makeShellStep({
       k8sProvider: createK8sProvider(), genToken: randomUUID, controlPlaneBase: resolveControlBase,
+      callbackBaseInternal: config.callbackBaseInternal,
       getK8s: getK8sConfig, getCredential: resolveCredentialForRun,
     }),
     approval: makeApprovalStep({
@@ -690,8 +691,10 @@ export async function handler(event) {
   };
   try {
     const { handler: name } = routeToHandler(path, method, body);
-    // /_/ 内部回调仅允许内网来源
-    if (path.startsWith("/_/")) {
+    // /_/ 内部接口仅允许内网来源；但 eciDone/eciFail 回调例外——它依赖强随机 token+secret
+    // 双因子鉴权（internal.js 校验），且 k8s 集群容器（可能部署在公网侧）需要直接回调控制面，
+    // 因此回调端点放行公网、其余内部接口仍限内网。
+    if (path.startsWith("/_/") && !RE.eciDone.test(path) && !RE.eciFail.test(path)) {
       const ip = clientIp(event);
       if (!isPrivateIp(ip)) {
         return finish(403, { ok: false, code: "FORBIDDEN", message: "内部接口仅允许内网访问", requestId }, true);

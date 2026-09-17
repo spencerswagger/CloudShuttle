@@ -47,11 +47,16 @@ function numOrUndef(v) {
   return Number.isFinite(n) ? n : undefined;
 }
 
+// stdout+stderr 日志完整回传的上限（原始字节；base64 后约 4/3）。超过则保留前段并加截断标记。
+// 上限取 3MB 是 FC HTTP 触发器 body 安全阈值内的折衷：既覆盖绝大多数任务日志，又不让回调 body 超限。
+export const LOG_MAX_BYTES = 3 * 1024 * 1024;
+const LOG_TRUNCATED_MARK = "[[CS_LOG_TRUNCATED: 日志超过 3MB，仅保留前段]]";
+
 /**
  * 生成包装脚本（控制面渲染，写入容器 command）：
  *   用户命令 stdout/stderr 全部进 /tmp/run.log，输出 K=V 约定写 $CLOUDSHUTTLE_OUT_FILE；
  *   结束后 base64 收集输出与日志，按退出码回调 /_/hook/ecidone|fail（token+secret 双因子）。
- * 日志/输出上限 200KB（FC 请求体安全阈值内），超长截断防回调 body 爆炸。
+ * 日志尽量完整回传（3MB 上限 + 截断标记），body 用临时文件组装避免 shell ARG_MAX 限制。
  * @param {string} userCommand
  * @param {{ base: string, execId: string|number, token: string, secret: string }} cb
  * @returns {string} sh -c 脚本正文
@@ -63,18 +68,24 @@ export function buildWrapperCommand(userCommand, { base, execId, token, secret }
     `set +e`,
     `{ ${userCommand} ; } > /tmp/run.log 2>&1`,
     `rc=$?`,
-    `OUT=$(head -c 204800 "$CLOUDSHUTTLE_OUT_FILE" 2>/dev/null | base64 -w0)`,
-    `LOG=$(head -c 204800 /tmp/run.log | base64 -w0)`,
+    // 日志完整回传：仅当超过上限时截断并追加标记（shell 变量不进参数，流式拼 body 文件）
+    `if [ "$(wc -c < /tmp/run.log 2>/dev/null)" -gt ${LOG_MAX_BYTES} ]; then`,
+    `  head -c ${LOG_MAX_BYTES} /tmp/run.log > /tmp/run.log.trim`,
+    `  printf '\\n${LOG_TRUNCATED_MARK}\\n' >> /tmp/run.log.trim`,
+    `  mv /tmp/run.log.trim /tmp/run.log`,
+    `fi`,
     `if [ $rc -eq 0 ]; then`,
-    `  curl -fsS -X POST "${cbUrl("ecidone")}" -H 'content-type: application/json' -d "$(printf '{"result":{"output":"%s","logs":"%s"}}' "$OUT" "$LOG")"`,
+    `  { printf '{"result":{"output":"'; base64 -w0 < "$CLOUDSHUTTLE_OUT_FILE" 2>/dev/null; printf '","logs":"'; base64 -w0 < /tmp/run.log; printf '"}}'; } > /tmp/cb.json`,
+    `  curl -fsS -X POST "${cbUrl("ecidone")}" -H 'content-type: application/json' --data-binary @/tmp/cb.json`,
     `else`,
-    `  curl -fsS -X POST "${cbUrl("fail")}" -H 'content-type: application/json' -d "$(printf '{"reason":"exit %s","logs":"%s"}' "$rc" "$LOG")"`,
+    `  { printf '{"reason":"exit '"$rc"'","logs":"'; base64 -w0 < /tmp/run.log; printf '"}'; } > /tmp/cb.json`,
+    `  curl -fsS -X POST "${cbUrl("fail")}" -H 'content-type: application/json' --data-binary @/tmp/cb.json`,
     `fi`,
     `exit $rc`,
   ].join("\n");
 }
 
-export function makeShellStep({ k8sProvider, genToken, controlPlaneBase, getK8s, getCredential, assembleCreds = assembleRunnerCredentials }) {
+export function makeShellStep({ k8sProvider, genToken, controlPlaneBase, callbackBaseInternal, getK8s, getCredential, assembleCreds = assembleRunnerCredentials }) {
   return async function shellStep(node, ctx) {
     const p = node.params;
     const credential = p?.credential;
@@ -84,6 +95,8 @@ export function makeShellStep({ k8sProvider, genToken, controlPlaneBase, getK8s,
     const rendered = renderParams(p, ctx.environment instanceof Map ? ctx.environment : new Map(Object.entries(ctx.environment ?? {})));
 
     const base = typeof controlPlaneBase === "function" ? controlPlaneBase(ctx) : controlPlaneBase;
+    // 回调地址：配置了内网前缀就优先走内网（集群与控制面同 VPC 时可达），否则用外网地址
+    const cbBase = String(callbackBaseInternal ?? "").trim().replace(/\/+$/, "") || base;
     const token = genToken();
     const secret = genToken(); // 回调独立密钥，防 URL 篡改
     // 引导变量（末尾覆盖：environment/节点 env 同名也不得盖过回调鉴权与输出约定）
@@ -91,7 +104,7 @@ export function makeShellStep({ k8sProvider, genToken, controlPlaneBase, getK8s,
       { k: "CLOUDSHUTTLE_OUT_FILE", v: "/tmp/out" },
       { k: "CLOUDSHUTTLE_TOKEN", v: token },
       { k: "CLOUDSHUTTLE_CB_SECRET", v: secret },
-      { k: "CLOUDSHUTTLE_CB_BASE", v: base },
+      { k: "CLOUDSHUTTLE_CB_BASE", v: cbBase },
       { k: "CLOUDSHUTTLE_EXEC_ID", v: String(ctx.execId) },
     ];
 
@@ -111,7 +124,7 @@ export function makeShellStep({ k8sProvider, genToken, controlPlaneBase, getK8s,
       credEnvRefs = assembled.envRefs;
     }
 
-    const command = buildWrapperCommand(rendered.command ?? "", { base, execId: ctx.execId, token, secret });
+    const command = buildWrapperCommand(rendered.command ?? "", { base: cbBase, execId: ctx.execId, token, secret });
     const env = [
       ...(Array.isArray(rendered.env) ? rendered.env : []),
       ...envToEntries(ctx.environment),
@@ -135,6 +148,10 @@ export function makeShellStep({ k8sProvider, genToken, controlPlaneBase, getK8s,
       env,
       volumes,
       volumeMounts,
+      // 资源规格：CPU/内存一对值 → requests 与 limits 同值（用户填一组，两端一致）
+      resources: rendered.cpu != null || rendered.memory != null
+        ? { cpu: String(rendered.cpu ?? "").trim(), memory: String(rendered.memory ?? "").trim() }
+        : undefined,
       secretName: hasSecret ? secretName : undefined,
       // 超时(秒) → Job activeDeadlineSeconds（k8s 单位即秒）；0/空不设置
       activeDeadlineSeconds: numOrUndef(rendered.timeout),

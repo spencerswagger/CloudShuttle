@@ -101,7 +101,8 @@ export function buildSecretVolumes(secretName, mounts) {
 
 // ---------- Job manifest 组装（纯函数，A′ 命令内联契约） ----------
 // env 数组元素：{k,v} → name/value；{k, fromSecret} → valueFrom.secretKeyRef（fromSecret=Secret 名，secretKey=键）
-export function k8sJobManifest({ name, namespace, image, command, env, volumes = [], volumeMounts = [], activeDeadlineSeconds, ttlSecondsAfterFinished, backoffLimit = 0 }) {
+// resources：{ cpu, memory }（字符串，如 "1" / "500m" / "1Gi"）→ requests 与 limits 同值（一对值同时设两端）。
+export function k8sJobManifest({ name, namespace, image, command, env, volumes = [], volumeMounts = [], resources, activeDeadlineSeconds, ttlSecondsAfterFinished, backoffLimit = 0 }) {
   const envList = (Array.isArray(env) ? env : [])
     .map((e) => {
       if (!e?.k && !e?.name) return { name: "", value: "" };
@@ -116,6 +117,16 @@ export function k8sJobManifest({ name, namespace, image, command, env, volumes =
     .filter((e) => e.name);
   const hasVol = Array.isArray(volumes) && volumes.length > 0;
   const hasMounts = Array.isArray(volumeMounts) && volumeMounts.length > 0;
+  // 资源规格：requests 与 limits 取同一对值（用户填一对值，两端一致）
+  const resourceSpec = (() => {
+    const cpu = String(resources?.cpu ?? "").trim();
+    const memory = String(resources?.memory ?? "").trim();
+    if (!cpu && !memory) return null;
+    const req = {};
+    if (cpu) req.cpu = cpu;
+    if (memory) req.memory = memory;
+    return { requests: req, limits: { ...req } };
+  })();
   return {
     apiVersion: "batch/v1",
     kind: "Job",
@@ -135,6 +146,7 @@ export function k8sJobManifest({ name, namespace, image, command, env, volumes =
               // 命令由控制面渲染：用户命令 + 输出/日志收集 + 回调，直接内联，无需平台镜像
               ...(command ? { command: ["sh", "-c", command] } : {}),
               env: envList,
+              ...(resourceSpec ? { resources: resourceSpec } : {}),
               ...(hasMounts ? { volumeMounts } : {}),
             },
           ],
@@ -208,11 +220,11 @@ export function createK8sProvider({ buildClient = buildK8sClient } = {}) {
       }
     },
     // 创建一次性 Job；返回 { name, uid }，失败抛可读错误（脱敏 cluster server/账号）
-    async createJob({ kube, name, namespace, image, command, env, volumes, volumeMounts, activeDeadlineSeconds, ttlSecondsAfterFinished, backoffLimit }) {
+    async createJob({ kube, name, namespace, image, command, env, volumes, volumeMounts, resources, activeDeadlineSeconds, ttlSecondsAfterFinished, backoffLimit }) {
       const client = buildClient(kube);
       const ns = nsOf(kube, namespace);
       const manifest = k8sJobManifest({
-        name, namespace: ns, image, command, env, volumes, volumeMounts,
+        name, namespace: ns, image, command, env, volumes, volumeMounts, resources,
         activeDeadlineSeconds, ttlSecondsAfterFinished, backoffLimit,
       });
       let resp;
