@@ -145,7 +145,7 @@ const execLoopBoxes = computed(() => {
   }
   return boxes;
 });
-// 并行高亮：同时处于活跃（运行/审批/ECI/派发/等待）的节点一律加高亮 ring。
+// 并行高亮：同时处于活跃（运行/审批/派发/等待）的节点一律加高亮 ring。
 const ACTIVE_STATUS = new Set(["running", "eci", "approve", "dispatch", "wait"]);
 const canvasActive = (s) => ACTIVE_STATUS.has(s?.status);
 const canvasAccent = (s) => {
@@ -181,6 +181,12 @@ function onCanvasNodeClick({ node }) {
 const stepTitle = (s) => {
   if (s.kind === "trigger") return triggerLabel.value;
   return s.name || KIND_LABEL[effType(s)] || "节点";
+};
+// k8s Job 名：优先取派发时记录的 ref（cs<exec>-<node>），终态后 output 被覆盖时按同一规则推导
+const jobNameOf = (s) => {
+  if (s.output?.ref) return String(s.output.ref);
+  const eid = exec.value?.id;
+  return eid ? `cs${eid}-${String(s.node_id ?? "").toLowerCase()}` : "—";
 };
 const stepSub = (s) => {
   if (s.kind === "trigger") return "点开查看本次触发输入";
@@ -383,9 +389,10 @@ const rerun = async () => {
                 <span class="stsub mono">运行配置</span>
                 <div class="cfg-grid">
                   <span class="cfg-item"><span class="cfg-k">镜像</span><span class="cfg-v mono">{{ s.params?.image || "—" }}</span></span>
-                  <span class="cfg-item"><span class="cfg-k">规格</span><span class="cfg-v mono">{{ s.params?.cpu || "?" }} vCPU · {{ s.params?.memory || "?" }} GiB</span></span>
-                  <span class="cfg-item"><span class="cfg-k">地域</span><span class="cfg-v mono">{{ s.params?.regionId || "—" }}</span></span>
-                  <span class="cfg-item"><span class="cfg-k">载体</span><span class="cfg-v mono">{{ s.params?.credential || "—" }}</span></span>
+                  <span class="cfg-item"><span class="cfg-k">规格</span><span class="cfg-v mono">{{ s.params?.cpu ? `${s.params.cpu} vCPU` : "—" }} · {{ s.params?.memory || "—" }}</span></span>
+                  <span class="cfg-item"><span class="cfg-k">集群凭证</span><span class="cfg-v mono">{{ s.params?.credential || "—" }}</span></span>
+                  <span class="cfg-item"><span class="cfg-k">命名空间</span><span class="cfg-v mono">{{ s.params?.namespace || "默认" }}</span></span>
+                  <span class="cfg-item cfg-wide"><span class="cfg-k">Job</span><span class="cfg-v mono">{{ jobNameOf(s) }}</span></span>
                   <span class="cfg-item cfg-wide"><span class="cfg-k">命令</span><span class="cfg-v mono">{{ s.params?.command || "（无）" }}</span></span>
                   <span class="cfg-item cfg-wide"><span class="cfg-k">环境变量</span><span class="cfg-v mono">{{ Array.isArray(s.params?.env) && s.params.env.length ? s.params.env.map((e) => `${e.k}=${e.v}`).join("\n") : "（无）" }}</span></span>
                 </div>

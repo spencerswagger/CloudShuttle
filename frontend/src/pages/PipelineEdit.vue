@@ -56,6 +56,9 @@ const spec = computed(() => current.value.spec_json);
 const selectedId = ref("");
 const selected = computed(() => nodes.value.find((x) => x.id === selectedId.value) ?? null);
 function selectNode(id) { selectedId.value = id; }
+// Shell 节点表单分 tab（降低填写压力）：base=运行环境 / script=执行脚本 / adv=输出与运行；切节点复位
+const shellTab = ref("base");
+watch(selectedId, () => { shellTab.value = "base"; });
 // 边选中态：点选边进入边条件配置（与节点选中互斥：选择边时收起节点浮窗）
 const selEdgeId = ref("");
 const selEdge = computed(() => (spec.value.edges ?? []).find((e) => edgeIdOf(e) === selEdgeId.value) ?? null);
@@ -590,7 +593,7 @@ const addNode = (type, at) => {
     step: type,
     params:
         type === "shell"
-          ? { credential: "", namespace: "", image: images.value[0]?.image ?? "", command: "", env: [], outputs: [{ key: "step_out" }], timeout: 300, backoffLimit: 0, ttlSecondsAfterFinished: "" }
+          ? { credential: "", namespace: "", image: images.value[0]?.image ?? "", command: "", env: [], outputs: [{ key: "step_out" }], cpu: "", memory: "", timeout: 300, backoffLimit: 0, ttlSecondsAfterFinished: "" }
           : type === "sql"
             ? { credential: "", statements: [""], outputs: [{ key: "affected_rows" }], timeout: 60 }
             : type === "loop"
@@ -1262,6 +1265,12 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
 
             <div v-else-if="selected" v-for="n in [selected]" :key="n.id">
               <template v-if="n.type === 'shell'">
+                <div class="node-tabs">
+                  <button type="button" class="nt-tab" :class="{ active: shellTab === 'base' }" @click="shellTab = 'base'">运行环境</button>
+                  <button type="button" class="nt-tab" :class="{ active: shellTab === 'script' }" @click="shellTab = 'script'">执行脚本</button>
+                  <button type="button" class="nt-tab" :class="{ active: shellTab === 'adv' }" @click="shellTab = 'adv'">输出与运行</button>
+                </div>
+                <div v-show="shellTab === 'base'">
                 <div class="field">
                   <label class="field-label">Kubernetes 集群凭证 <span class="req">*</span></label>
                   <select class="select" v-model="n.params.credential">
@@ -1287,6 +1296,8 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
                   <p v-if="!images.length" class="field-hint">{{ imagesLoading ? "加载中…" : "暂无镜像，点击右侧刷新图标加载" }}</p>
                   <p class="field-hint" v-else>平台只负责在所选镜像上运行你的命令并回传结果；镜像需自带 <code class="mono ph-code">sh</code> 与 <code class="mono ph-code">curl</code>（语言类镜像普遍满足）。</p>
                 </div>
+                </div>
+                <div v-show="shellTab === 'script'">
                 <div class="field">
                   <label class="field-label">Shell 命令</label>
                   <textarea class="textarea mono autofit" v-model="n.params.command" rows="2" placeholder="echo 'hello cloudshuttle'" @focus="onFieldFocus($event, n, 'command')" @input="autofit"></textarea>
@@ -1347,6 +1358,8 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
                   <p v-if="!runnerCredCandidates.length" class="field-hint">暂无可用凭证：先在「凭证」创建 SSH / Maven / Docker 私有仓库 / npm / S3 类型后在此勾选</p>
                   <p class="field-hint" v-else>勾选的凭证以文件注入容器（~/.ssh、~/.m2/settings.xml、~/.docker/config.json、~/.npmrc、/root/.s3cfg），命令内直接使用</p>
                 </div>
+                </div>
+                <div v-show="shellTab === 'adv'">
                 <div class="field">
                   <div class="field-head">
                     <label class="field-label">输出变量（K=V 写回，供后继节点引用）</label>
@@ -1354,6 +1367,20 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
                   </div>
                   <TriggerParamsEditor :params="n.params.outputs ?? (n.params.outputs = [])" :show-required="false" />
                   <p class="field-hint">脚本内可用 <code class="mono ph-code">echo "key=value" >> "$CLOUDSHUTTLE_OUT_FILE"</code> 写回；未声明 key 时默认输出单变量 <code class="mono ph-code">step_out</code>。</p>
+                </div>
+                <div class="field">
+                  <label class="field-label">资源规格（可选）</label>
+                  <div class="approval-grid">
+                    <div class="sub-field">
+                      <label class="sub-label">CPU（核）</label>
+                      <input class="input mono" v-model="n.params.cpu" placeholder="如 1 或 500m" />
+                    </div>
+                    <div class="sub-field">
+                      <label class="sub-label">内存</label>
+                      <input class="input mono" v-model="n.params.memory" placeholder="如 1Gi 或 512Mi" />
+                    </div>
+                  </div>
+                  <p class="field-hint">填一组值同时用作请求量（requests）与上限（limits）；留空则由集群按默认调度。</p>
                 </div>
                 <div class="field">
                   <div class="approval-grid">
@@ -1372,6 +1399,7 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
                   <label class="field-label">超时（秒）</label>
                   <input class="input mono" type="number" v-model.number="n.params.timeout" placeholder="300" />
                   <p class="field-hint">命令运行超时上限，到期未完成会被强制终止并标记失败，单位秒。</p>
+                </div>
                 </div>
               </template>
               <template v-else-if="n.type === 'branch'">
@@ -1685,6 +1713,17 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
 .param-float .sql-out-row .sql-mode { flex: 0 0 104px; width: 104px; padding: 8px 26px 8px 10px; font-size: 12px; }
 .param-float .sql-out-row .sql-col { flex: 1 1 70px; min-width: 60px; }
 .param-float .sql-out-row .select { flex: 1 1 90px; min-width: 80px; }
+/* Shell 表单分 tab（运行环境 / 执行脚本 / 输出与运行） */
+.node-tabs {
+  display: flex; gap: 6px; margin: 2px 0 14px;
+  padding: 4px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg-0);
+}
+.nt-tab {
+  flex: 1; padding: 6px 4px; font-size: 12.5px; color: var(--text-2);
+  background: transparent; border: none; border-radius: 8px; cursor: pointer;
+}
+.nt-tab:hover { color: var(--text-1); background: var(--bg-1); }
+.nt-tab.active { color: var(--accent); background: var(--bg-1); font-weight: 600; }
 /* runner 附加凭证多选（行内 checkbox） */
 .cred-check-list { display: flex; flex-wrap: wrap; gap: 6px; }
 .cred-check {

@@ -299,6 +299,7 @@ async function buildApp() {
     trigger: makeTriggerStep(),
     shell: makeShellStep({
       k8sProvider: createK8sProvider(), genToken: randomUUID, controlPlaneBase: resolveControlBase,
+      callbackBaseInternal: config.callbackBaseInternal,
       getK8s: getK8sConfig, getCredential: resolveCredentialForRun,
     }),
     approval: makeApprovalStep({
@@ -690,7 +691,9 @@ export async function handler(event) {
   };
   try {
     const { handler: name } = routeToHandler(path, method, body);
-    // /_/ 内部回调仅允许内网来源
+    // /_/ 内部接口仅允许内网来源：回调鉴权依赖强随机 token+secret，但容器回调地址由
+    // CALLBACK_BASE_INTERNAL / CONTROL_BASE 控制——集群与控制面同 VPC 时应走内网前缀，
+    // 来源 IP 为内网即通过；公网来源一律 403。
     if (path.startsWith("/_/")) {
       const ip = clientIp(event);
       if (!isPrivateIp(ip)) {
