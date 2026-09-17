@@ -697,6 +697,11 @@ export async function handler(event) {
     if (path.startsWith("/_/")) {
       const ip = clientIp(event);
       if (!isPrivateIp(ip)) {
+        // 诊断：完整打印来源链路（含 x-forwarded-for 全链），便于确认容器回调走内网还是公网
+        const xff = event?.headers?.["x-forwarded-for"] ?? event?.headers?.["X-Forwarded-For"] ?? "";
+        console.warn(
+          `[internal] 403 requestId=${requestId} path=${path} clientIp=${ip} x-forwarded-for=${xff}`
+        );
         return finish(403, { ok: false, code: "FORBIDDEN", message: "内部接口仅允许内网访问", requestId }, true);
       }
     }
