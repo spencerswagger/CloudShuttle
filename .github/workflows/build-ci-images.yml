@@ -1,0 +1,76 @@
+# 构建平台预置 CI 镜像并推送私有 ACR（registry.cn-hangzhou.aliyuncs.com/spencerswagger，地址写死）
+# 手动触发：workflow_dispatch → 输入 image：
+#   all           全量构建 docker/ 全部 Dockerfile
+#   base          仅构建 ci-base:latest
+#   node/20       构建 ci-node:20（Dockerfile: docker/node/node20.dockerfile）
+#   python/3.12   构建 ci-python:3.12
+#   golang/1.19   构建 ci-golang:1.19
+#   java/8        构建 ci-java:8（cl版本范围见 docker/ 目录）
+name: Build CI Images
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: "Image to build: all | base | node/20 | python/3.12 | golang/1.19 | java/8"
+        required: true
+        default: "all"
+        type: string
+
+env:
+  REGISTRY: registry.cn-hangzhou.aliyuncs.com
+  NAMESPACE: spencerswagger
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to ACR
+        run: |
+          echo "${{ secrets.DOCKER_PASSWORD }}" | docker login "$REGISTRY" \
+            --username "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+
+      - name: Resolve build targets
+        id: targets
+        run: |
+          INPUT="${{ github.event.inputs.image }}"
+          # 输出行格式：<tag> <dockerfile>
+          resolve() { # $1=image path
+            case "$1" in
+              base) echo "ci-base:latest docker/base.dockerfile" ;;
+              node/[0-9]*)  v="${1#node/}";  echo "ci-node:$v docker/node/node$v.dockerfile" ;;
+              python/[0-9.]*) v="${1#python/}"; fv="${v//./}"; echo "ci-python:$v docker/python/python$fv.dockerfile" ;;
+              golang/[0-9.]*) v="${1#golang/}"; fv="${v//./}"; echo "ci-golang:$v docker/golang/go$fv.dockerfile" ;;
+              java/[0-9]*)  v="${1#java/}";  echo "ci-java:$v docker/java/java$v.dockerfile" ;;
+              *) echo "unknown image: $1" >&2; exit 1 ;;
+            esac
+          }
+          if [ "$INPUT" = "all" ] || [ -z "$INPUT" ]; then
+            # 全量：显式清单逐个构造（与 docker/ 目录、002_ci_images.sql 保持同步）
+            {
+              echo "ci-base:latest docker/base.dockerfile"
+              for v in 14 16 18 20 22 24; do          echo "ci-node:$v docker/node/node$v.dockerfile"; done
+              for v in 3.7 3.8 3.9 3.10 3.11 3.12 3.13; do fv="${v//./}"; echo "ci-python:$v docker/python/python$fv.dockerfile"; done
+              for v in 1.19 1.20 1.21 1.22 1.23; do fv="${v//./}"; echo "ci-golang:$v docker/golang/go$fv.dockerfile"; done
+              for v in 8 11 17 21; do                  echo "ci-java:$v docker/java/java$v.dockerfile"; done
+            } | tee /tmp/targets.txt
+          else
+            resolve "$INPUT" | tee /tmp/targets.txt
+          fi
+
+      - name: Build and push
+        run: |
+          while read -r TAG DF; do
+            [ -z "$TAG" ] && continue
+            echo "== building $REGISTRY/$NAMESPACE/$TAG from $DF =="
+            docker buildx build \
+              --platform linux/amd64 \
+              -t "$REGISTRY/$NAMESPACE/$TAG" \
+              -f "$DF" . --push
+          done < /tmp/targets.txt
