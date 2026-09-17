@@ -300,18 +300,6 @@ const rerun = async () => {
     <section v-if="loading" class="card empty rise"><p class="dim">加载中…</p></section>
 
     <template v-else-if="exec">
-      <!-- 调度日志：非节点执行日志，记录流水线调度全过程 -->
-      <section class="card log-card rise" style="animation-delay:.05s">
-        <h3 class="block-title display">调度日志</h3>
-        <div v-if="Array.isArray(exec.schedules) && exec.schedules.length" class="sched-list">
-          <div v-for="(l, i) in exec.schedules" :key="i" class="sched-row">
-            <span class="sched-ts mono">{{ fmtShort(l.ts) }}</span>
-            <span class="sched-msg">{{ l.message }}</span>
-          </div>
-        </div>
-        <p v-else class="stempty dim">暂无调度日志（该执行可能早于调度日志功能上线）。</p>
-      </section>
-
       <!-- 执行拓扑：DAG 画布，节点按依赖连线，并行节点同时高亮；点节点定位并展开下方步骤 -->
       <section v-if="steps.length" class="card canvas-card rise" style="animation-delay:.07s">
         <div class="block-head">
@@ -444,6 +432,18 @@ const rerun = async () => {
             </div>
           </div>
         </div>
+      </section>
+
+      <!-- 调度日志：非节点执行日志，记录流水线调度全过程（置于步骤之后，便于主看执行结果） -->
+      <section class="card log-card rise" style="animation-delay:.12s">
+        <h3 class="block-title display">调度日志</h3>
+        <div v-if="Array.isArray(exec.schedules) && exec.schedules.length" class="sched-list">
+          <div v-for="(l, i) in exec.schedules" :key="i" class="sched-row">
+            <span class="sched-ts mono">{{ fmtShort(l.ts) }}</span>
+            <span class="sched-msg">{{ l.message }}</span>
+          </div>
+        </div>
+        <p v-else class="stempty dim">暂无调度日志（该执行可能早于调度日志功能上线）。</p>
       </section>
 
       <section v-if="!displaySteps.length" class="card empty rise">
