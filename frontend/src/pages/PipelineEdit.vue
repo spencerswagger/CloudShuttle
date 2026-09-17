@@ -12,7 +12,7 @@ import { buildMappingDraft } from "../lib/webhookDraft.js";
 import { getPipeline, createPipeline, updatePipeline, getPipelineHook, resetWebhookSecret, fetchWebhookProbe } from "../api/pipeline.js";
 import { fetchImages } from "../api/image.js";
 import { fetchCredentials, fetchEciSpecs, probeEciNetworks, listDepartments, listDepartmentUsers } from "../api/credential.js";
-import { ECI_REGIONS } from "../lib/kinds.js";
+import { ECI_REGIONS, RUNNER_CRED_KINDS, credKindLabel } from "../lib/kinds.js";
 import RunPipelineModal from "../components/RunPipelineModal.vue";
 import TriggerParamsEditor from "../components/TriggerParamsEditor.vue";
 
@@ -538,6 +538,16 @@ const SQL_CRED_KINDS = ["mysql", "pg"];
 const sqlCreds = computed(() => (creds.value || []).filter((c) => SQL_CRED_KINDS.includes(c.kind)));
 // job 节点只展示 k8s 类型凭证
 const jobCreds = computed(() => (creds.value || []).filter((c) => c.kind === "k8s"));
+// runner 附加凭证（注入容器，多选；仅允许可注入类型的凭证）
+const runnerCredCandidates = computed(() => (creds.value || []).filter((c) => RUNNER_CRED_KINDS.includes(c.kind)));
+const credRefsOf = (n) => (n.params.credentials ?? (n.params.credentials = []));
+const hasCredRef = (n, name) => credRefsOf(n).some((r) => r?.name === name);
+const toggleCredRef = (n, name) => {
+  const refs = credRefsOf(n);
+  const i = refs.findIndex((r) => r?.name === name);
+  if (i >= 0) refs.splice(i, 1);
+  else refs.push({ name });
+};
 
 // 高级机器人下拉：主标题取自凭证名，副标题拼接企业/应用元信息（display_meta），并展示应用图标
 const robotOpenId = ref(""); // 当前展开下拉的节点 id；空串表示全部收起
@@ -696,7 +706,7 @@ const addNode = (type, at) => {
         type === "shell"
           ? { image: images.value[0]?.image ?? "alpine", command: "", env: [], outputs: [{ key: "step_out" }], credential: "", regionId: "", vswitchId: "", securityGroupId: "", cpu: "1", memory: "2", timeout: 300 }
           : type === "job"
-            ? { credential: "", namespace: "", image: "cloudshuttle/runner:0.1", command: "", env: [], outputs: [{ key: "step_out" }], timeout: 300, backoffLimit: 0, ttlSecondsAfterFinished: "" }
+            ? { credential: "", namespace: "", image: "cloudshuttle/runner:0.2", command: "", env: [], outputs: [{ key: "step_out" }], timeout: 300, backoffLimit: 0, ttlSecondsAfterFinished: "" }
           : type === "sql"
             ? { credential: "", statements: [""], outputs: [{ key: "affected_rows" }], timeout: 60 }
             : type === "loop"
@@ -1478,6 +1488,18 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
                   </div>
                 </div>
                 <div class="field">
+                  <label class="field-label">附加凭证（注入容器）</label>
+                  <div class="cred-check-list">
+                    <label v-for="c in runnerCredCandidates" :key="c.name" class="cred-check">
+                      <input type="checkbox" :checked="hasCredRef(n, c.name)" @change="toggleCredRef(n, c.name)" />
+                      <span class="cred-name">{{ c.name }}</span>
+                      <em class="cred-kind dim">{{ credKindLabel(c.kind) }}</em>
+                    </label>
+                  </div>
+                  <p v-if="!runnerCredCandidates.length" class="field-hint">暂无可用凭证：先在「凭证」创建 SSH / Maven / Docker 私有仓库 / npm / S3 类型后在此勾选</p>
+                  <p class="field-hint" v-else>勾选的凭证以文件注入容器（~/.ssh、~/.m2/settings.xml、~/.docker/config.json、~/.npmrc、/root/.s3cfg），命令内直接使用</p>
+                </div>
+                <div class="field">
                   <div class="field-head">
                     <label class="field-label">输出变量（K=V 写回，供后继节点引用）</label>
                     <button type="button" class="btn btn-sm btn-ghost" title="从 Shell 命令中识别写回 $CLOUDSHUTTLE_OUT_FILE 的变量" @click="autoProbeOutputs(n)">↻ 从命令提取</button>
@@ -1586,6 +1608,18 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
                     </div>
                     <button type="button" class="btn btn-sm btn-ghost" @click="(n.params.env = n.params.env || []).push({ k: '', v: '' })">＋ 添加环境变量</button>
                   </div>
+                </div>
+                <div class="field">
+                  <label class="field-label">附加凭证（注入容器）</label>
+                  <div class="cred-check-list">
+                    <label v-for="c in runnerCredCandidates" :key="c.name" class="cred-check">
+                      <input type="checkbox" :checked="hasCredRef(n, c.name)" @change="toggleCredRef(n, c.name)" />
+                      <span class="cred-name">{{ c.name }}</span>
+                      <em class="cred-kind dim">{{ credKindLabel(c.kind) }}</em>
+                    </label>
+                  </div>
+                  <p v-if="!runnerCredCandidates.length" class="field-hint">暂无可用凭证：先在「凭证」创建 SSH / Maven / Docker 私有仓库 / npm / S3 类型后在此勾选</p>
+                  <p class="field-hint" v-else>勾选的凭证以文件注入容器（~/.ssh、~/.m2/settings.xml、~/.docker/config.json、~/.npmrc、/root/.s3cfg），命令内直接使用</p>
                 </div>
                 <div class="field">
                   <div class="field-head">
@@ -1924,6 +1958,17 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
 .param-float .sql-out-row .sql-mode { flex: 0 0 104px; width: 104px; padding: 8px 26px 8px 10px; font-size: 12px; }
 .param-float .sql-out-row .sql-col { flex: 1 1 70px; min-width: 60px; }
 .param-float .sql-out-row .select { flex: 1 1 90px; min-width: 80px; }
+/* runner 附加凭证多选（行内 checkbox） */
+.cred-check-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.cred-check {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 9px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--bg-1); cursor: pointer; font-size: 12.5px;
+}
+.cred-check input { accent-color: var(--accent); cursor: pointer; }
+.cred-check .cred-name { font-weight: 600; color: var(--text-1); }
+.cred-check .cred-kind { font-size: 10.5px; }
+.cred-check:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
 .float-head { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; padding: 10px 12px; border-bottom: 1px solid var(--line); cursor: grab; }
 .float-head:active { cursor: grabbing; }
 .float-body { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 14px; }

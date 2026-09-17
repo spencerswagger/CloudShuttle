@@ -17,6 +17,7 @@ import { createMutex } from "./engine/mutex.js";
 import { createAdvancer } from "./engine/state.js";
 import { makeShellStep } from "./steps/shell.js";
 import { makeJobStep } from "./steps/job.js";
+import { assembleRunnerCredentials } from "./steps/runner-creds.js";
 import { makeApprovalStep } from "./steps/approval.js";
 import { makeSqlStep } from "./steps/sql.js";
 import { makeTriggerStep } from "./steps/trigger.js";
@@ -325,6 +326,28 @@ async function buildApp() {
     const rendered = renderParams(node.params, env);
     const envEntries = Array.isArray(rendered.env) ? rendered.env : [];
     const envFlat = [...envEntries, ...[...env].map(([k, v]) => ({ k, v: String(v) }))];
+    // 附加凭证（ssh/maven/docker-registry/npm/s3）：沿命令同一内部鉴权通道下发，runner 落盘。
+    // 凭证解密密文不落调度日志/探针。装配失败（凭证被删/类型不符）降级为一条立即失败的
+    // 命令，保证节点一定随 fail 回调推进，不会悬挂在 waiting。
+    let credentials = {};
+    if (Array.isArray(rendered.credentials) && rendered.credentials.length) {
+      try {
+        credentials = await assembleRunnerCredentials({
+          refs: rendered.credentials,
+          getCredential: async (name) => {
+            const kind = await getCredentialKind(name);
+            if (!kind) return { kind: null, secret: null };
+            return { kind, secret: await getCredentialSecrets(name) };
+          },
+        });
+      } catch (err) {
+        const msg = String(err?.message ?? err).slice(0, 300);
+        return {
+          status: 200,
+          body: { command: `echo ${JSON.stringify(`附加凭证错误：${msg}`)}; exit 127`, env: [], error: msg },
+        };
+      }
+    }
     return {
       status: 200,
       body: {
@@ -332,6 +355,7 @@ async function buildApp() {
         timeout: rendered.timeout ?? undefined,
         outputKeys: outputKeysOf(node.params),
         env: envFlat,
+        credentials,
       },
     };
   }

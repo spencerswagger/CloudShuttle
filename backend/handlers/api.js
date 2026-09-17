@@ -9,6 +9,7 @@ import { buildDbConfig, createConnection } from "../providers/db.js";
 import { parseKubeconfig, createK8sProvider, k8sErrorHint } from "../providers/k8s.js";
 import { randomUUID } from "node:crypto";
 import { checkVars, resolveScope } from "../engine/variables.js";
+import { validateCredRefs } from "../steps/runner-creds.js";
 import { buildGraph, ancestors, validateSpec } from "../engine/dag.js";
 
 const rows = (r) => r.rows;
@@ -26,6 +27,18 @@ function resolveSpec(body) {
 function assertVarsResolved(spec) {
   const err = checkVars(spec, { ancestors });
   if (err) throw new HttpError(422, "VAR_UNRESOLVED", err, "unknown variable");
+}
+
+// 保存前静态校验 runner 附加凭证：引用的凭证必须存在且类型在允许集（ssh/maven/docker-registry/npm/s3）
+async function assertCredsResolved(spec) {
+  const lookupCred = async (name) => {
+    const { rows } = await pool.query(
+      `SELECT kind FROM credential WHERE name=$1 AND deleted_at IS NULL`, [name]
+    );
+    return rows[0] ?? null;
+  };
+  const err = await validateCredRefs(spec, lookupCred);
+  if (err) throw new HttpError(422, "CRED_UNRESOLVED", err, "unknown credential");
 }
 
 // 保存前 DAG 校验（节点唯一/边端点/无环/边条件格式/loop 区域）；非法直接 400
@@ -71,6 +84,7 @@ export async function createPipeline(body) {
   // 与运行时（hydrateForRun）的校验契约保持一致。
   assertDagValid(specObj);
   assertVarsResolved(specObj);
+  await assertCredsResolved(specObj);
   const spec = JSON.stringify(specObj);
   // 每条管道的 webhook 触发独立密钥，创建时生成并存库
   const webhookSecret = randomUUID();
@@ -204,6 +218,7 @@ export async function updatePipeline(id, body) {
   // 同 createPipeline：DAG 结构校验先行（悬挂边 400 BAD_DAG），变量语义校验在后
   assertDagValid(specObj);
   assertVarsResolved(specObj);
+  await assertCredsResolved(specObj);
   const spec = JSON.stringify(specObj);
   const { rows: r } = await pool.query(
     `UPDATE pipeline SET name=$2, description=$3, spec_json=$4::jsonb, rev=rev+1, updated_at=now()

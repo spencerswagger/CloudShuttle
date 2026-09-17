@@ -121,6 +121,42 @@ export const CRED_KINDS = [
       { k: "namespace", label: "默认命名空间（可选）", ph: "如 default / build，JOB 节点未指定时使用" },
     ],
   },
+  {
+    value: "ssh",
+    label: "SSH 密钥",
+    icon: "M3 16h18M5 16v4h14v-4m-9-8h4m-6 4h8a4 4 0 0 0 4-4V4",
+    hint: "注入容器 ~/.ssh：git clone 私有仓库 / scp / rsync 使用。私钥仅保存一次，不可回显；known_hosts 留空时首次连接自动接受主机指纹。",
+    fields: [
+      { k: "privateKey", type: "textarea", label: "私钥", ph: "-----BEGIN OPENSSH PRIVATE KEY-----\n…\n-----END OPENSSH PRIVATE KEY-----", required: true, secret: true },
+      { k: "passphrase", label: "私钥口令（可选）", ph: "无口令私钥可留空", secret: true },
+      { k: "knownHosts", type: "textarea", label: "known_hosts（可选）", ph: "粘贴主机指纹行；留空则首次连接自动接受", secret: true },
+    ],
+  },
+  {
+    value: "maven",
+    label: "Maven 私服",
+    icon: "M4 5h16v14H4zM8 9h3M8 13h8M12 9l-1.5 4",
+    hint: "写入容器 ~/.m2/settings.xml：mvn 构建拉取/发布私有 Nexus/Artifactory 包时自动携带该 server 凭证（无需 -s 指定）。",
+    fields: [
+      { k: "serverId", label: "Server ID", ph: "如 nexus-central（对应私有仓库的 server id）", required: true },
+      { k: "username", label: "用户名", ph: "私服账号", required: true },
+      { k: "password", label: "密码 / Token", ph: "私服密码或令牌", secret: true, required: true },
+      { k: "registryUrl", label: "仓库地址（可选，作镜像）", ph: "https://nexus.example.com/repository/maven-public/" },
+    ],
+  },
+  {
+    value: "npm",
+    label: "npm 私有源",
+    icon: "M6 4h12M6 20l6-16M12 4v16",
+    hint: "写入容器 ~/.npmrc 的 authToken：npm i 拉取私有包 / npm publish 发布到私有源时自动携带凭证。",
+    fields: [
+      { k: "registry", label: "Registry 地址", ph: "https://registry.npmjs.org/", required: true },
+      { k: "token", label: "Access Token", ph: "私有源访问令牌", secret: true, required: true },
+    ],
+  },
 ];
+
+// runner 型节点（Shell / Job 执行）可注入容器的凭证类型
+export const RUNNER_CRED_KINDS = ["ssh", "maven", "docker-registry", "npm", "s3"];
 export const credKind = (v) => CRED_KINDS.find((k) => k.value === v);
 export const credKindLabel = (v) => credKind(v)?.label ?? v;
