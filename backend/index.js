@@ -691,10 +691,10 @@ export async function handler(event) {
   };
   try {
     const { handler: name } = routeToHandler(path, method, body);
-    // /_/ 内部接口仅允许内网来源；但 eciDone/eciFail 回调例外——它依赖强随机 token+secret
-    // 双因子鉴权（internal.js 校验），且 k8s 集群容器（可能部署在公网侧）需要直接回调控制面，
-    // 因此回调端点放行公网、其余内部接口仍限内网。
-    if (path.startsWith("/_/") && !RE.eciDone.test(path) && !RE.eciFail.test(path)) {
+    // /_/ 内部接口仅允许内网来源：回调鉴权依赖强随机 token+secret，但容器回调地址由
+    // CALLBACK_BASE_INTERNAL / CONTROL_BASE 控制——集群与控制面同 VPC 时应走内网前缀，
+    // 来源 IP 为内网即通过；公网来源一律 403。
+    if (path.startsWith("/_/")) {
       const ip = clientIp(event);
       if (!isPrivateIp(ip)) {
         return finish(403, { ok: false, code: "FORBIDDEN", message: "内部接口仅允许内网访问", requestId }, true);
