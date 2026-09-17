@@ -36,16 +36,16 @@ v0.3.0-rc3 执行契约（命令内联 + curl 回调）实测暴露：
 
 ```
 docker/
-  base.dockerfile            → registry.cn-hangzhou.aliyuncs.com/<ns>/ci-base:latest
-  java/java8.dockerfile      → …/ci-java:8
-  java/java17.dockerfile     → …/ci-java:17
+  base.dockerfile            → registry.cn-hangzhou.aliyuncs.com/spencerswagger/ci-base:latest
+  java/java8.dockerfile      → registry.cn-hangzhou.aliyuncs.com/spencerswagger/ci-java:8
+  java/java17.dockerfile     → registry.cn-hangzhou.aliyuncs.com/spencerswagger/ci-java:17
   …（每大版本一个文件，tag = 大版本号）
-  node/node14.dockerfile     → …/ci-node:14
-  node/node22.dockerfile     → …/ci-node:22
+  node/node14.dockerfile     → registry.cn-hangzhou.aliyuncs.com/spencerswagger/ci-node:14
+  node/node22.dockerfile     → registry.cn-hangzhou.aliyuncs.com/spencerswagger/ci-node:22
   …
-  python/python3.7.dockerfile → …/ci-python:3.7
+  python/python3.7.dockerfile → registry.cn-hangzhou.aliyuncs.com/spencerswagger/ci-python:3.7
   …
-  golang/go1.19.dockerfile   → …/ci-golang:1.19
+  golang/go1.19.dockerfile   → registry.cn-hangzhou.aliyuncs.com/spencerswagger/ci-golang:1.19
   …
 ```
 
@@ -80,11 +80,12 @@ docker/
 
 - `workflow_dispatch` 手动触发，输入：
   - `image`：目标镜像标识（如 `node/20` → `ci-node:20`），或 `all` 全量构建；
-- **目标地址写死**：ACR 命名空间作为 workflow 常量写死（如
-  `REGISTRY=registry.cn-hangzhou.aliyuncs.com`、`NAMESPACE=<写死的私有仓命名空间>`），触发时
-  只需选镜像，不填地址；
-- 步骤：checkout → `docker login $REGISTRY`（secrets `DOCKER_USERNAME/DOCKER_PASSWORD`）→
-  `docker buildx build --platform linux/amd64 -t $REGISTRY/$NAMESPACE/ci-*:<tag> . -f docker/…`
+- **目标地址写死（字面量，不用变量）**：
+  `REGISTRY=registry.cn-hangzhou.aliyuncs.com`、`NAMESPACE=spencerswagger`——完整地址形如
+  `registry.cn-hangzhou.aliyuncs.com/spencerswagger/ci-node:20`，触发时只选镜像；
+- 步骤：checkout → `docker login registry.cn-hangzhou.aliyuncs.com`（secrets
+  `DOCKER_USERNAME/DOCKER_PASSWORD`）→
+  `docker buildx build --platform linux/amd64 -t registry.cn-hangzhou.aliyuncs.com/spencerswagger/ci-*:<tag> . -f docker/…`
   → `docker push`；
 - `all` 按 Dockerfile 清单逐个构建全部版本。
 
@@ -95,8 +96,8 @@ docker/
   幂等存在性守卫逐行 `INSERT INTO exec_image`（镜像名唯一，沿用 seed 的守卫写法，存量库升级时
   自动补全、新库也走同一条路径），**用户无需逐个添加**；`deploy/seed.sql` 只保留 demo 管道，
   镜像预置统一由迁移负责（避免双份）。
-- 迁移里镜像地址直接写死为 workflow 输出的同一 ACR 前缀
-  （`registry.cn-hangzhou.aliyuncs.com/<ns>/ci-*`），tag 与镜像矩阵一一对应。
+- 迁移/种子里的镜像地址直接写死为 `registry.cn-hangzhou.aliyuncs.com/spencerswagger/ci-*`
+  字面量（SQL 可直接复制执行），tag 与镜像矩阵一一对应。
 - 前端镜像下拉/占位文案：说明"平台预置 CI 镜像已含 git/curl（+docker-cli/kaniko），可直接
   clone/build；如用自定义镜像需自带 curl"。
 
@@ -109,7 +110,7 @@ docker/
 ## 运维
 
 - CloudShuttle 仓库需配置 `DOCKER_USERNAME / DOCKER_PASSWORD`（ACR 账号）；
-- 触发 action 构建 → 推送 → 集群内可直接 `registry.cn-hangzhou.aliyuncs.com/<ns>/ci-*`。
+- 触发 action 构建 → 推送 → 集群内可直接 `registry.cn-hangzhou.aliyuncs.com/spencerswagger/ci-*`。
 
 ## 范围外（后续）
 
