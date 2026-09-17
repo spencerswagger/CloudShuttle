@@ -220,7 +220,7 @@ test("buildWrapperCommand：包含用户命令、日志完整回传（3MB 上限
   assert.match(w, /wc -c < \/tmp\/run\.log/, "通过 wc 判断日志是否超限，避免大日志丢回调");
   assert.match(w, /-gt 3145728/, "日志上限 3MB");
   assert.match(w, /CS_LOG_TRUNCATED/, "超限时写截断标记");
-  assert.match(w, /base64 -w0 < "\$CLOUDSHUTTLE_OUT_FILE"/, "输出 base64 完整回传");
+  assert.match(w, /base64 < "\$CLOUDSHUTTLE_OUT_FILE" 2>\/dev\/null \| tr -d '\\n'/, "输出 base64 完整回传（跨 busybox/GNU 兼容：不用 -w0）");
   assert.match(w, /--data-binary @\/tmp\/cb\.json/, "body 用文件组装，绕开 ARG_MAX");
   assert.match(w, /exit \$rc/);
   assert.match(w, /\/_\/hook\/ecidone\/12\?token=tk&secret=sk/);

@@ -74,13 +74,13 @@ export function buildWrapperCommand(userCommand, { base, execId, token, secret }
     `  printf '\\n${LOG_TRUNCATED_MARK}\\n' >> /tmp/run.log.trim`,
     `  mv /tmp/run.log.trim /tmp/run.log`,
     `fi`,
-    `if [ $rc -eq 0 ]; then`,
-    `  { printf '{"result":{"output":"'; base64 -w0 < "$CLOUDSHUTTLE_OUT_FILE" 2>/dev/null; printf '","logs":"'; base64 -w0 < /tmp/run.log; printf '"}}'; } > /tmp/cb.json`,
-    `  curl -fsS -X POST "${cbUrl("ecidone")}" -H 'content-type: application/json' --data-binary @/tmp/cb.json`,
-    `else`,
-    `  { printf '{"reason":"exit '"$rc"'","logs":"'; base64 -w0 < /tmp/run.log; printf '"}'; } > /tmp/cb.json`,
-    `  curl -fsS -X POST "${cbUrl("fail")}" -H 'content-type: application/json' --data-binary @/tmp/cb.json`,
-    `fi`,
+    `if [ $rc -eq 0 ]; then
+    { printf '{"result":{"output":"'; base64 < "$CLOUDSHUTTLE_OUT_FILE" 2>/dev/null | tr -d '\\n'; printf '","logs":"'; base64 < /tmp/run.log | tr -d '\\n'; printf '"}}'; } > /tmp/cb.json
+    curl -fsS -X POST "${cbUrl("ecidone")}" -H 'content-type: application/json' --data-binary @/tmp/cb.json
+  else
+    { printf '{"reason":"exit '"$rc"'","logs":"'; base64 < /tmp/run.log | tr -d '\\n'; printf '"}'; } > /tmp/cb.json
+    curl -fsS -X POST "${cbUrl("fail")}" -H 'content-type: application/json' --data-binary @/tmp/cb.json
+  fi`,
     `exit $rc`,
   ].join("\n");
 }
