@@ -33,10 +33,21 @@ export async function validateCallback({ token, secret, kind, kinds }) {
 export async function eciDone(orchestrator, { token, secret, result }) {
   const v = await validateCallback({ token, secret, kinds: ["job"] });
   if (!v.ok) return { status: 401, body: { ok: false, error: "invalid callback" } };
+  // 诊断：打印回调收到的 output/logs 长度与日志原文样本，定位「succeeded 但 logs/output 为空」
+  const outRaw = String(result?.output ?? "");
+  const logsRaw = String(result?.logs ?? "");
+  const sample = (b64) => {
+    try { return Buffer.from(String(b64).slice(0, 400), "base64").toString("utf8").slice(0, 200); }
+    catch { return ""; }
+  };
+  console.log(
+    `[eciDone] exec=${v.execId} node=${v.nodeId} outputLen=${outRaw.length} logsLen=${logsRaw.length} ` +
+    `outputSample=${JSON.stringify(sample(outRaw))} logsSample=${JSON.stringify(sample(logsRaw))}`
+  );
   // 外部副作用（解析/写库/推进）必须 await 完成后再响应，FC 容器冻结下 fire-and-forget 会丢
   await orchestrator.onEciDone({
     execId: v.execId, nodeId: v.nodeId,
-    output: result?.output, logs: result?.logs,
+    output: outRaw, logs: logsRaw,
   });
   return { status: 200, body: { ok: true } };
 }

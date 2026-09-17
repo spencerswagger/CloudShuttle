@@ -66,8 +66,15 @@ export function buildWrapperCommand(userCommand, { base, execId, token, secret }
     `${base}/_/hook/${kind}/${execId}?token=${encodeURIComponent(token)}&secret=${encodeURIComponent(secret)}`;
   return [
     `set +e`,
-    `{ ${userCommand} ; } > /tmp/run.log 2>&1`,
+    // 起止横幅：双写 pod stdout（容器日志可见）与 /tmp/run.log（回传执行详情），
+    // 保证「用户命令无任何输出」时也有平台日志兜底
+    `echo "== [cloudshuttle] run start: exec=${execId} =="`,
+    `: > /tmp/run.log`,
+    `echo "== [cloudshuttle] run start: exec=${execId} ==" >> /tmp/run.log`,
+    `{ ${userCommand} ; } >> /tmp/run.log 2>&1`,
     `rc=$?`,
+    `echo "== [cloudshuttle] run end: rc=$rc ==" >> /tmp/run.log`,
+    `echo "== [cloudshuttle] run end: rc=$rc =="`,
     // 日志完整回传：仅当超过上限时截断并追加标记（shell 变量不进参数，流式拼 body 文件）
     `if [ "$(wc -c < /tmp/run.log 2>/dev/null)" -gt ${LOG_MAX_BYTES} ]; then`,
     `  head -c ${LOG_MAX_BYTES} /tmp/run.log > /tmp/run.log.trim`,
@@ -75,7 +82,11 @@ export function buildWrapperCommand(userCommand, { base, execId, token, secret }
     `  mv /tmp/run.log.trim /tmp/run.log`,
     `fi`,
     `if [ $rc -eq 0 ]; then
-    { printf '{"result":{"output":"'; base64 < "$CLOUDSHUTTLE_OUT_FILE" 2>/dev/null | tr -d '\\n'; printf '","logs":"'; base64 < /tmp/run.log | tr -d '\\n'; printf '"}}'; } > /tmp/cb.json
+    { printf '{"result":{"output":"'
+      [ -f "$CLOUDSHUTTLE_OUT_FILE" ] && base64 < "$CLOUDSHUTTLE_OUT_FILE" | tr -d '\\n'
+      printf '","logs":"'
+      base64 < /tmp/run.log | tr -d '\\n'
+      printf '"}}'; } > /tmp/cb.json
     curl -fsS -X POST "${cbUrl("ecidone")}" -H 'content-type: application/json' --data-binary @/tmp/cb.json
   else
     { printf '{"reason":"exit '"$rc"'","logs":"'; base64 < /tmp/run.log | tr -d '\\n'; printf '"}'; } > /tmp/cb.json
