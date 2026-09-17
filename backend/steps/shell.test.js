@@ -216,11 +216,13 @@ test("shell 节点：配置 CALLBACK_BASE_INTERNAL 后回调/引导变量走内�
 
 test("buildWrapperCommand：包含用户命令、日志完整回传（3MB 上限+截断标记）、成功/失败回调与退出码", () => {
   const w = buildWrapperCommand("npm run build", { base: "https://cp", execId: 12, token: "tk", secret: "sk" });
-  assert.match(w, /npm run build/);
+  assert.match(w, /npm run build/, "用户命令进 run.log（>> 追加）");
+  assert.match(w, /== \[cloudshuttle\] run start/, "起止横幅写入日志（用户无输出也有兜底）");
+  assert.match(w, /== \[cloudshuttle\] run end: rc=\$rc/, "结束横幅含退出码");
   assert.match(w, /wc -c < \/tmp\/run\.log/, "通过 wc 判断日志是否超限，避免大日志丢回调");
   assert.match(w, /-gt 3145728/, "日志上限 3MB");
   assert.match(w, /CS_LOG_TRUNCATED/, "超限时写截断标记");
-  assert.match(w, /base64 < "\$CLOUDSHUTTLE_OUT_FILE" 2>\/dev\/null \| tr -d '\\n'/, "输出 base64 完整回传（跨 busybox/GNU 兼容：不用 -w0）");
+  assert.match(w, /\[ -f "\$CLOUDSHUTTLE_OUT_FILE" \] && base64 < "\$CLOUDSHUTTLE_OUT_FILE" \| tr -d '\\n'/, "输出文件存在才读（免 cannot open 误报），base64 兼容 busybox/GNU");
   assert.match(w, /--data-binary @\/tmp\/cb\.json/, "body 用文件组装，绕开 ARG_MAX");
   assert.match(w, /exit \$rc/);
   assert.match(w, /\/_\/hook\/ecidone\/12\?token=tk&secret=sk/);
