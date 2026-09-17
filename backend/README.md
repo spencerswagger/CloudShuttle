@@ -15,11 +15,11 @@ Node 编排引擎与控制面，单份代码支持 **FC handler** 与 **本地 H
 backend/
   index.js            # FC handler 入口（event → routeToHandler）
   local-server.js     # HTTP 入口（监听 :9000，含 /healthz），供本地容器 / FC 自定义容器
-  config.js           # 环境变量读取（PG/Redis/SM4_KEY/CONTROL_BASE/ALIYUN_*）
+  config.js           # 环境变量读取（PG/Redis/SM4_KEY/CONTROL_BASE）
   db/                 # migrations/*.sql（版本化迁移）+ migrate.js（迁移器）、pg.js、redis.js
   engine/             # dag.js 拓扑、state.js、snapshot.js、mutex.js、orchestrator.js
-  steps/              # shell.js（→ECI 派发）、approval.js（钉钉卡点）
-  providers/          # eci.js、dingtalk-corp.js（企业机器人）、dingtalk-token.js
+  steps/              # shell.js（k8s Job 承载，命令内联）、approval.js（钉钉卡点）
+  providers/          # k8s.js（kubeconfig 解析/Job 派发）、dingtalk-corp.js（企业机器人）、dingtalk-token.js
   handlers/           # api.js、hook.js、internal.js
   crypto/             # sm4.js
   test/               # node --test 单测

@@ -1,38 +1,5 @@
 // 凭证类型元数据（列表页与表单页共用）
-// 阿里云 ECI 常用地域（下拉候选；仍可手动输入其他地域 ID）
-export const ECI_REGIONS = [
-  { id: "cn-hangzhou", label: "华东1（杭州）" },
-  { id: "cn-shanghai", label: "华东2（上海）" },
-  { id: "cn-beijing", label: "华北2（北京）" },
-  { id: "cn-zhangjiakou", label: "华北3（张家口）" },
-  { id: "cn-huhehaote", label: "华北5（呼和浩特）" },
-  { id: "cn-qingdao", label: "华北1（青岛）" },
-  { id: "cn-shenzhen", label: "华南1（深圳）" },
-  { id: "cn-guangzhou", label: "华南2（广州）" },
-  { id: "cn-chengdu", label: "西南1（成都）" },
-  { id: "cn-hongkong", label: "中国香港" },
-  { id: "ap-southeast-1", label: "新加坡" },
-  { id: "ap-northeast-1", label: "日本（东京）" },
-  { id: "us-west-1", label: "美国（硅谷）" },
-  { id: "us-east-1", label: "美国（弗吉尼亚）" },
-  { id: "eu-central-1", label: "德国（法兰克福）" },
-];
 export const CRED_KINDS = [
-  {
-    value: "eci",
-    label: "阿里云 ECI",
-    icon: "M12 2l8 4v6a8 8 0 0 1-4.5 7.2L12 21l-3.5-1.8A8 8 0 0 1 4 12V6l8-4zm-2 11l2 2 4-5",
-    hint: "仅保存阿里云 AccessKey（AK/SK）。地域、交换机与安全组属运行配置，在流水线 Shell 节点上选择（凭证不绑定地域，可跨地域复用）。",
-    guide: [
-      { title: "创建 AccessKey", text: "阿里云控制台 → 访问控制 RAM → 用户 → 为该用户建立专属 AK 并授予最小权限", url: "https://ram.console.aliyun.com" },
-      { title: "授权 RAM 权限", text: "运行 Shell 节点需 AliyunECIFullAccess（创建/管理 ECI 必需）；在节点上探测交换机/安全组另需 AliyunVPCReadOnlyAccess 与 AliyunECSReadOnlyAccess（或直接授予 AliyunVPCReadOnlyAccess + AliyunECSReadOnlyAccess）。ECI 底层资源由服务关联角色 AliyunServiceRoleForECI 访问，无需手动创建", url: "https://ram.console.aliyun.com" },
-      { title: "在 Shell 节点配置地域与网络", text: "创建凭证后，在流水线的 Shell 节点选择该凭证，并配置地域、交换机（VSwitch）与安全组（SecurityGroup）；填写后节点会提示已自动探测到可用网络/规格", url: "https://ecs.console.aliyun.com" },
-    ],
-    fields: [
-      { k: "accessKeyId", label: "AccessKey ID", ph: "阿里云账号的 AccessKey ID", required: true },
-      { k: "accessKeySecret", label: "AccessKey Secret", ph: "与 AccessKey ID 配对的 Secret", secret: true, required: true },
-    ],
-  },
   {
     value: "dingtalk-corp",
     label: "钉钉企业机器人",
@@ -107,6 +74,56 @@ export const CRED_KINDS = [
       { k: "extra", type: "kvlist", label: "额外连接参数", hint: "键=值，可添加多条；如 ssl=true / application_name=my-app / statement_timeout=5000" },
     ],
   },
+  {
+    value: "k8s",
+    label: "Kubernetes 集群",
+    icon: "M12 2l8.5 5v10L12 22l-8.5-5V7L12 2zm4 6.5l-4-2.3-4 2.3v4.6l4 2.3 4-2.3V8.5z",
+    hint: "kubeconfig 凭证（Shell 执行节点以 k8s Job 运行命令）。填一份完整 kubeconfig YAML（token / 客户端证书 / basic 鉴权皆可，SM4 加密落库），集群 API server 需对控制面网络可达；命名空间未在节点上指定时默认用这里填的。点击下方「权限说明」查看所需的 RBAC 与 kubeconfig 创建步骤。",
+    guide: [
+      { title: "获取 kubeconfig", text: "ACK：集群 → 基本信息 → 连接信息 → 复制公网/内网 kubeconfig；自建集群导出 kubeconfig 文件内容", url: "https://cs.console.aliyun.com" },
+      { title: "网络可达", text: "确认集群 API server 地址（cluster.server）能被控制面（FC）访问：公网端点或与 FC 同 VPC；内网地址在表单里会被打码展示", url: "https://cs.console.aliyun.com" },
+    ],
+    fields: [
+      { k: "kubeconfig", type: "textarea", label: "kubeconfig（YAML）", ph: "粘贴完整 kubeconfig 内容，如：\napiVersion: v1\nkind: Config\ncurrent-context: dev\nclusters:…", required: true, secret: true },
+      { k: "namespace", label: "默认命名空间（可选）", ph: "如 default / build，Shell 节点未指定时使用" },
+    ],
+  },
+  {
+    value: "ssh",
+    label: "SSH 密钥",
+    icon: "M3 16h18M5 16v4h14v-4m-9-8h4m-6 4h8a4 4 0 0 0 4-4V4",
+    hint: "注入容器 ~/.ssh：git clone 私有仓库 / scp / rsync 使用。私钥仅保存一次，不可回显；known_hosts 留空时首次连接自动接受主机指纹。",
+    fields: [
+      { k: "privateKey", type: "textarea", label: "私钥", ph: "-----BEGIN OPENSSH PRIVATE KEY-----\n…\n-----END OPENSSH PRIVATE KEY-----", required: true, secret: true },
+      { k: "passphrase", label: "私钥口令（可选）", ph: "无口令私钥可留空", secret: true },
+      { k: "knownHosts", type: "textarea", label: "known_hosts（可选）", ph: "粘贴主机指纹行；留空则首次连接自动接受", secret: true },
+    ],
+  },
+  {
+    value: "maven",
+    label: "Maven 私服",
+    icon: "M4 5h16v14H4zM8 9h3M8 13h8M12 9l-1.5 4",
+    hint: "写入容器 ~/.m2/settings.xml：mvn 构建拉取/发布私有 Nexus/Artifactory 包时自动携带该 server 凭证（无需 -s 指定）。",
+    fields: [
+      { k: "serverId", label: "Server ID", ph: "如 nexus-central（对应私有仓库的 server id）", required: true },
+      { k: "username", label: "用户名", ph: "私服账号", required: true },
+      { k: "password", label: "密码 / Token", ph: "私服密码或令牌", secret: true, required: true },
+      { k: "registryUrl", label: "仓库地址（可选，作镜像）", ph: "https://nexus.example.com/repository/maven-public/" },
+    ],
+  },
+  {
+    value: "npm",
+    label: "npm 私有源",
+    icon: "M6 4h12M6 20l6-16M12 4v16",
+    hint: "写入容器 ~/.npmrc 的 authToken：npm i 拉取私有包 / npm publish 发布到私有源时自动携带凭证。",
+    fields: [
+      { k: "registry", label: "Registry 地址", ph: "https://registry.npmjs.org/", required: true },
+      { k: "token", label: "Access Token", ph: "私有源访问令牌", secret: true, required: true },
+    ],
+  },
 ];
+
+// Shell 执行节点可注入容器的凭证类型
+export const RUNNER_CRED_KINDS = ["ssh", "maven", "docker-registry", "npm", "s3"];
 export const credKind = (v) => CRED_KINDS.find((k) => k.value === v);
 export const credKindLabel = (v) => credKind(v)?.label ?? v;

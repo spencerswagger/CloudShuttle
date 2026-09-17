@@ -6,8 +6,12 @@ import { config } from "../config.js";
 import { sm4Encrypt, sm4Decrypt } from "../crypto/sm4.js";
 import { HttpError } from "../errors.js";
 import { buildDbConfig, createConnection } from "../providers/db.js";
+import { parseKubeconfig, createK8sProvider, k8sErrorHint } from "../providers/k8s.js";
 import { randomUUID } from "node:crypto";
+import crypto from "node:crypto";
+import axios from "axios";
 import { checkVars, resolveScope } from "../engine/variables.js";
+import { validateCredRefs } from "../steps/runner-creds.js";
 import { buildGraph, ancestors, validateSpec } from "../engine/dag.js";
 
 const rows = (r) => r.rows;
@@ -25,6 +29,18 @@ function resolveSpec(body) {
 function assertVarsResolved(spec) {
   const err = checkVars(spec, { ancestors });
   if (err) throw new HttpError(422, "VAR_UNRESOLVED", err, "unknown variable");
+}
+
+// 保存前静态校验 runner 附加凭证：引用的凭证必须存在且类型在允许集（ssh/maven/docker-registry/npm/s3）
+async function assertCredsResolved(spec) {
+  const lookupCred = async (name) => {
+    const { rows } = await pool.query(
+      `SELECT kind FROM credential WHERE name=$1 AND deleted_at IS NULL`, [name]
+    );
+    return rows[0] ?? null;
+  };
+  const err = await validateCredRefs(spec, lookupCred);
+  if (err) throw new HttpError(422, "CRED_UNRESOLVED", err, "unknown credential");
 }
 
 // 保存前 DAG 校验（节点唯一/边端点/无环/边条件格式/loop 区域）；非法直接 400
@@ -70,6 +86,7 @@ export async function createPipeline(body) {
   // 与运行时（hydrateForRun）的校验契约保持一致。
   assertDagValid(specObj);
   assertVarsResolved(specObj);
+  await assertCredsResolved(specObj);
   const spec = JSON.stringify(specObj);
   // 每条管道的 webhook 触发独立密钥，创建时生成并存库
   const webhookSecret = randomUUID();
@@ -203,6 +220,7 @@ export async function updatePipeline(id, body) {
   // 同 createPipeline：DAG 结构校验先行（悬挂边 400 BAD_DAG），变量语义校验在后
   assertDagValid(specObj);
   assertVarsResolved(specObj);
+  await assertCredsResolved(specObj);
   const spec = JSON.stringify(specObj);
   const { rows: r } = await pool.query(
     `UPDATE pipeline SET name=$2, description=$3, spec_json=$4::jsonb, rev=rev+1, updated_at=now()
@@ -266,11 +284,91 @@ export function buildTestConfig(kind, secret) {
   return cfg;
 }
 
-// 测试数据库连接：用草稿 secret（含额外参数）建连并跑 SELECT 1，成功能返回耗时；
-// 失败抛可读错误（DISPATCH 捕获后降级为 200 + {ok:false,message}，参照 eciProbeNetworks）。
-// 工厂注入 createConnection 便于单测验证「cfg 原样透传」；opts.raw 让建连层跳过二次合并（否则 ssl 等丢失）。
-export function makeTestCredentialConnection({ createConnection: open }) {
+// 测试连接（mysql/pg/k8s/maven/npm/docker-registry/s3）：草稿 secret 直连探测，成功能返回耗时；
+// 失败抛可读错误（DISPATCH 捕获后降级为 200 + {ok:false,message}）。
+// http 可注入便于单测（默认 axios）。
+export function makeTestCredentialConnection({ createConnection: open, pingK8s, http = axios }) {
+  const probe = async (fn) => {
+    const start = Date.now();
+    await fn();
+    return { ok: true, latencyMs: Date.now() - start };
+  };
+  const failed = (err, label) => {
+    let msg = String(err?.response?.data?.message ?? err?.message ?? err).split("\n")[0].slice(0, 200);
+    const status = err?.response?.status;
+    if (status === 401 || status === 403) msg = `${label}凭证无效（HTTP ${status}），请检查账号/密码/Token`;
+    if (status === 404) msg = `${label}地址不存在（HTTP 404），请检查 URL 是否可访问`;
+    return msg;
+  };
   return async function testCredentialConnection({ kind, secret }) {
+    if (kind === "k8s") {
+      // Kubernetes：解析 kubeconfig + 连通性探测（能列出 namespaces 即视为可达）
+      try {
+        const kube = parseKubeconfig(secret?.kubeconfig);
+        const start = Date.now();
+        await (pingK8s ?? createK8sProvider().ping)(kube);
+        return { ok: true, latencyMs: Date.now() - start };
+      } catch (err) {
+        throw new Error(`Kubernetes 集群连接失败：${k8sErrorHint(err) || "未知错误"}`);
+      }
+    }
+    if (kind === "maven") {
+      const url = String(secret?.registryUrl ?? "").trim();
+      if (!url) throw new Error("请先填写「仓库地址（可选，作镜像）」才能测试连接（无仓库地址无法探测）");
+      try {
+        return await probe(() => http.get(url, {
+          timeout: 8000,
+          auth: { username: String(secret?.username ?? ""), password: String(secret?.password ?? "") },
+        }));
+      } catch (err) {
+        throw new Error(`Maven 私服连接失败：${failed(err, "Maven 私服")}`);
+      }
+    }
+    if (kind === "npm") {
+      const registry = String(secret?.registry ?? "").trim().replace(/\/+$/, "");
+      if (!registry) throw new Error("请先填写 Registry 地址再测试连接");
+      try {
+        return await probe(() => http.get(`${registry}/-/whoami`, {
+          timeout: 8000,
+          headers: { Authorization: `Bearer ${String(secret?.token ?? "")}` },
+        }));
+      } catch (err) {
+        throw new Error(`npm 源连接失败：${failed(err, "npm")}`);
+      }
+    }
+    if (kind === "docker-registry") {
+      const registry = String(secret?.registry ?? "").trim();
+      if (!registry) throw new Error("请先填写仓库地址再测试连接");
+      try {
+        return await probe(() => http.get(`${registry.startsWith("http") ? "" : "https://"}${registry}/v2/`, {
+          timeout: 8000,
+          auth: { username: String(secret?.username ?? ""), password: String(secret?.password ?? "") },
+        }));
+      } catch (err) {
+        throw new Error(`Docker 仓库连接失败：${failed(err, "Docker 仓库")}`);
+      }
+    }
+    if (kind === "s3") {
+      // S3：SigV4 签名后探测（有 bucket 则列 bucket 内容，否则列 bucket 列表）
+      try {
+        const endpoint = String(secret?.endpoint ?? "").trim();
+        if (!endpoint) throw new Error("请先填写 Endpoint 再测试连接");
+        const bucket = String(secret?.bucket ?? "").trim();
+        const host = endpoint.startsWith("http") ? endpoint.replace(/^https?:\/\//, "") : endpoint;
+        const useTls = !endpoint.startsWith("http://");
+        const url = useTls ? `https://${host}` : `http://${host}`;
+        const req = signedS3Request({
+          method: "GET", host,
+          path: bucket ? `/${bucket}?max-keys=0` : "/",
+          region: "us-east-1",
+          ak: String(secret?.ak ?? ""), sk: String(secret?.sk ?? ""),
+        });
+        const reqPath = bucket ? `/${bucket}?max-keys=0` : "/";
+        return await probe(() => http.request({ ...req, url: `${url}${reqPath}`, timeout: 8000 }).then((r) => r));
+      } catch (err) {
+        throw new Error(`对象存储连接失败：${failed(err, "S3")}`);
+      }
+    }
     if (kind !== "mysql" && kind !== "pg") {
       throw new HttpError(400, "BAD_DB_KIND", `不支持的数据库类型：${kind || "未填写"}`);
     }
@@ -284,6 +382,113 @@ export function makeTestCredentialConnection({ createConnection: open }) {
       try { await conn.end(); } catch { /* 忽略 */ }
     }
   };
+}
+
+// 极简 AWS SigV4 签名（S3 兼容存储测试连接用；区域默认 us-east-1 与 OSS/MinIO 兼容）
+function signedS3Request({ method, host, path, region, ak, sk }) {
+  const { createHmac, createHash } = crypto;
+  const now = new Date();
+  const amzDate = now.toISOString().replace(/[:\-]|\.\d{3}/g, "");
+  const dateStamp = amzDate.slice(0, 8);
+  const service = "s3";
+  const canonicalHeaders = `host:${host}\nx-amz-content-sha256:${EMPTY_HASH}\nx-amz-date:${amzDate}\n`;
+  const signedHeaders = "host;x-amz-content-sha256;x-amz-date";
+  const canonicalRequest = `${method}\n${path}\n\n${canonicalHeaders}\n${signedHeaders}\n${EMPTY_HASH}`;
+  const scope = `${dateStamp}/${region}/${service}/aws4_request`;
+  const stringToSign = `AWS4-HMAC-SHA256\n${amzDate}\n${scope}\n${createHash("sha256").update(canonicalRequest).digest("hex")}`;
+  const hmac = (key, data) => createHmac("sha256", key).update(data).digest();
+  const kDate = hmac(`AWS4${sk}`, dateStamp);
+  const kRegion = hmac(kDate, region);
+  const kService = hmac(kRegion, service);
+  const kSigning = hmac(kService, "aws4_request");
+  const signature = createHmac("sha256", kSigning).update(stringToSign).digest("hex");
+  return {
+    method,
+    headers: {
+      Host: host,
+      "X-Amz-Date": amzDate,
+      "X-Amz-Content-Sha256": EMPTY_HASH,
+      Authorization: `AWS4-HMAC-SHA256 Credential=${ak}/${scope}, SignedHeaders=${signedHeaders}, Signature=${signature}`,
+    },
+  };
+}
+const EMPTY_HASH = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+// SSH 密钥对生成（WEB 页面一键生成；私钥回填表单、公钥供用户复制配置授权）
+export function generateSshKeypair({ type = "ed25519" } = {}) {
+  const { generateKeyPairSync, createPublicKey } = crypto;
+  const { publicKey, privateKey } = generateKeyPairSync(type, {
+    publicKeyEncoding: { type: "spki", format: "pem" },
+    privateKeyEncoding: { type: "pkcs8", format: "pem" },
+  });
+  // 转 OpenSSH 公钥格式（ssh-ed25519 AAAA...），便于直接粘贴到 SSH 授权（如 GitHub Deploy keys）
+  const der = createPublicKey(publicKey).export({ type: "spki", format: "der" });
+  const openssh = type === "ed25519" ? "ssh-ed25519 " : "ssh-rsa ";
+  const b64 = Buffer.from(sshWire(der, type)).toString("base64");
+  return { publicKey: `${openssh}${b64} ${new Date().toISOString().slice(0, 10)}`, privateKey };
+}
+
+// SPKI DER → SSH 公钥 wire 格式（SSH2 编码：string 算法 + string 密钥）
+function sshWire(der, type) {
+  const algName = type === "ed25519" ? "ssh-ed25519" : "ssh-rsa";
+  const algBuf = Buffer.from(algName);
+  let rest = der;
+  if (type === "ed25519") {
+    // SPKI 里最后 32 字节为原始 ed25519 公钥；导出为 string 前缀即可
+    const key = der.subarray(der.length - 32);
+    return Buffer.concat([sshString(algBuf), sshString(key)]);
+  }
+  // RSA：从 SPKI DER 解析 (n, e) 两项
+  void rest;
+  const parsed = parseRsaSpki(der);
+  return Buffer.concat([sshString(algBuf), sshString(parsed.e), sshString(parsed.n)]);
+}
+function sshString(buf) {
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(buf.length);
+  return Buffer.concat([len, buf]);
+}
+// 解析 RSA SPKI（PKCS#8 外层 + RSAPublicKey 内层）取 n/e
+function parseRsaSpki(der) {
+  // 简易 DER 遍历：SEQUENCE{ AlgId, BIT STRING{ SEQ{ INT n, INT e } } }
+  let off = 0;
+  const read = (b) => b[off++];
+  const readLen = (b) => {
+    const l0 = read(b);
+    if (l0 < 0x80) return l0;
+    const n = l0 & 0x7f;
+    let len = 0;
+    for (let i = 0; i < n; i++) len = len * 256 + read(b);
+    return len;
+  };
+  if (read(der) !== 0x30) throw new Error("bad spki");
+  readLen(der);
+  // AlgorithmIdentifier
+  if (read(der) !== 0x30) throw new Error("bad alg");
+  const algLen = readLen(der);
+  off += algLen;
+  // BIT STRING
+  if (read(der) !== 0x03) throw new Error("bad bits");
+  const bitLen = readLen(der);
+  const bitEnd = off + bitLen;
+  const unused = read(der);
+  void unused;
+  // RSAPublicKey SEQUENCE
+  if (read(der) !== 0x30) throw new Error("bad rsa");
+  readLen(der);
+  const readInt = () => {
+    if (read(der) !== 0x02) throw new Error("bad int");
+    const len = readLen(der);
+    let v = Buffer.from(der.subarray(off, off + len));
+    off += len;
+    // 去掉多余前导 0
+    while (v.length > 1 && v[0] === 0) v = v.subarray(1);
+    return v;
+  };
+  const n = readInt();
+  const e = readInt();
+  void bitEnd;
+  return { n, e };
 }
 
 export const testCredentialConnection = makeTestCredentialConnection({ createConnection });

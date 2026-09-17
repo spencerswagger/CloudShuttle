@@ -12,7 +12,6 @@ test("路径路由把 /api/pipelines 分到 api 处理器", () => {
 test("外部 hook 与内部 hook 分路由", () => {
   assert.equal(routeToHandler("/hook/webhook/svcA", "POST", {}).handler, "hook.webhook");
   assert.equal(routeToHandler("/_/hook/ecidone/3", "POST", {}).handler, "internal.eciDone");
-  assert.equal(routeToHandler("/_/hook/job/tk9", "GET", null).handler, "internal.getJob");
 });
 
 test("旧的触发路由不再注册（一律 404）", () => {
@@ -20,6 +19,12 @@ test("旧的触发路由不再注册（一律 404）", () => {
   assert.equal(routeToHandler(`/hook/${"git"}/svcA`, "POST", {}).handler, "404");
   assert.equal(routeToHandler("/api/pipelines/9/git-hook-secret", "GET", null).handler, "404");
   assert.equal(routeToHandler("/api/pipelines/9/git-hook-secret/reset", "POST", {}).handler, "404");
+});
+
+test("ECI / job 拉取端点已下线（一律 404）", () => {
+  assert.equal(routeToHandler("/api/eci/specs", "POST", {}).handler, "404");
+  assert.equal(routeToHandler("/api/eci/probe-networks", "POST", {}).handler, "404");
+  assert.equal(routeToHandler("/_/hook/job/tk9", "GET", null).handler, "404");
 });
 
 test("入口模块可 import 不崩溃，且 CRUD 路由齐全", () => {
@@ -37,10 +42,6 @@ test("入口模块可 import 不崩溃，且 CRUD 路由齐全", () => {
   assert.equal(routeToHandler("/api/pipelines/9/webhook-secret", "GET", null).handler, "api.getWebhookSecret");
   assert.equal(routeToHandler("/api/pipelines/9/webhook-secret/reset", "POST", {}).handler, "api.resetWebhookSecret");
   assert.equal(routeToHandler("/api/pipelines/9/webhook-probe", "GET", null).handler, "api.getWebhookProbe");
-  assert.equal(routeToHandler("/api/eci/specs", "POST", {}).handler, "api.eciSpecs");
-  assert.equal(routeToHandler("/api/eci/specs/old-style", "GET", null).handler, "404");
-  assert.equal(routeToHandler("/api/eci/probe-networks", "POST", {}).handler, "api.eciProbeNetworks");
-  assert.equal(routeToHandler("/api/eci/probe-networks", "GET", null).handler, "404");
 });
 
 test("handler 冒烟：直接调用导入的 handler 模块函数不崩溃", async () => {

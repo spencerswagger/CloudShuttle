@@ -2,12 +2,12 @@
 
 本平台只有**两种**部署方式：
 
-| 方式 | 控制面 | 数据库 / Redis | 执行器(ECI) | 适用 |
+| 方式 | 控制面 | 数据库 / Redis | 执行器 | 适用 |
 |---|---|---|---|---|
-| **A. docker compose（本机）** | 本地容器（可加载 release 镜像） | 本地容器（也可换云） | 阿里云 | 开发 / 演示 |
-| **B. 云端部署（纯阿里云）** | FC（函数计算） | 云 RDS / 云 Redis | 阿里云 | 生产 |
+| **A. docker compose（本机）** | 本地容器（可加载 release 镜像） | 本地容器（也可换云） | 用户 k8s 集群 | 开发 / 演示 |
+| **B. 云端部署（纯阿里云）** | FC（函数计算） | 云 RDS / 云 Redis | 用户 k8s 集群 | 生产 |
 
-> 无论哪种方式，**执行器（ECI）始终走阿里云**——它是按需拉起的容器，本机起不来。
+> Shell 节点统一以 **k8s Job** 运行：命令由控制面渲染后直接写入容器 command，附加凭证经控制面创建 Secret 注入，不再有平台专用执行器镜像。
 
 ---
 
@@ -24,13 +24,12 @@
 
 - **后端（控制面）打包** → [backend/README.md](../backend/README.md)（FC 代码包 / 镜像两种打包）
 - **前端打包** → [frontend/README.md](../frontend/README.md)
-- **执行器 runner 镜像** → [runner/README.md](../runner/README.md)
 
 ---
 
 ## 方式 A：docker compose（本机）
 
-只需 Docker，一条命令起全部；ECI 仍用阿里云。
+只需 Docker，一条命令起全部；shell 节点仍需要可被控制面访问的 k8s 集群。
 
 ```bash
 # 1.（可选）加载发布的后端镜像；不加载则 compose 自动从源码构建
@@ -54,11 +53,10 @@ docker compose up -d --build
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `SM4_KEY` | 空 | 仅用凭证库（审批机器人/私有仓库/S3）时**必须**填；留空则禁止存凭证 |
+| `SM4_KEY` | 空 | 仅用凭证库（审批机器人/私有仓库/S3/k8s kubeconfig）时**必须**填；留空则禁止存凭证 |
 | `CONTROL_BASE` | 空 | 回调用绝对地址；留空自动从请求 Host 推导（本机= `http://localhost:8080`） |
-| `ALIYUN_AK/SK/REGION` | 空 | 传给 ECI 的执行器用；起服务不需要，跑 shell 节点才需要 |
 
-**限制**：本地容器跑的是控制面与数据库；shell 节点仍下发到**阿里云 ECI**，因此端到端跑 `demo-rollout` 仍需阿里云凭证与 `createEciGroup` 真实接入（见"执行器接入点"）。
+**限制**：本地容器跑的是控制面与数据库；shell 节点以 **k8s Job** 下发到你在节点上选择的 k8s 集群，端到端跑 `demo-rollout` 需先创建 k8s 凭证并保证集群 API server 对本机可达。
 
 ---
 
@@ -72,8 +70,8 @@ docker compose up -d --build
 | 云数据库 Redis | 状态快照/锁 | 记下连接串（B.3 有示例） |
 | FC（函数计算，自定义容器） | 控制面 | 镜像部署（自定义容器/Web 服务），监听 :9000，需 `SKIP_BOOTSTRAP=1` |
 | OSS + CDN | 托管前端 | 静态桶，接 CDN |
-| 容器镜像 ACR | 控制面镜像 + 执行器镜像 | backend tar 与 runner 镜像推送位 |
-| 云容器 / ECI 权限 | 拉执行容器 | 见"执行器接入点" |
+| 容器镜像 ACR | 控制面镜像 | backend tar 推送位 |
+| k8s 集群（ACK / 自建均可） | 执行 shell 节点 | 集群 API server 对控制面可达（公网端点或同 VPC）；执行所需权限见凭证页「权限说明」 |
 
 ### B.2 控制面：FC（自定义容器）
 
@@ -102,9 +100,6 @@ SKIP_BOOTSTRAP=1
 PORT=9000
 CONTROL_BASE=https://cloudshuttle.example.com
 SM4_KEY=a1b2c3d4e5f60718293a4b5c6d7e8f90
-ALIYUN_AK=<你的AK>
-ALIYUN_SK=<你的SK>
-ALIYUN_REGION=cn-hangzhou
 ```
 
 - 公网 Redis（TLS）把 `redis://` 换成 `rediss://`；
@@ -125,15 +120,13 @@ unzip cloudshuttle-web-<tag>.zip -d cloudshuttle-web    # 解压即 `dist/` 内�
   ```
 - 自建打包见 [frontend/README.md](../frontend/README.md)。
 
-### B.5 执行器镜像（runner → ACR → ECI）
+### B.5 执行 shell 节点（k8s 集群）
 
-完整构建与推送见 [runner/README.md](../runner/README.md)，要点：
+Shell 节点以 **k8s Job** 运行在你在节点上选择的集群（命令由控制面直接内联进容器 command，无平台专用镜像）。准备步骤：
 
-```bash
-docker build -t registry.cn-hangzhou.aliyuncs.com/<ns>/cloudshuttle-runner:0.1 runner/
-docker push registry.cn-hangzhou.aliyuncs.com/<ns>/cloudshuttle-runner:0.1
-# 并把 seed 里 "Docker+Git 构建" 镜像改指向 ACR 地址（默认 cloudshuttle/runner:0.1）
-```
+1. 在集群里为平台建一个最小权限的 ServiceAccount（jobs/secrets 的 create/get/list/watch/delete、pods 与 namespaces 的 get/list/watch），导出 kubeconfig；
+2. 在「凭证」页创建 **Kubernetes 集群**类型凭证（粘贴 kubeconfig + 可选默认命名空间），表单内有「📖 权限说明」弹窗给出完整 RBAC 与创建/自检步骤；
+3. 确认集群 API server 对控制面可达（公网端点或与 FC 同 VPC）。
 
 ### B.6 审批机器人（可选）
 
@@ -157,16 +150,15 @@ docker push registry.cn-hangzhou.aliyuncs.com/<ns>/cloudshuttle-runner:0.1
 
 ---
 
-## 执行器接入点（两种方式共用）
+## shell 执行接入点（A′ 命令内联契约）
 
-`backend/index.js` 以 `createEciProvider({ create: createEciGroup })` 注入派发函数；`createEciGroup` 是**当前唯一的真实接入点位**，应实现阿里云 `CreateContainerGroup` OpenAPI：
+shell 节点在 `backend/steps/shell.js` 统一实现：控制面用 `renderParams` 渲染节点命令/env/附加凭证引用，生成包装脚本（跑命令 → base64 收集输出与日志 → 按退出码回调 `/_/hook/ecidone/{execId}` 或 `/_/hook/fail/{execId}`）直接写入容器 `command: ["sh","-c", ...]`；
 
-- 用节点 `params.image` / `params.command` / `env` / `resource` / `timeout`；
-- 给容器注入环境：`IMAGE`、`COMMAND`、`CLOUDSHUTTLE_JOB_URL`、`CLOUDSHUTTLE_TOKEN`、`CLOUDSHUTTLE_EXEC_ID`、`CLOUDSHUTTLE_NODE_ID`、`CLOUDSHUTTLE_CB_BASE`（与 `runner/run.sh` 读取对应）；
-- 容器退出后回调 `/_/hook/ecidone/{execId}`（成功）或 `/_/hook/fail/{execId}`（失败）；回调 URL 由控制面生成，
-  鉴权双因子走 query：`?token=<回调token>&secret=<回调密钥>`（与 `webhook_registry` 登记记录比对，且 `/_/` 仅内网可访问）。
+- 容器镜像 = 节点上用户选择的「语言/自定义镜像」（需自带 `sh` + `curl`），无平台镜像概念；
+- 附加凭证：控制面在同一命名空间创建 `secret-<jobName>` Secret（文件型按约定路径 subPath 落盘、短值 secretKeyRef 进 env），并把 Secret 的 ownerReferences 指向 Job——Job 被 TTL 清理时随 GC 删除；
+- 回调鉴权双因子走 query：`?token=<回调token>&secret=<回调密钥>`（与 `webhook_registry` 登记记录比对，且 `/_/` 仅内网可访问）。
 
-本地单测以 mock `create` 注入，不依赖真实云资源，因此不接入也可跑通单测。
+本地单测以 mock 客户端注入 `createK8sProvider`，不依赖真实集群，因此不接入也可跑通单测。
 
 ---
 
@@ -195,5 +187,5 @@ curl -X POST 'http://localhost:9000/hook/webhook/demo-rollout?secret=<你的密�
 | `/api/pipelines/:id/webhook-secret/reset` | POST | 轮换密钥（泄露/定期换），返回新的 `{ ok, id, name, secret, url }`；拿到新地址后需到第三方同步更新 |
 | `/api/pipelines/:id/webhook-probe` | GET | 调试探针：该管道**最近一次**投递的 `{ ok, body, receivedAt, httpStatus }`。`body` 为第三方真实请求体（序列化超 256KB 时只存前 100KB 预览 `{"_truncated":true,"preview":"…"}`）；`httpStatus` 是那次投递的处理结果（200/401/503/500，`null`=尚无记录）。密钥错的投递也会记录，故 401 时仍能看到 body |
 
-期望流转：`running → (shell→ECI) → 发审批卡片 → (通过) → succeeded`。
+期望流转：`running → (shell→k8s Job) → 发审批卡片 → (通过) → succeeded`。
 跑之前：确认已创建名为 `demo-robot` 的钉钉机器人凭证（approval 节点 `params.robot` 引用它）。

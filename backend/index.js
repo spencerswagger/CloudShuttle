@@ -4,10 +4,7 @@
 import { pool } from "./db/pg.js";
 import { redis } from "./db/redis.js";
 import { config } from "./config.js";
-// `@alicloud/*` 为 CJS：ESM import 拿到 module.exports 整体，Client 类在 .default（见 providers/eci.js 注释）
-import EciModule from "@alicloud/eci20180808";
-const { default: EciClient, CreateContainerGroupRequest } = EciModule;
-import { createEciProvider, buildCreateEciRequest, describeEciSpecs, probeEciNetworks, ECI_PRESET_CHOICES } from "./providers/eci.js";
+import { createK8sProvider, parseKubeconfig, k8sErrorHint } from "./providers/k8s.js";
 import { createDingtalkCorpProvider } from "./providers/dingtalk-corp.js";
 import { createDingtalkTokenCache } from "./providers/dingtalk-token.js";
 import { createDingtalkEnroll } from "./providers/dingtalk-enroll.js";
@@ -29,8 +26,6 @@ import { randomUUID } from "node:crypto";
 import axios from "axios";
 import { sm4Decrypt } from "./crypto/sm4.js";
 import { HttpError } from "./errors.js";
-import { renderParams } from "./engine/variables.js";
-import { outputKeysOf } from "./steps/shell.js";
 
 import * as api from "./handlers/api.js";
 import * as hook from "./handlers/hook.js";
@@ -44,6 +39,7 @@ const RE = {
   pipelineScope: /^\/api\/pipelines\/(\d+)\/scope$/,
   credentials: /^\/api\/credentials$/,
   credentialOne: /^\/api\/credentials\/(\d+)$/,
+  sshKeygen: /^\/api\/credentials\/ssh-keygen$/,
   credentialTest: /^\/api\/credentials\/test$/,
   images: /^\/api\/images$/,
   imageOne: /^\/api\/images\/(\d+)$/,
@@ -65,9 +61,6 @@ const RE = {
   dingtalkDeptUsers: /^\/api\/dingtalk\/department-users$/,
   eciDone: /^\/_\/hook\/ecidone\/(\d+)/,
   eciFail: /^\/_\/hook\/fail\/(\d+)/,
-  job: /^\/_\/hook\/job\/([^/?]+)/,
-  eciSpecs: /^\/api\/eci\/specs$/,
-  eciProbeNetworks: /^\/api\/eci\/probe-networks$/,
 };
 
 export function routeToHandler(path, method, body) {
@@ -80,6 +73,9 @@ export function routeToHandler(path, method, body) {
   }
   if (RE.credentialTest.test(path)) {
     if (m === "POST") return { handler: "api.testCredentialConnection" };
+  }
+  if (RE.sshKeygen.test(path)) {
+    if (m === "POST") return { handler: "api.generateSshKeypair" };
   }
   if (RE.credentialOne.test(path)) {
     if (m === "GET") return { handler: "api.getCredential" };
@@ -150,13 +146,6 @@ export function routeToHandler(path, method, body) {
   }
   if (RE.eciDone.test(path)) return { handler: "internal.eciDone" };
   if (RE.eciFail.test(path)) return { handler: "internal.eciFail" };
-  if (RE.job.test(path)) return { handler: "internal.getJob" };
-  if (RE.eciSpecs.test(path)) {
-    if (m === "POST") return { handler: "api.eciSpecs" };
-  }
-  if (RE.eciProbeNetworks.test(path)) {
-    if (m === "POST") return { handler: "api.eciProbeNetworks" };
-  }
   return { handler: "404" };
 }
 
@@ -236,43 +225,16 @@ async function buildInitialEnvironment({ execId, pipelineId }) {
   ]);
 }
 
-// 真实 ECI OpenAPI：用 eci 凭证里的 AK/SK/Region/VSwitch/安全组 创建一次性容器组，返回容器组 ID
-async function createEciGroup(params) {
-  const eci = params?.eci;
-  if (!eci) {
-    throw new Error("未为本 shell 节点选择 ECI 凭证：请先创建 eci 类型凭证并在节点上选择");
-  }
-  const { accessKeyId, accessKeySecret, regionId } = eci;
-  if (!accessKeyId || !accessKeySecret || !regionId) {
-    throw new Error("ECI 凭证缺少 accessKeyId/accessKeySecret/regionId，请检查配置");
-  }
-  const reqData = buildCreateEciRequest(params);
-  const client = new EciClient({
-    accessKeyId,
-    accessKeySecret,
-    regionId,
-    endpoint: `eci.${regionId}.aliyuncs.com`,
-  });
-  const request = new CreateContainerGroupRequest(reqData);
-  const resp = await client.createContainerGroup(request);
-  const cgId = resp?.body?.containerGroupId;
-  if (!cgId) {
-    console.error(`[eci] CreateContainerGroup returned no containerGroupId: ${JSON.stringify(resp?.body ?? resp)}`);
-    throw new Error("ECI 创建容器组成功但未返回容器组 ID");
-  }
-  return cgId;
-}
-
-// 完整装配（真实部署时在 FC 初始化阶段调用一次；本文件顶部不强制执行）
+// ---------- 执行相关的朴素实现（真实部署时用） ----------
 
 // 步骤类型注册表：buildApp 的 steps 装配与单测共用同一来源。
 // 新增步骤类型必须在 buildApp 的 steps 中实现，并在此登记（buildApp 启动时校验一致）。
+// shell ≡ job：Shell 执行节点统一以 k8s Job 承载（命令内联），不再区分两类节点。
 export const STEP_TYPES = ["trigger", "shell", "approval", "sql", "branch", "join", "loop"];
 
 async function buildApp() {
   const snapshotStore = createSnapshotStore(redis);
   const mutex = createMutex(redis);
-  const eciProvider = createEciProvider({ create: createEciGroup });
   // 凭证类型判定 + 解密（企业应用凭证用 corp provider）
   // 已软删除的凭证（deleted_at 非空）视为不存在：删除后流水线再执行对应节点会如实报错。
   async function getCredentialKind(name) {
@@ -309,50 +271,35 @@ async function buildApp() {
       [token, execId, nodeId, kind, secret ?? "", credential ?? ""]
     );
   }
-  // 拉取型的内部端点：run.sh 按 token 拉取本轮 job 的 command/timeout/outputKeys/env
-  async function getJob({ token }) {
-    const row = await internal.lookupRegistry({ token, kind: "eci" });
-    if (!row) return { status: 401, body: { ok: false, error: "invalid token" } };
-    const execId = Number(row.exec_id);
-    const nodeId = row.node_id;
-    const spec = await loadSpecForExec(execId);
-    const node = (spec.nodes ?? []).find((n) => n.id === nodeId);
-    if (!node) return { status: 404, body: { ok: false, error: "node not found" } };
-    const snap = (await snapshotStore.load(execId)) ?? {};
-    const env = new Map(Object.entries(snap.environment ?? {}));
-    const rendered = renderParams(node.params, env);
-    const envEntries = Array.isArray(rendered.env) ? rendered.env : [];
-    const envFlat = [...envEntries, ...[...env].map(([k, v]) => ({ k, v: String(v) }))];
-    return {
-      status: 200,
-      body: {
-        command: rendered.command ?? "",
-        timeout: rendered.timeout ?? undefined,
-        outputKeys: outputKeysOf(node.params),
-        env: envFlat,
-      },
-    };
-  }
-  // ECI 凭证解析：shell 节点经 params.credential 引用 eci 凭证，只返回解密的 AK/SK；
-  // 地域/交换机/安全组属于 Shell 节点运行配置（params.regionId/vswitchId/securityGroupId），
-  // 由 makeShellStep 在派发前与 AK/SK 合并成完整的 eci 配置。
-  async function getEciConfig(name) {
-    if (!name) return null;
+  // Kubernetes 凭证解析：Shell 节点经 params.credential 引用 k8s 凭证（kubeconfig YAML + 可选默认命名空间）
+  async function getK8sConfig(name) {
+    if (!name) throw new Error("Shell 节点未选择 Kubernetes 集群凭证");
     const kind = await getCredentialKind(name);
-    if (kind !== "eci") {
-      throw new Error(`凭证 "${name}" 不是 ECI 凭证（当前类型：${kind || "未找到"}）`);
+    if (kind !== "k8s") {
+      throw new Error(`凭证 "${name}" 不是 Kubernetes 凭证（当前类型：${kind || "未找到"}），请选择 k8s 类型凭证`);
     }
     const secret = await getCredentialSecrets(name);
-    return {
-      accessKeyId: secret.accessKeyId,
-      accessKeySecret: secret.accessKeySecret,
-    };
+    try {
+      const kube = parseKubeconfig(secret?.kubeconfig);
+      // 凭证可选默认命名空间优先于 kubeconfig 上下文里的 namespace
+      const ns = String(secret?.namespace ?? "").trim();
+      if (ns) kube.namespace = ns;
+      return kube;
+    } catch (err) {
+      throw new Error(`kubeconfig 解析失败：${k8sErrorHint(err)}`);
+    }
+  }
+  // 附加凭证运行时解析：按 name 查类型 + 解密（密文不落日志/探针；装配失败直接抛错 → 节点随 fail 推进）
+  async function resolveCredentialForRun(name) {
+    const kind = await getCredentialKind(name);
+    if (!kind) return { kind: null, secret: null };
+    return { kind, secret: await getCredentialSecrets(name) };
   }
   const steps = {
     trigger: makeTriggerStep(),
     shell: makeShellStep({
-      eciProvider, genToken: randomUUID, controlPlaneBase: resolveControlBase,
-      getEci: getEciConfig,
+      k8sProvider: createK8sProvider(), genToken: randomUUID, controlPlaneBase: resolveControlBase,
+      getK8s: getK8sConfig, getCredential: resolveCredentialForRun,
     }),
     approval: makeApprovalStep({
       dingtalkCorpProvider, getCredentialKind, getCredentialSecrets,
@@ -464,7 +411,7 @@ async function buildApp() {
   return {
     orchestrator, snapshotStore, mutex, getCredentialSecrets,
     dingtalkTokenCache, enroll: dingtalkEnroll, hydrateForRun,
-    getEciConfig, getJob,
+    getK8sConfig,
   };
 }
 
@@ -547,6 +494,7 @@ const DISPATCH = {
       return { status: 200, body: { ok: false, message: msg } };
     }
   },
+  "api.generateSshKeypair": async () => ok(api.generateSshKeypair()),
   "api.updateImage": async ({ path, body }) => ok(api.updateImage(Number(m(path, RE.imageOne)), body)),
   "api.deleteImage": async ({ path }) => ok(api.deleteImage(Number(m(path, RE.imageOne)))),
   "api.getImage": async ({ path }) => ok(api.getImage(Number(m(path, RE.imageOne)))),
@@ -601,41 +549,6 @@ const DISPATCH = {
     return ok(out);
   },
   "api.getWebhookProbe": async ({ path }) => ok(api.getWebhookProbe(Number(m(path, RE.webhookProbe)))),
-  "api.eciSpecs": async (ctx) => {
-    const { app, body } = ctx;
-    // 用 eci 凭证的 AK/SK + Shell 节点配置的地域，探测该 region 可购规格档位（含目录价）；
-    // 失败时返回预设 + 可读错误供前端降级展示
-    try {
-      const secret = await app.getEciConfig(body?.credential);
-      if (!secret) throw new Error("请先选择 ECI 凭证");
-      const regionId = body?.regionId;
-      if (!regionId) throw new Error("请先在 Shell 节点配置地域（Region）");
-      const eci = { ...secret, regionId };
-      const out = await describeEciSpecs({ eci });
-      return ok({ name: body?.credential, ...out, preset: ECI_PRESET_CHOICES });
-    } catch (err) {
-      return {
-        status: 200,
-        body: { ok: false, code: "ECI_SPECS_UNAVAILABLE", message: err?.message ?? String(err), preset: ECI_PRESET_CHOICES },
-      };
-    }
-  },
-  "api.eciProbeNetworks": async ({ app, body }) => {
-    try {
-      // Shell 节点配置网络：凭证提供 AK/SK，地域在节点上选择；AK/SK 仅本次请求使用，不落库
-      const secret = await app.getEciConfig(body?.credential);
-      if (!secret) throw new Error("请先选择 ECI 凭证");
-      const regionId = body?.regionId;
-      if (!regionId) throw new Error("请先在 Shell 节点选择地域（Region）");
-      const out = await probeEciNetworks({ ...secret, regionId });
-      return ok({ ...out });
-    } catch (err) {
-      return {
-        status: 200,
-        body: { ok: false, code: "ECI_NETWORK_UNAVAILABLE", message: err?.message ?? String(err) },
-      };
-    }
-  },
   "hook.webhook": async (ctx) => {
     const { app, path, body, event } = ctx;
     // hook.webhook 自己返回 { status, body }（200/401/503），不能再套 ok()：
@@ -713,8 +626,6 @@ const DISPATCH = {
       token: qsOf(ctx, "token"), secret: qsOf(ctx, "secret"), reason: body?.reason,
     });
   },
-  "internal.getJob": ({ app, path }) =>
-    app.getJob({ token: decodePathSegment(m(path, RE.job)) }),
 };
 
 // 供单测校验路由双注册：routeToHandler 给出的 handler 名必须在 DISPATCH 中存在，

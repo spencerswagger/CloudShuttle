@@ -11,8 +11,7 @@ SELECT * FROM (VALUES
  ('Node 20','node:20-alpine','language',true),
  ('Golang 1.23','golang:1.23','language',true),
  ('Python 3.12','python:3.12-slim','language',true),
- ('Java 21','eclipse-temurin:21-jdk','language',true),
- ('Docker+Git 构建','cloudshuttle/runner:0.1','toolchain',true)
+ ('Java 21','eclipse-temurin:21-jdk','language',true)
 ) v(name, image, category, builtin)
 WHERE NOT EXISTS (SELECT 1 FROM exec_image WHERE name = v.name AND deleted_at IS NULL);
 
