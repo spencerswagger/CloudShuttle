@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseKubeconfig, k8sJobManifest, createK8sProvider, k8sErrorHint } from "../providers/k8s.js";
+import {
+  parseKubeconfig, k8sJobManifest, createK8sProvider, k8sErrorHint,
+  buildSecretVolumes, secretNameFor,
+} from "../providers/k8s.js";
 
 const KUBE = `apiVersion: v1
 kind: Config
@@ -90,10 +93,11 @@ users:
 `), /必须是 http/);
 });
 
-test("k8sJobManifest：runner 契约、env 转 name/value、Job 默认与可选规格", () => {
+test("k8sJobManifest：命令内联进 container.command、env 转 name/value、Job 默认与可选规格", () => {
   const m = k8sJobManifest({
     name: "cs1-n1", namespace: "build",
-    image: "cloudshuttle/runner:0.1",
+    image: "node:20-alpine",
+    command: "echo hi\ncurl -X POST http://cb",
     env: [{ k: "A", v: 1 }, { k: "", v: "x" }],
     activeDeadlineSeconds: 300,
     ttlSecondsAfterFinished: 60,
@@ -103,9 +107,41 @@ test("k8sJobManifest：runner 契约、env 转 name/value、Job 默认与可选�
   assert.equal(m.spec.activeDeadlineSeconds, 300);
   assert.equal(m.spec.ttlSecondsAfterFinished, 60);
   const c = m.spec.template.spec.containers[0];
-  assert.deepEqual(c.command, ["/bin/sh", "/app/run.sh"]);
+  assert.deepEqual(c.command, ["sh", "-c", "echo hi\ncurl -X POST http://cb"], "用户命令必须直接内联，无平台镜像/初始化脚本");
+  assert.equal(c.image, "node:20-alpine");
   assert.deepEqual(c.env, [{ name: "A", value: "1" }]);
   assert.equal(m.spec.template.spec.restartPolicy, "Never");
+});
+
+test("k8sJobManifest：env 元素 {k, fromSecret} → valueFrom.secretKeyRef（短值凭据走 Secret）", () => {
+  const m = k8sJobManifest({
+    name: "cs1-n1", namespace: "ns",
+    image: "img", command: "x",
+    secretName: "secret-cs1-n1",
+    env: [{ k: "CS_SSH_PASSPHRASE", fromSecret: "secret-cs1-n1", secretKey: "ssh_passphrase" }],
+  });
+  const c = m.spec.template.spec.containers[0];
+  assert.deepEqual(c.env, [
+    { name: "CS_SSH_PASSPHRASE", valueFrom: { secretKeyRef: { name: "secret-cs1-n1", key: "ssh_passphrase", optional: true } } },
+  ]);
+});
+
+test("buildSecretVolumes：单卷 + subPath 挂载；无挂载返回空", () => {
+  const { volumes, volumeMounts } = buildSecretVolumes("secret-cs1-n1", [
+    { key: "ssh_id_rsa", subPath: "ssh_id_rsa", mountPath: "/root/.ssh/id_rsa" },
+    { key: "maven_settings.xml", subPath: "maven_settings.xml", mountPath: "/root/.m2/settings.xml" },
+  ]);
+  assert.equal(volumes.length, 1);
+  assert.equal(volumes[0].name, "cs-creds");
+  assert.deepEqual(volumes[0].secret.secretName, "secret-cs1-n1");
+  assert.equal(volumeMounts.length, 2);
+  assert.equal(volumeMounts[0].mountPath, "/root/.ssh/id_rsa");
+  assert.equal(volumeMounts[0].subPath, "ssh_id_rsa");
+  assert.deepEqual(buildSecretVolumes("s", []), { volumes: [], volumeMounts: [] });
+});
+
+test("secretNameFor：前缀 secret-", () => {
+  assert.equal(secretNameFor("cs7-n1"), "secret-cs7-n1");
 });
 
 test("createJob：post 到 batch/v1 路径返回 name/uid；失败错误不泄露集群地址", async () => {
@@ -122,24 +158,82 @@ test("createJob：post 到 batch/v1 路径返回 name/uid；失败错误不泄�
   const provider = createK8sProvider({ buildClient: () => client });
   const got = await provider.createJob({
     kube: { server: "https://k8s.example.com", token: "t", namespace: "ns0" },
-    name: "cs1-n1", image: "img",
+    name: "cs1-n1", image: "img", command: "echo ok",
   });
   assert.equal(got.name, "cs1-n1");
   assert.equal(got.uid, "u");
   assert.ok(calls[0].url.endsWith("/apis/batch/v1/namespaces/ns0/jobs"));
   assert.equal(calls[0].body.metadata.name, "cs1-n1");
-  assert.match(calls[0].body.spec.template.spec.containers[0].image, /img/);
+  assert.equal(calls[0].body.spec.template.spec.containers[0].image, "img");
 
   await assert.rejects(
     provider.createJob({
       kube: { server: "https://k8s.example.com", token: "t", namespace: "ns0" },
-      name: "x", image: "i", env: [{ k: "environmentMarker", v: "boom" }], backoffLimit: 0,
+      name: "x", image: "i", command: "c", env: [{ k: "environmentMarker", v: "boom" }], backoffLimit: 0,
     }),
     /创建 Kubernetes Job 失败：.*Forbidden/
   );
   const errTxt = k8sErrorHint({ message: "connect 10.0.0.5:6443 denied for user dev" }, "https://10.0.0.5:6443");
   assert.ok(!errTxt.includes("10.0.0.5"), "集群内网地址不应泄露");
   assert.ok(!errTxt.includes("dev"), "账号不应泄露");
+});
+
+test("ensureSecret：创建 Secret 并把 data 值 base64 化", async () => {
+  const calls = [];
+  const client = {
+    post: async (url, body) => { calls.push({ url, body }); return { status: 201 }; },
+  };
+  const provider = createK8sProvider({ buildClient: () => client });
+  await provider.ensureSecret({
+    kube: { server: "https://k", token: "t", namespace: "ns0" },
+    name: "secret-cs1-n1", namespace: "ns0",
+    data: { ssh_id_rsa: "BEGIN KEY\nEND" },
+  });
+  const created = calls.find((c) => c.url.endsWith("/api/v1/namespaces/ns0/secrets"));
+  assert.ok(created, "必须 POST 创建 Secret");
+  assert.equal(created.body.kind, "Secret");
+  assert.equal(created.body.data.ssh_id_rsa, Buffer.from("BEGIN KEY\nEND", "utf8").toString("base64"), "Secret.data 值必须 base64 编码");
+});
+
+test("attachSecretOwnerRef：merge-patch 挂 ownerReferences 到 Job，失败只告警不抛", async () => {
+  const patches = [];
+  let fail = false;
+  const client = {
+    patch: async (url, body) => {
+      if (fail) throw new Error("patch denied");
+      patches.push({ url, body });
+      return { status: 200 };
+    },
+  };
+  const provider = createK8sProvider({ buildClient: () => client });
+  await provider.attachSecretOwnerRef({
+    kube: { server: "https://k", token: "t", namespace: "ns0" },
+    secretName: "secret-cs1-n1", jobName: "cs1-n1", jobUid: "uid-1", namespace: "ns0",
+  });
+  assert.ok(patches.length === 1);
+  assert.ok(patches[0].url.includes("/secrets/secret-cs1-n1"));
+  assert.deepEqual(patches[0].body.metadata.ownerReferences, [
+    { apiVersion: "batch/v1", kind: "Job", name: "cs1-n1", uid: "uid-1" },
+  ]);
+  // ownerRef 补挂失败不允许影响执行结果（仅告警）
+  fail = true;
+  await provider.attachSecretOwnerRef({
+    kube: { server: "https://k", token: "t", namespace: "ns0" },
+    secretName: "secret-cs1-n1", jobName: "cs1-n1", jobUid: "uid-1", namespace: "ns0",
+  });
+});
+
+test("deleteSecret：回滚删除凭据 Secret（失败只告警）", async () => {
+  let deleted = null;
+  const client = {
+    delete: async (url) => { deleted = url; return { status: 200 }; },
+  };
+  const provider = createK8sProvider({ buildClient: () => client });
+  await provider.deleteSecret({
+    kube: { server: "https://k", token: "t", namespace: "ns0" },
+    name: "secret-cs1-n1", namespace: "ns0",
+  });
+  assert.ok(deleted?.includes("/secrets/secret-cs1-n1"));
 });
 
 test("ping：200 视为可达，异常抛错", async () => {

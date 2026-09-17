@@ -11,8 +11,8 @@ import { notify } from "../lib/notify.js";
 import { buildMappingDraft } from "../lib/webhookDraft.js";
 import { getPipeline, createPipeline, updatePipeline, getPipelineHook, resetWebhookSecret, fetchWebhookProbe } from "../api/pipeline.js";
 import { fetchImages } from "../api/image.js";
-import { fetchCredentials, fetchEciSpecs, probeEciNetworks, listDepartments, listDepartmentUsers } from "../api/credential.js";
-import { ECI_REGIONS, RUNNER_CRED_KINDS, credKindLabel } from "../lib/kinds.js";
+import { fetchCredentials, listDepartments, listDepartmentUsers } from "../api/credential.js";
+import { RUNNER_CRED_KINDS, credKindLabel } from "../lib/kinds.js";
 import RunPipelineModal from "../components/RunPipelineModal.vue";
 import TriggerParamsEditor from "../components/TriggerParamsEditor.vue";
 
@@ -263,7 +263,7 @@ async function hydrate() {
     ensurePositions(); // 老数据节点补 position，保证画布可拖
     // 下拉数据懒加载：仅当节点实际用到镜像/凭证才请求，避免挂载即连拉 3 个接口
     const ns = current.value.spec_json?.nodes ?? [];
-    if (ns.some((n) => n.type === "shell" || n.type === "approval" || n.type === "sql" || n.type === "job")) loadCreds();
+    if (ns.some((n) => n.type === "shell" || n.type === "approval" || n.type === "sql")) loadCreds();
     if (ns.some((n) => n.type === "shell")) loadImages();
     nextTick(() => { fitAll(); fitView({ padding: 0.2, duration: 0 }).catch(() => {}); }); // 回填后重算输入框高度，并缩放画布到全部节点
   } catch (e) {
@@ -374,14 +374,13 @@ const COND_OP_LABELS = { eq: "等于", ne: "不等于", gt: "大于", ge: "大�
 const NODE_KINDS = {
   trigger:  { label: "触发源",   accent: "var(--warn)", icon: "M5 3h14v18l-7-4-7 4z" },
   shell:    { label: "Shell 执行",   accent: "var(--accent)",  icon: "M4 5l6 7-6 7m8 0h8" },
-  job:      { label: "Job 执行",     accent: "var(--accent)",  icon: "M12 2l8 4.5v9L12 20l-8-4.5v-9L12 2zM6.5 9.5l5.5 3.2 5.5-3.2M12 12.7V20m-5.5-6L12 17.6 17.5 14" },
   approval: { label: "人工审批",     accent: "var(--ember)",   icon: "M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6zm-3.5 6.5L11 12l4-4.5" },
   sql:      { label: "SQL 执行",     accent: "var(--accent)",  icon: "M4 5h16M7 3l2 2-2 2M12 3l2 2-2 2M7 12H4v3h3zM4 21h7M6 15v6M15 8l5 5M15 13h2a2 2 0 0 1 2 2v0a2 2 0 0 1-2 2h-2" },
   branch:  { label: "条件分支", accent: "var(--warn)",   icon: "M7 3v7a2 2 0 0 0 2 2h2m-4 9v-5m0 0h-3m3 0h3m4-9l5-5m0 0V3h-5m5 0v5" },
   join:    { label: "汇聚",     accent: "var(--accent)", icon: "M4 4h16M8 8h8M12 12v8M4 20h16" },
   loop:    { label: "循环",     accent: "var(--ember)",  icon: "M17 2l4 4-4 4m4-4H8a6 6 0 0 0-6 6v1m5 5l-4 4 4 4m-4-4h8a6 6 0 0 0 6-6v-1" },
 };
-const LIB_TYPES = ["shell", "job", "approval", "sql", "branch", "join", "loop"];
+const LIB_TYPES = ["shell", "approval", "sql", "branch", "join", "loop"];
 const isTrigger = (n) => n?.type === "trigger";
 
 // 悬浮参数浮窗拖拽状态 + 画布「回到原位」
@@ -405,117 +404,6 @@ function stopFloatDrag() {
 }
 onBeforeUnmount(() => stopFloatDrag());
 const fitAllNodes = () => { nextTick(() => { fitView({ padding: 0.2, duration: 250 }).catch(() => {}); }); };
-// Shell 节点运行规格：阿里云按「CPU → 内存」定义规格组合（核内比 1:1 ~ 1:8）。
-// 预设档位在未选中凭证/接口探测失败时兜底；选中凭证+地域后探测量接口返回真实可购组合与目录价。
-const ECI_PRESET_BY_CPU = {
-  0.5: [1, 2],
-  1: [1, 2, 4, 8],
-  2: [2, 4, 8, 16],
-  4: [4, 8, 16, 32],
-  8: [8, 16, 32, 64],
-};
-const specByCpu = ref(null); // { cpu: [{ memory, price: {originalPrice, tradePrice, currency}|null }] }
-const eciSpecLoading = ref(false);
-const eciSpecError = ref("");
-const cpuChoices = computed(() => {
-  const keys = specByCpu.value ? Object.keys(specByCpu.value) : Object.keys(ECI_PRESET_BY_CPU);
-  return keys.length ? keys : [1];
-});
-function memChoicesOf(cpu) {
-  const list = specByCpu.value?.[cpu] ?? null;
-  if (Array.isArray(list)) return list; // [{memory, price}]
-  return (ECI_PRESET_BY_CPU[cpu] || []).map((m) => ({ memory: m, price: null }));
-}
-function priceSuffix(choice) {
-  const p = choice?.price?.originalPrice;
-  return typeof p === "number" ? `（目录 ¥${p}/时）` : "";
-}
-// CPU 切换后把内存修正为该 CPU 支持档位的最小值（当前值不在新档位列表时）
-function normMemFor(n) {
-  const mems = memChoicesOf(n.params.cpu).map((mc) => String(mc.memory));
-  if (!mems.includes(String(n.params.memory))) n.params.memory = mems[0] ?? "";
-}
-// 用 eci 凭证 + Shell 节点地域探测可购规格：成功刷新 byCpu，失败降级预设并提示原因
-function probeEciSpecs(name, regionId) {
-  if (!name || !regionId) return;
-  eciSpecLoading.value = true;
-  eciSpecError.value = "";
-  fetchEciSpecs(name, regionId)
-    .then((res) => {
-      const d = res?.data ?? res;
-      if (d?.ok === false || !d?.byCpu) throw new Error(d?.message || "无法获取 ECI 规格");
-      specByCpu.value = d.byCpu;
-    })
-    .catch((err) => {
-      specByCpu.value = null;
-      eciSpecError.value = err?.message || String(err);
-    })
-    .finally(() => { eciSpecLoading.value = false; });
-}
-
-// Shell 节点网络探测：选凭证+地域后，用服务端解密的 AK 查该地域交换机/安全组，供输入框 datalist 候选
-const netProbing = ref(false);
-const netError = ref("");
-const netSearched = ref(false);
-const netVswitches = ref([]);
-const netSecurityGroups = ref([]);
-function probeNodeNetworks(name, regionId) {
-  if (!name || !regionId) return;
-  netProbing.value = true;
-  netError.value = "";
-  probeEciNetworks({ credential: name, regionId })
-    .then((res) => {
-      const d = res?.data ?? res;
-      if (d?.ok === false) throw new Error(d?.message || "探测失败");
-      netVswitches.value = d?.vswitches ?? [];
-      netSecurityGroups.value = d?.securityGroups ?? [];
-      netSearched.value = true;
-    })
-    .catch((err) => {
-      netError.value = err?.message || String(err);
-      netVswitches.value = [];
-      netSecurityGroups.value = [];
-    })
-    .finally(() => { netProbing.value = false; });
-}
-const nodeCreateVswitchUrl = () => {
-  const r = currentShellRegion();
-  return r ? `https://vpc.console.aliyun.com/vpc/${encodeURIComponent(r)}/vswitches` : "https://vpc.console.aliyun.com";
-};
-const nodeCreateSecurityGroupUrl = () => {
-  const r = currentShellRegion();
-  return r
-    ? `https://ecs.console.aliyun.com/securityGroup/region/${encodeURIComponent(r)}/securityGroups`
-    : "https://ecs.console.aliyun.com";
-};
-function currentShellRegion() {
-  for (const n of nodes.value) {
-    if (n.type === "shell" && n.params?.regionId) {
-      const r = String(n.params.regionId).trim();
-      if (r) return r;
-    }
-  }
-  return "";
-}
-// 任一 shell 节点的「凭证 + 地域」组合变化时，自动探测规格与网络（含首次加载已配置的节点）
-let prevEciKey = {};
-watch(
-  () => nodes.value.filter((n) => n.type === "shell").map((n) => ({
-    id: n.id, c: n.params?.credential ?? "", r: n.params?.regionId ?? "",
-  })),
-  (list) => {
-    const cur = {};
-    for (const { id, c, r } of list) {
-      const key = `${c}|${r}`;
-      cur[id] = key;
-      if (c && r && key !== prevEciKey[id]) {
-        probeEciSpecs(c, r);
-        probeNodeNetworks(c, r);
-      }
-    }
-    prevEciKey = cur;
-  }
-);
 
 const drainId = (id) => {
   const s = String(id);
@@ -528,17 +416,15 @@ const isCorpRobot = (name) => {
   const c = creds.value.find((x) => x.name === name);
   return convKinds.includes(c?.kind);
 };
-// shell 节点只展示 eci 类型凭证作为运行载体
-const eciCreds = computed(() => (creds.value || []).filter((c) => c.kind === "eci"));
+// shell 节点只展示 k8s 类型凭证作为运行集群
+const k8sCreds = computed(() => (creds.value || []).filter((c) => c.kind === "k8s"));
 // 审批节点只展示支持审批的凭证类型（钉钉企业机器人；未来可扩展其他审批渠道）
 const APPROVAL_CRED_KINDS = ["dingtalk-corp"];
 const robotCreds = computed(() => (creds.value || []).filter((c) => APPROVAL_CRED_KINDS.includes(c.kind)));
 // sql 节点只展示 mysql / pg 类型凭证作为连接目标（secret 后端不回显，前端仅做下拉过滤）
 const SQL_CRED_KINDS = ["mysql", "pg"];
 const sqlCreds = computed(() => (creds.value || []).filter((c) => SQL_CRED_KINDS.includes(c.kind)));
-// job 节点只展示 k8s 类型凭证
-const jobCreds = computed(() => (creds.value || []).filter((c) => c.kind === "k8s"));
-// runner 附加凭证（注入容器，多选；仅允许可注入类型的凭证）
+// 附加凭证（注入容器，多选；仅允许可注入类型的凭证）
 const runnerCredCandidates = computed(() => (creds.value || []).filter((c) => RUNNER_CRED_KINDS.includes(c.kind)));
 const credRefsOf = (n) => (n.params.credentials ?? (n.params.credentials = []));
 const hasCredRef = (n, name) => credRefsOf(n).some((r) => r?.name === name);
@@ -551,7 +437,7 @@ const toggleCredRef = (n, name) => {
 
 // 高级机器人下拉：主标题取自凭证名，副标题拼接企业/应用元信息（display_meta），并展示应用图标
 const robotOpenId = ref(""); // 当前展开下拉的节点 id；空串表示全部收起
-const kindName = (k) => ({ "dingtalk-corp": "钉钉企业机器人", eci: "阿里云 ECI", git: "Git 令牌" }[k] || k || "凭证");
+const kindName = (k) => ({ "dingtalk-corp": "钉钉企业机器人", git: "Git 令牌" }[k] || k || "凭证");
 const credTitle = (c) => c?.name || "未命名凭证";
 const credSub = (c) => {
   const parts = [];
@@ -697,16 +583,14 @@ const nodeTarget = (n) =>
 const addNode = (type, at) => {
   // 添加节点后会用到对应下拉，此时再按需加载其数据
   if (type === "shell") loadImages();
-  if (type === "shell" || type === "approval" || type === "sql" || type === "job") loadCreds();
+  if (type === "shell" || type === "approval" || type === "sql") loadCreds();
   const node = {
     id: `n${Date.now()}`,
     type,
     step: type,
     params:
         type === "shell"
-          ? { image: images.value[0]?.image ?? "alpine", command: "", env: [], outputs: [{ key: "step_out" }], credential: "", regionId: "", vswitchId: "", securityGroupId: "", cpu: "1", memory: "2", timeout: 300 }
-          : type === "job"
-            ? { credential: "", namespace: "", image: "cloudshuttle/runner:0.2", command: "", env: [], outputs: [{ key: "step_out" }], timeout: 300, backoffLimit: 0, ttlSecondsAfterFinished: "" }
+          ? { credential: "", namespace: "", image: images.value[0]?.image ?? "", command: "", env: [], outputs: [{ key: "step_out" }], timeout: 300, backoffLimit: 0, ttlSecondsAfterFinished: "" }
           : type === "sql"
             ? { credential: "", statements: [""], outputs: [{ key: "affected_rows" }], timeout: 60 }
             : type === "loop"
@@ -1379,65 +1263,29 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
             <div v-else-if="selected" v-for="n in [selected]" :key="n.id">
               <template v-if="n.type === 'shell'">
                 <div class="field">
-                  <label class="field-label">ECI 凭证 <span class="req">*</span></label>
+                  <label class="field-label">Kubernetes 集群凭证 <span class="req">*</span></label>
                   <select class="select" v-model="n.params.credential">
-                    <option value="">选择运行载体（阿里云 ECI 凭证）…</option>
-                    <option v-for="c in eciCreds" :key="c.name" :value="c.name">{{ c.name }}</option>
+                    <option value="">选择 Kubernetes 集群凭证…</option>
+                    <option v-for="c in k8sCreds" :key="c.name" :value="c.name">{{ c.name }}</option>
                   </select>
-                  <p class="field-hint" v-if="!eciCreds.length">暂无 ECI 凭证，请先在「凭证」中创建阿里云 ECI 类型凭证</p>
-                  <p class="field-hint" v-else>凭证只提供 AK/SK；地域与网络在下方节点内配置</p>
+                  <p class="field-hint" v-if="!k8sCreds.length">暂无 Kubernetes 凭证，请先在「凭证」中创建 k8s 类型凭证（粘贴 kubeconfig）</p>
+                  <p class="field-hint" v-else>凭证提供 kubeconfig；运行所需的权限与创建步骤见凭证页「权限说明」</p>
                 </div>
                 <div class="field">
-                  <label class="field-label">地域 Region <span v-if="n.params.credential" class="req">*</span></label>
-                  <select class="select" v-model="n.params.regionId">
-                    <option value="" disabled>选择运行地域</option>
-                    <option v-for="reg in ECI_REGIONS" :key="reg.id" :value="reg.id">{{ reg.label }}（{{ reg.id }}）</option>
-                    <option v-if="n.params.regionId && !ECI_REGIONS.some((r) => r.id === n.params.regionId)" :value="n.params.regionId">其他：{{ n.params.regionId }}</option>
-                  </select>
-                  <p class="field-hint">选择 ECI 实例部署地域；选择凭证+地域后自动探测可用网络与规格</p>
+                  <label class="field-label">命名空间（可选）</label>
+                  <input class="input mono" v-model="n.params.namespace" placeholder="如 default / build，留空用凭证默认" />
                 </div>
-                <div class="field">
-                  <label class="field-label">交换机 VSwitch ID <span v-if="n.params.regionId" class="req">*</span></label>
-                  <input class="input mono" v-model="n.params.vswitchId" list="shell-vsw-dl" placeholder="选择或输入 vsw-…" />
-                  <datalist id="shell-vsw-dl">
-                    <option v-for="opt in netVswitches" :key="opt.id" :value="opt.id">{{ opt.name || opt.id }}{{ opt.zoneId ? " · " + opt.zoneId : "" }}</option>
-                  </datalist>
-                  <p class="field-hint">ECI 实例所在交换机，可下拉选择探测结果或手动输入</p>
-                </div>
-                <div class="field">
-                  <label class="field-label">安全组 ID <span v-if="n.params.regionId" class="req">*</span></label>
-                  <input class="input mono" v-model="n.params.securityGroupId" list="shell-sg-dl" placeholder="选择或输入 sg-…" />
-                  <datalist id="shell-sg-dl">
-                    <option v-for="opt in netSecurityGroups" :key="opt.id" :value="opt.id">{{ opt.name || opt.id }}</option>
-                  </datalist>
-                  <p class="field-hint">ECI 实例安全组，需放行出网以调用回调</p>
-                </div>
-                <section class="field net-card">
-                  <div class="net-head">
-                    <span class="net-title">网络 / 规格自动探测</span>
-                    <div class="net-acts">
-                      <template v-if="n.params.credential && n.params.regionId">
-                        <a :href="nodeCreateSecurityGroupUrl()" target="_blank" rel="noreferrer" class="btn btn-sm btn-ghost">去创建安全组 ↗</a>
-                        <a :href="nodeCreateVswitchUrl()" target="_blank" rel="noreferrer" class="btn btn-sm btn-ghost">去创建交换机 ↗</a>
-                        <button type="button" class="btn btn-sm btn-ghost" :disabled="netProbing" @click="probeNodeNetworks(n.params.credential, n.params.regionId)">⟳ 刷新</button>
-                      </template>
-                      <span v-else class="muted">选择凭证与地域后自动探测</span>
-                    </div>
-                  </div>
-                  <p v-if="netProbing" class="field-hint">正在查询该地域的交换机与安全组…</p>
-                  <p v-else-if="netError" class="field-hint warn">网络探测失败：{{ netError }}</p>
-                  <p v-else-if="netSearched" class="field-hint">已探测：{{ netVswitches.length }} 个交换机、{{ netSecurityGroups.length }} 个安全组（输入框可选）</p>
-                </section>
                 <div class="field">
                   <label class="field-label">运行镜像</label>
                   <div class="group-row">
-                    <select class="select" v-model="n.params.image">
-                      <option v-if="!images.length && !imagesLoading" :value="n.params.image" hidden></option>
-                      <option v-for="im in images" :key="im.image" :value="im.image">{{ im.name }} · {{ im.image }}</option>
-                    </select>
+                    <input class="input mono" v-model="n.params.image" list="shell-img-dl" placeholder="选择语言镜像或输入自定义镜像（需含 sh + curl）" />
+                    <datalist id="shell-img-dl">
+                      <option v-for="im in images" :key="im.image" :value="im.image">{{ im.name }}</option>
+                    </datalist>
                     <button type="button" class="btn btn-sm btn-ghost refresh-btn" title="加载/刷新镜像" @click="loadImages" :disabled="imagesLoading">⟳</button>
                   </div>
                   <p v-if="!images.length" class="field-hint">{{ imagesLoading ? "加载中…" : "暂无镜像，点击右侧刷新图标加载" }}</p>
+                  <p class="field-hint" v-else>平台只负责在所选镜像上运行你的命令并回传结果；镜像需自带 <code class="mono ph-code">sh</code> 与 <code class="mono ph-code">curl</code>（语言类镜像普遍满足）。</p>
                 </div>
                 <div class="field">
                   <label class="field-label">Shell 命令</label>
@@ -1508,143 +1356,22 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
                   <p class="field-hint">脚本内可用 <code class="mono ph-code">echo "key=value" >> "$CLOUDSHUTTLE_OUT_FILE"</code> 写回；未声明 key 时默认输出单变量 <code class="mono ph-code">step_out</code>。</p>
                 </div>
                 <div class="field">
-                  <label class="field-label">运行规格</label>
                   <div class="approval-grid">
                     <div class="sub-field">
-                      <label class="sub-label">CPU（vCPU）</label>
-                      <select class="select" v-model="n.params.cpu" @change="normMemFor(n)">
-                        <option v-for="c in cpuChoices" :key="c" :value="c">{{ c }}</option>
-                      </select>
-                    </div>
-                    <div class="sub-field">
-                      <label class="sub-label">内存（GiB）</label>
-                      <select class="select" v-model="n.params.memory">
-                        <template v-for="mc in memChoicesOf(n.params.cpu)" :key="mc.memory">
-                          <option :value="mc.memory">{{ mc.memory }} {{ priceSuffix(mc) }}</option>
-                        </template>
-                      </select>
-                    </div>
-                  </div>
-                  <p class="field-hint" :class="{ warn: eciSpecError }">
-                    {{ eciSpecLoading
-                      ? "正在从阿里云探测可购规格与目录价…"
-                      : (eciSpecError
-                          ? `规格探测失败，已回退预设：${eciSpecError}`
-                          : n.params.credential && n.params.regionId
-                            ? "已加载该地域可购规格与目录价（来自阿里云接口）；价格单位 ¥/小时"
-                            : "选择 ECI 凭证与地域后自动加载规格与目录价") }}
-                  </p>
-                </div>
-                <div class="field">
-                  <label class="field-label">超时（秒）</label>
-                  <input class="input mono" v-model.number="n.params.timeout" placeholder="300" />
-                  <p class="field-hint">容器运行超时上限，到期未完成会被强制终止，单位秒</p>
-                </div>
-              </template>
-              <template v-else-if="n.type === 'job'">
-                <div class="field">
-                  <label class="field-label">Kubernetes 凭证 <span class="req">*</span></label>
-                  <select class="select" v-model="n.params.credential">
-                    <option value="">选择 Kubernetes 集群凭证…</option>
-                    <option v-for="c in jobCreds" :key="c.name" :value="c.name">{{ c.name }}</option>
-                  </select>
-                  <p class="field-hint" v-if="!jobCreds.length">暂无 Kubernetes 凭证，请先在「凭证」中创建 k8s 类型凭证（粘贴 kubeconfig）</p>
-                  <p class="field-hint" v-else>凭证提供 kubeconfig；命名空间未填时用凭证默认值</p>
-                </div>
-                <div class="field">
-                  <label class="field-label">命名空间（可选）</label>
-                  <input class="input mono" v-model="n.params.namespace" placeholder="如 default / build，留空用凭证默认" />
-                </div>
-                <div class="field">
-                  <label class="field-label">运行镜像</label>
-                  <input class="input mono" v-model="n.params.image" placeholder="cloudshuttle/runner:0.1" />
-                  <p class="field-hint">默认 runner 镜像（内置拉取命令/回调脚本）；可换任意含 /bin/sh + curl 的镜像</p>
-                </div>
-                <div class="field">
-                  <label class="field-label">执行命令</label>
-                  <textarea class="textarea mono autofit" v-model="n.params.command" rows="3" placeholder="echo 'hello k8s job'" @focus="onFieldFocus($event, n, 'command')" @input="autofit"></textarea>
-                  <div class="var-insert">
-                    <div class="vi-wrap" @click.stop>
-                      <button type="button" class="btn btn-sm vi-btn" @click="toggleVarDrop(n.id + ':command')">
-                        插入变量
-                        <svg class="vi-caret" :class="{ flip: varDrop === n.id + ':command' }" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
-                      </button>
-                      <div v-if="varDrop === n.id + ':command'" class="vi-drop">
-                        <template v-for="grp in varGroups(n)" :key="grp.g">
-                          <div class="vi-group">{{ grp.g }}</div>
-                          <button v-for="it in grp.items" :key="it.k" type="button" class="vi-item" @click="insertVar(it.k, n, 'command')">
-                            <span class="vi-l1"><code class="vi-key mono">{{ "${" + it.k + "}" }}</code><span class="vi-title">{{ it.t }}</span></span>
-                            <span v-if="it.d" class="vi-desc">{{ it.d }}</span>
-                          </button>
-                        </template>
-                      </div>
-                    </div>
-                  </div>
-                  <p class="field-hint">命令在 k8s Job 容器内执行，结束后自动回传输出与日志；<code class="mono ph-code">${变量}</code> 可引用前驱输出</p>
-                </div>
-                <div class="field">
-                  <label class="field-label">附加环境变量（K=V）</label>
-                  <div class="kv-list">
-                    <div v-for="(e, ei) in n.params.env || []" :key="ei" class="kv-row">
-                      <input class="input mono kv-key" v-model="e.k" placeholder="KEY" />
-                      <div class="kv-val">
-                        <input class="input mono" v-model="e.v" placeholder="value（可用 ${} 引用变量）" @focus="onFieldFocus($event, n, 'env:' + ei + ':v')" />
-                        <div class="var-insert">
-                          <div class="vi-wrap" @click.stop>
-                            <button type="button" class="btn btn-sm vi-btn" @click="toggleVarDrop(n.id + ':env:' + ei)">＋ 变量</button>
-                            <div v-if="varDrop === n.id + ':env:' + ei" class="vi-drop">
-                              <template v-for="grp in varGroups(n)" :key="grp.g">
-                                <div class="vi-group">{{ grp.g }}</div>
-                                <button v-for="it in grp.items" :key="it.k" type="button" class="vi-item" @click="insertVar(it.k, n, 'env:' + ei + ':v')">
-                                  <span class="vi-l1"><code class="vi-key mono">{{ "${" + it.k + "}" }}</code><span class="vi-title">{{ it.t }}</span></span>
-                                  <span v-if="it.d" class="vi-desc">{{ it.d }}</span>
-                                </button>
-                              </template>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                      <button type="button" class="btn btn-sm btn-danger" title="删除" @click="n.params.env.splice(ei, 1)">×</button>
-                    </div>
-                    <button type="button" class="btn btn-sm btn-ghost" @click="(n.params.env = n.params.env || []).push({ k: '', v: '' })">＋ 添加环境变量</button>
-                  </div>
-                </div>
-                <div class="field">
-                  <label class="field-label">附加凭证（注入容器）</label>
-                  <div class="cred-check-list">
-                    <label v-for="c in runnerCredCandidates" :key="c.name" class="cred-check">
-                      <input type="checkbox" :checked="hasCredRef(n, c.name)" @change="toggleCredRef(n, c.name)" />
-                      <span class="cred-name">{{ c.name }}</span>
-                      <em class="cred-kind dim">{{ credKindLabel(c.kind) }}</em>
-                    </label>
-                  </div>
-                  <p v-if="!runnerCredCandidates.length" class="field-hint">暂无可用凭证：先在「凭证」创建 SSH / Maven / Docker 私有仓库 / npm / S3 类型后在此勾选</p>
-                  <p class="field-hint" v-else>勾选的凭证以文件注入容器（~/.ssh、~/.m2/settings.xml、~/.docker/config.json、~/.npmrc、/root/.s3cfg），命令内直接使用</p>
-                </div>
-                <div class="field">
-                  <div class="field-head">
-                    <label class="field-label">输出变量（K=V 写回，供后继节点引用）</label>
-                  </div>
-                  <TriggerParamsEditor :params="n.params.outputs ?? (n.params.outputs = [])" :show-required="false" />
-                  <p class="field-hint">脚本内可用 <code class="mono ph-code">echo "key=value" >> "$CLOUDSHUTTLE_OUT_FILE"</code> 写回；未声明 key 时默认输出单变量 <code class="mono ph-code">step_out</code>。</p>
-                </div>
-                <div class="field">
-                  <div class="approval-grid">
-                    <div class="sub-field">
-                      <label class="sub-label">backoffLimit</label>
+                      <label class="sub-label">失败重试（次）</label>
                       <input class="input mono" type="number" min="0" v-model.number="n.params.backoffLimit" placeholder="0" />
                     </div>
                     <div class="sub-field">
-                      <label class="sub-label">TTL（秒，可选）</label>
+                      <label class="sub-label">保留时长（秒，可选）</label>
                       <input class="input mono" type="number" min="0" v-model.number="n.params.ttlSecondsAfterFinished" placeholder="如 300" />
                     </div>
                   </div>
-                  <p class="field-hint">backoffLimit 默认 0（失败不重试，避免重复回调）；TTL 设值则结束后自动清理 Job 对象</p>
+                  <p class="field-hint">失败重试默认 0（失败立即结束并如实回报）；保留时长设值则运行结束后自动清理临时资源。两者仅高级场景需要，日常跑命令可以不填。</p>
                 </div>
                 <div class="field">
-                  <label class="field-label">超时（秒，可选）</label>
+                  <label class="field-label">超时（秒）</label>
                   <input class="input mono" type="number" v-model.number="n.params.timeout" placeholder="300" />
-                  <p class="field-hint">对应 Job 的 activeDeadlineSeconds，到期未完成会被强制终止</p>
+                  <p class="field-hint">命令运行超时上限，到期未完成会被强制终止并标记失败，单位秒。</p>
                 </div>
               </template>
               <template v-else-if="n.type === 'branch'">

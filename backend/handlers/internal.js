@@ -31,7 +31,7 @@ export async function validateCallback({ token, secret, kind, kinds }) {
 }
 
 export async function eciDone(orchestrator, { token, secret, result }) {
-  const v = await validateCallback({ token, secret, kinds: ["eci", "job"] });
+  const v = await validateCallback({ token, secret, kinds: ["job"] });
   if (!v.ok) return { status: 401, body: { ok: false, error: "invalid callback" } };
   // 外部副作用（解析/写库/推进）必须 await 完成后再响应，FC 容器冻结下 fire-and-forget 会丢
   await orchestrator.onEciDone({
@@ -42,7 +42,7 @@ export async function eciDone(orchestrator, { token, secret, result }) {
 }
 
 export async function eciFail(orchestrator, { token, secret, reason }) {
-  const v = await validateCallback({ token, secret, kinds: ["eci", "job"] });
+  const v = await validateCallback({ token, secret, kinds: ["job"] });
   if (!v.ok) return { status: 401, body: { ok: false, error: "invalid callback" } };
   await orchestrator.onEciFail?.({ execId: v.execId, nodeId: v.nodeId, reason });
   return { status: 200, body: { ok: true } };

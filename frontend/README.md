@@ -6,7 +6,7 @@ Vue 3 + Vite 构建的管理界面，静态产物部署到 **OSS/CDN**（0 成�
 
 - **画布（Canvas）**：可视化拼接 DAG 流水线，配置 `shell` 与 `approval` 节点；
 - **凭证（Credentials）**：管理 git / docker registry / 对象存储 / 钉钉机器人等 SM4 加密凭证；
-- **镜像（Images）**：管理 runner 预置镜像（增删、上传 ACR）；
+- **镜像（Images）**：管理 Shell 节点可选的运行镜像（语言镜像 / 自定义镜像）；
 - **执行（Executions）**：查看执行历史、节点状态与日志。
 
 ```

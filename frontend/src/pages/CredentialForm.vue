@@ -6,6 +6,7 @@ import { notify } from "../lib/notify.js";
 import ConfirmDialog from "../components/ConfirmDialog.vue";
 import { getCredential, createCredential, updateCredential, deleteCredential, testDbConnection, genSshKeypair } from "../api/credential.js";
 import { CRED_KINDS, credKind, credKindLabel } from "../lib/kinds.js";
+import K8sPermissionGuide from "../components/K8sPermissionGuide.vue";
 
 const route = useRoute();
 const router = useRouter();
@@ -278,6 +279,9 @@ const doDelete = async () => {
             <p v-if="f.hint" class="field-hint">{{ f.hint }}</p>
           </div>
         </template>
+
+        <!-- k8s：RBAC 权限与 kubeconfig 创建说明（弹窗） -->
+        <K8sPermissionGuide v-if="form.kind === 'k8s'" />
 
         <!-- 数据库凭证（mysql/pg）：草稿直连测试，不落库 -->
         <div v-if="isDbKind" class="field">
