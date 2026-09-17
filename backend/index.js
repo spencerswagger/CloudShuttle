@@ -47,6 +47,7 @@ const RE = {
   pipelineScope: /^\/api\/pipelines\/(\d+)\/scope$/,
   credentials: /^\/api\/credentials$/,
   credentialOne: /^\/api\/credentials\/(\d+)$/,
+  sshKeygen: /^\/api\/credentials\/ssh-keygen$/,
   credentialTest: /^\/api\/credentials\/test$/,
   images: /^\/api\/images$/,
   imageOne: /^\/api\/images\/(\d+)$/,
@@ -83,6 +84,9 @@ export function routeToHandler(path, method, body) {
   }
   if (RE.credentialTest.test(path)) {
     if (m === "POST") return { handler: "api.testCredentialConnection" };
+  }
+  if (RE.sshKeygen.test(path)) {
+    if (m === "POST") return { handler: "api.generateSshKeypair" };
   }
   if (RE.credentialOne.test(path)) {
     if (m === "GET") return { handler: "api.getCredential" };
@@ -595,6 +599,7 @@ const DISPATCH = {
       return { status: 200, body: { ok: false, message: msg } };
     }
   },
+  "api.generateSshKeypair": async () => ok(api.generateSshKeypair()),
   "api.updateImage": async ({ path, body }) => ok(api.updateImage(Number(m(path, RE.imageOne)), body)),
   "api.deleteImage": async ({ path }) => ok(api.deleteImage(Number(m(path, RE.imageOne)))),
   "api.getImage": async ({ path }) => ok(api.getImage(Number(m(path, RE.imageOne)))),

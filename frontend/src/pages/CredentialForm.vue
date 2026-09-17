@@ -4,7 +4,7 @@ import { ref, computed, onMounted, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { notify } from "../lib/notify.js";
 import ConfirmDialog from "../components/ConfirmDialog.vue";
-import { getCredential, createCredential, updateCredential, deleteCredential, testDbConnection } from "../api/credential.js";
+import { getCredential, createCredential, updateCredential, deleteCredential, testDbConnection, genSshKeypair } from "../api/credential.js";
 import { CRED_KINDS, credKind, credKindLabel } from "../lib/kinds.js";
 
 const route = useRoute();
@@ -22,8 +22,8 @@ const pageTitle = computed(() => (isNew.value ? "新建凭证" : `编辑凭证${
 const kindMeta = computed(() => credKind(form.value.kind));
 const kindFields = computed(() => kindMeta.value?.fields ?? []);
 const isDingtalk = computed(() => form.value.kind === "dingtalk-corp");
-// 可测试连接的凭证类型（mysql/pg 数据库 + k8s 集群）才显示「测试连接」
-const isDbKind = computed(() => ["mysql", "pg", "k8s"].includes(form.value.kind));
+// 可测试连接的凭证类型（数据库 + k8s 集群 + 私服/仓库/对象存储）才显示「测试连接」
+const isDbKind = computed(() => ["mysql", "pg", "k8s", "maven", "npm", "docker-registry", "s3"].includes(form.value.kind));
 
 // ---- kvlist（额外连接参数）动态键=值列表 ----
 // 行模型 {key, value}，存放于 form.secret[f.k]（数组）；后端 buildDbConfig 会忽略空 key 行
@@ -89,6 +89,26 @@ const testConnection = async () => {
   } finally {
     testing.value = false;
   }
+};
+
+// ---- SSH 密钥对生成（网页生成；私钥回填表单、公钥复制配置授权） ----
+const keygenLoading = ref(false);
+const pubKey = ref("");
+const genSsh = async () => {
+  if (keygenLoading.value) return;
+  keygenLoading.value = true;
+  try {
+    const res = await genSshKeypair();
+    const d = res?.data ?? res;
+    if (d?.privateKey) form.value.secret.privateKey = d.privateKey;
+    pubKey.value = d?.publicKey ?? "";
+    notify({ type: "success", message: "已生成密钥对，请复制公钥去配置授权" });
+  } catch (e) { notify({ type: "error", message: e?.message || "生成密钥对失败" }); }
+  finally { keygenLoading.value = false; }
+};
+const copyPubKey = async () => {
+  try { await navigator.clipboard.writeText(pubKey.value); notify({ type: "success", message: "公钥已复制" }); }
+  catch { notify({ type: "error", message: "复制失败，请手动选择复制" }); }
 };
 
 // 详情接口加载返显；失败（含 404/已被删除）统一提示
@@ -182,6 +202,20 @@ const doDelete = async () => {
         </div>
 
         <p class="kind-hint">{{ kindMeta?.hint }}</p>
+
+        <!-- SSH：网页生成密钥对（私钥回填表单，公钥复制配置授权） -->
+        <section v-if="form.kind === 'ssh'" class="field ssh-keygen-card">
+          <label class="field-label">生成密钥对</label>
+          <div class="test-conn-row">
+            <button type="button" class="btn" :disabled="keygenLoading" @click="genSsh">{{ keygenLoading ? "生成中…" : "生成密钥对" }}</button>
+            <span class="field-hint">生成后私钥自动填入上方「私钥」，公钥请立即复制去配置授权（如 GitHub Deploy keys / 服务器 authorized_keys）</span>
+          </div>
+          <div v-if="pubKey" class="pubkey-box">
+            <code class="mono pubkey-text">{{ pubKey }}</code>
+            <button type="button" class="btn btn-sm" @click="copyPubKey">复制公钥</button>
+          </div>
+          <p v-if="pubKey" class="field-hint warn">公钥仅本次生成时展示，保存凭证后不再回显；如需再次查看请用私钥自行派生。</p>
+        </section>
 
         <!-- 钉钉：后台需手动完成的配置步骤 + 跳转链接 -->
         <section v-if="kindMeta?.guide?.length" class="enroll-card">
@@ -314,4 +348,12 @@ const doDelete = async () => {
 .kv-add { margin-bottom: 8px; }
 .test-conn-row { display: flex; align-items: center; gap: 12px; }
 .test-conn-row .field-hint { margin-top: 0; }
+.ssh-keygen-card { border: 1px solid var(--line); border-radius: 12px; padding: 12px; background: var(--bg-1); }
+.pubkey-box { margin-top: 10px; display: flex; align-items: flex-start; gap: 8px; }
+.pubkey-text {
+  flex: 1; min-width: 0; font-size: 11px; line-height: 1.6; word-break: break-all;
+  color: var(--text-1); background: var(--bg-0); border: 1px solid var(--line);
+  border-radius: 8px; padding: 8px 10px; max-height: 96px; overflow: auto;
+}
+.pubkey-box .btn { flex: none; margin-top: 2px; }
 </style>

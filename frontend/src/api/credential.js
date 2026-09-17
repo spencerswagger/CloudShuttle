@@ -14,3 +14,5 @@ export const fetchEciSpecs = (credential, regionId) => client.post("/eci/specs",
 export const probeEciNetworks = (d) => client.post("/eci/probe-networks", d, { silent: true, timeout: 8000 });
 // 用草稿 secret 测试数据库连接连通性（不落库）；参照 eci 探测接口的降级返回
 export const testDbConnection = (d) => client.post("/credentials/test", d, { silent: true, timeout: 8000 });
+// 网页生成 SSH 密钥对（私钥回填表单、公钥供复制配置授权，如 GitHub Deploy keys）
+export const genSshKeypair = () => client.post("/credentials/ssh-keygen", {}, { silent: true, timeout: 8000 });
