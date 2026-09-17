@@ -33,28 +33,41 @@ export async function validateCallback({ token, secret, kind, kinds }) {
 export async function eciDone(orchestrator, { token, secret, result }) {
   const v = await validateCallback({ token, secret, kinds: ["job"] });
   if (!v.ok) return { status: 401, body: { ok: false, error: "invalid callback" } };
-  // 诊断：打印回调收到的 output/logs 长度与日志原文样本，定位「succeeded 但 logs/output 为空」
-  const outRaw = String(result?.output ?? "");
-  const logsRaw = String(result?.logs ?? "");
-  const sample = (b64) => {
-    try { return Buffer.from(String(b64).slice(0, 400), "base64").toString("utf8").slice(0, 200); }
-    catch { return ""; }
-  };
+  // wrapper 的 output/logs 是 base64（A′ 契约）；先解码成 UTF-8 再解析/落库，避免 parseOutput 吃乱码
+  const output = b64dec(result?.output);
+  const logs = b64dec(result?.logs);
+  // 诊断：打印回调收到的原始长度与解码后样本，定位「succeeded 但 logs/output 为空」
   console.log(
-    `[eciDone] exec=${v.execId} node=${v.nodeId} outputLen=${outRaw.length} logsLen=${logsRaw.length} ` +
-    `outputSample=${JSON.stringify(sample(outRaw))} logsSample=${JSON.stringify(sample(logsRaw))}`
+    `[eciDone] exec=${v.execId} node=${v.nodeId} outRawLen=${String(result?.output ?? "").length} ` +
+    `logsRawLen=${String(result?.logs ?? "").length} outLen=${output.length} logsLen=${logs.length} ` +
+    `logsSample=${JSON.stringify(String(logs).slice(0, 200))}`
   );
   // 外部副作用（解析/写库/推进）必须 await 完成后再响应，FC 容器冻结下 fire-and-forget 会丢
   await orchestrator.onEciDone({
     execId: v.execId, nodeId: v.nodeId,
-    output: outRaw, logs: logsRaw,
+    output, logs,
   });
   return { status: 200, body: { ok: true } };
 }
 
-export async function eciFail(orchestrator, { token, secret, reason }) {
+export async function eciFail(orchestrator, { token, secret, reason, result }) {
   const v = await validateCallback({ token, secret, kinds: ["job"] });
   if (!v.ok) return { status: 401, body: { ok: false, error: "invalid callback" } };
-  await orchestrator.onEciFail?.({ execId: v.execId, nodeId: v.nodeId, reason });
+  await orchestrator.onEciFail?.({
+    execId: v.execId, nodeId: v.nodeId,
+    reason: reason ?? result?.reason, logs: b64dec(result?.logs),
+  });
   return { status: 200, body: { ok: true } };
+}
+
+// 回调体里的 base64 解码（容错）：非 base64 串（如明文测试/历史调用）原样返回
+function b64dec(s) {
+  const raw = String(s ?? "");
+  if (!raw) return raw;
+  if (!/^[A-Za-z0-9+/=\s]*$/.test(raw)) return raw;
+  try {
+    return Buffer.from(raw.replace(/\s/g, ""), "base64").toString("utf8");
+  } catch {
+    return raw;
+  }
 }
