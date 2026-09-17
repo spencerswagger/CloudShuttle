@@ -79,15 +79,24 @@ docker/
 `.github/workflows/build-ci-images.yml`：
 
 - `workflow_dispatch` 手动触发，输入：
-  - `image`：目标镜像路径（如 `ci-node:20`），或 `all` 全量构建；
-- 步骤：checkout → `docker login registry.cn-hangzhou.aliyuncs.com`（secrets
-  `DOCKER_USERNAME/DOCKER_PASSWORD`）→ `docker buildx build --platform linux/amd64 … -t <ACR>/ci-*:<tag> . -f docker/…` → `docker push`；
-- 构建矩阵由输入 `image` 决定打哪个 Dockerfile（`all` 逐个构建全部）。
+  - `image`：目标镜像标识（如 `node/20` → `ci-node:20`），或 `all` 全量构建；
+- **目标地址写死**：ACR 命名空间作为 workflow 常量写死（如
+  `REGISTRY=registry.cn-hangzhou.aliyuncs.com`、`NAMESPACE=<写死的私有仓命名空间>`），触发时
+  只需选镜像，不填地址；
+- 步骤：checkout → `docker login $REGISTRY`（secrets `DOCKER_USERNAME/DOCKER_PASSWORD`）→
+  `docker buildx build --platform linux/amd64 -t $REGISTRY/$NAMESPACE/ci-*:<tag> . -f docker/…`
+  → `docker push`；
+- `all` 按 Dockerfile 清单逐个构建全部版本。
 
 ## 平台接入（执行侧）
 
-- `deploy/seed.sql` 的 `exec_image` 预置改为 ACR 地址（`registry.cn-hangzhou.aliyuncs.com/<ns>/ci-*`）；
-  镜像未同步前节点仍可填 docker.io 原地址兜底（提示「建议使用平台预置 CI 镜像」）。
+- **DB 迁移批量预置镜像**：新增迁移（如 `NNN_ci_images.sql`）按镜像矩阵把全部默认镜像
+  （`ci-base:latest`、`ci-node:<全部版本>`、`ci-python:*`、`ci-java:*`、`ci-golang:*`）用
+  幂等存在性守卫逐行 `INSERT INTO exec_image`（镜像名唯一，沿用 seed 的守卫写法，存量库升级时
+  自动补全、新库也走同一条路径），**用户无需逐个添加**；`deploy/seed.sql` 只保留 demo 管道，
+  镜像预置统一由迁移负责（避免双份）。
+- 迁移里镜像地址直接写死为 workflow 输出的同一 ACR 前缀
+  （`registry.cn-hangzhou.aliyuncs.com/<ns>/ci-*`），tag 与镜像矩阵一一对应。
 - 前端镜像下拉/占位文案：说明"平台预置 CI 镜像已含 git/curl（+docker-cli/kaniko），可直接
   clone/build；如用自定义镜像需自带 curl"。
 
