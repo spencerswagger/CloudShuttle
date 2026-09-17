@@ -71,6 +71,7 @@ jobs:
             echo "== building $REGISTRY/$NAMESPACE/$TAG from $DF =="
             docker buildx build \
               --platform linux/amd64 \
+              --provenance=false --sbom=false \
               -t "$REGISTRY/$NAMESPACE/$TAG" \
               -f "$DF" . --push
           done < /tmp/targets.txt
