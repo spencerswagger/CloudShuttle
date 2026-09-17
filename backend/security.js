@@ -12,12 +12,14 @@ export function safeEqual(a, b) {
 export function isPrivateIp(ip) {
   const s = String(ip ?? "").trim();
   if (!s) return false;
-  // IPv4 段：10/8、172.16/12、192.168/16、127/8 回环、169.254/16 链路本地
+  // IPv4 段：10/8、172.16/12、192.168/16、100.64/10（RFC 6598 运营商级 NAT，阿里云 FC 内网网关闭用）、
+  // 127/8 回环、169.254/16 链路本地
   const v4 = s.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
   if (v4) {
     const [a] = v4.slice(1).map(Number);
     const b = Number(v4[2]);
     if (a === 10) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true;
     if (a === 172 && b >= 16 && b <= 31) return true;
     if (a === 192 && b === 168) return true;
     if (a === 127) return true;
