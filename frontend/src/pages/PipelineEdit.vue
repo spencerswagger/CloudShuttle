@@ -1294,7 +1294,7 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
                     <button type="button" class="btn btn-sm btn-ghost refresh-btn" title="加载/刷新镜像" @click="loadImages" :disabled="imagesLoading">⟳</button>
                   </div>
                   <p v-if="!images.length" class="field-hint">{{ imagesLoading ? "加载中…" : "暂无镜像，点击右侧刷新图标加载" }}</p>
-                  <p class="field-hint" v-else>平台只负责在所选镜像上运行你的命令并回传结果；镜像需自带 <code class="mono ph-code">sh</code> 与 <code class="mono ph-code">curl</code>（语言类镜像普遍满足）。</p>
+                  <p class="field-hint" v-else>平台预置的 CI 镜像（ci-node / ci-python / ci-golang / ci-java / ci-base）已含 curl 与 git，可直接 clone/构建；自定义镜像需自带 curl（回调依赖）+ sh。</p>
                 </div>
                 </div>
                 <div v-show="shellTab === 'script'">
