@@ -1287,14 +1287,14 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
                 <div class="field">
                   <label class="field-label">运行镜像</label>
                   <div class="group-row">
-                    <input class="input mono" v-model="n.params.image" list="shell-img-dl" placeholder="选择语言镜像或输入自定义镜像（需含 sh + curl）" />
-                    <datalist id="shell-img-dl">
-                      <option v-for="im in images" :key="im.image" :value="im.image">{{ im.name }}</option>
-                    </datalist>
+                    <select class="input mono" v-model="n.params.image" :disabled="!images.length">
+                      <option value="" disabled>请选择镜像（仅可选用镜像管理中的镜像）</option>
+                      <option v-for="im in images" :key="im.image" :value="im.image">{{ im.name }} · {{ im.image }}</option>
+                    </select>
                     <button type="button" class="btn btn-sm btn-ghost refresh-btn" title="加载/刷新镜像" @click="loadImages" :disabled="imagesLoading">⟳</button>
                   </div>
-                  <p v-if="!images.length" class="field-hint">{{ imagesLoading ? "加载中…" : "暂无镜像，点击右侧刷新图标加载" }}</p>
-                  <p class="field-hint" v-else>平台预置的 CI 镜像（ci-node / ci-python / ci-golang / ci-java / ci-base）已含 curl 与 git，可直接 clone/构建；自定义镜像需自带 curl（回调依赖）+ sh。</p>
+                  <p v-if="!images.length" class="field-hint">{{ imagesLoading ? "加载中…" : "暂无镜像，请先在「镜像管理」中维护镜像（平台预置 CI 镜像由 GitHub Actions 构建后自动入库），或点击右侧刷新" }}</p>
+                  <p class="field-hint" v-else>平台预置 CI 镜像（ci-base / ci-node / ci-python / ci-golang / ci-java）已含 curl 与 git 与 kaniko，可直接 clone/构建；镜像仅可从镜像管理中选择。</p>
                 </div>
                 </div>
                 <div v-show="shellTab === 'script'">
