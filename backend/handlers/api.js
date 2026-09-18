@@ -339,11 +339,41 @@ export function makeTestCredentialConnection({ createConnection: open, pingK8s, 
     if (kind === "docker-registry") {
       const registry = String(secret?.registry ?? "").trim();
       if (!registry) throw new Error("请先填写仓库地址再测试连接");
+      const base = /^https?:\/\//.test(registry) ? registry.replace(/\/+$/, "") : `https://${registry}`;
+      const auth = { username: String(secret?.username ?? ""), password: String(secret?.password ?? "") };
+      const timeout = 8000;
       try {
-        return await probe(() => http.get(`${registry.startsWith("http") ? "" : "https://"}${registry}/v2/`, {
-          timeout: 8000,
-          auth: { username: String(secret?.username ?? ""), password: String(secret?.password ?? "") },
-        }));
+        return await probe(async () => {
+          // 1) /v2/：200 直接放行（老/私服）；401 走 docker registry 标准 Bearer token 流程（ACR 必走）
+          let resp;
+          try {
+            resp = await http.get(`${base}/v2/`, { timeout, auth });
+            return; // 2xx → 通过
+          } catch (err) {
+            const r = err?.response;
+            if (r?.status !== 401) throw err;
+            resp = r;
+          }
+          // 2) 解析 WWW-Authenticate: Bearer realm/service/scope
+          const waa = String(resp?.headers?.["www-authenticate"] ?? "");
+          const realm = /realm="([^"]+)"/.exec(waa)?.[1];
+          if (!realm) throw new Error("registry 未返回 token 端点（WWW-Authenticate 缺失）");
+          const url = new URL(realm);
+          const service = /service="([^"]*)"/.exec(waa)?.[1];
+          if (service) url.searchParams.set("service", service);
+          const scope = /scope="([^"]*)"/.exec(waa)?.[1];
+          if (scope) url.searchParams.set("scope", scope);
+          // 3) 用账号密码向 token 端点换 Bearer token
+          const tkn = await http.get(url.toString(), { timeout, auth });
+          const token = tkn?.data?.token ?? tkn?.data?.access_token;
+          if (!token) {
+            throw new Error(`token 端点未返回令牌（HTTP ${tkn?.status ?? "unknown"}），请检查用户名/Registry 登录密码`);
+          }
+          // 4) 带 token 复验 /v2/
+          const fin = await http.get(`${base}/v2/`, { timeout, headers: { Authorization: `Bearer ${token}` } });
+          if (String(fin?.status).startsWith("2")) return;
+          throw new Error(`鉴权后仍 HTTP ${fin?.status}`);
+        });
       } catch (err) {
         throw new Error(`Docker 仓库连接失败：${failed(err, "Docker 仓库")}`);
       }
