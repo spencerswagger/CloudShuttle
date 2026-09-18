@@ -62,6 +62,7 @@ const RE = {
   dingtalkDeptUsers: /^\/api\/dingtalk\/department-users$/,
   eciDone: /^\/_\/hook\/ecidone\/(\d+)/,
   eciFail: /^\/_\/hook\/fail\/(\d+)/,
+  k8sNamespaces: /^\/api\/k8s\/namespaces$/,
 };
 
 export function routeToHandler(path, method, body) {
@@ -77,6 +78,9 @@ export function routeToHandler(path, method, body) {
   }
   if (RE.sshKeygen.test(path)) {
     if (m === "POST") return { handler: "api.generateSshKeypair" };
+  }
+  if (RE.k8sNamespaces.test(path)) {
+    if (m === "POST") return { handler: "api.listK8sNamespaces" };
   }
   if (RE.credentialOne.test(path)) {
     if (m === "GET") return { handler: "api.getCredential" };
@@ -507,6 +511,19 @@ const DISPATCH = {
     }
   },
   "api.generateSshKeypair": async () => ok(api.generateSshKeypair()),
+  "api.listK8sNamespaces": async ({ body }) => {
+    const name = String(body?.credential ?? "");
+    const { rows } = await pool.query(`SELECT kind, secret_enc FROM credential WHERE name=$1 AND deleted_at IS NULL`, [name]);
+    if (!rows[0] || rows[0].kind !== "k8s") return { status: 404, body: { ok: false, message: "Kubernetes 凭证不存在" } };
+    try {
+      const secret = JSON.parse(sm4Decrypt(config.sm4Key, rows[0].secret_enc));
+      const kube = parseKubeconfig(secret?.kubeconfig);
+      const namespaces = await createK8sProvider().listNamespaces(kube);
+      return ok({ namespaces });
+    } catch (err) {
+      return { status: 200, body: { ok: false, message: `获取命名空间列表失败：${k8sErrorHint(err) || "未知错误"}` } };
+    }
+  },
   "api.updateImage": async ({ path, body }) => ok(api.updateImage(Number(m(path, RE.imageOne)), body)),
   "api.deleteImage": async ({ path }) => ok(api.deleteImage(Number(m(path, RE.imageOne)))),
   "api.getImage": async ({ path }) => ok(api.getImage(Number(m(path, RE.imageOne)))),

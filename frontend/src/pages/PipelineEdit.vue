@@ -11,6 +11,7 @@ import { notify } from "../lib/notify.js";
 import { buildMappingDraft } from "../lib/webhookDraft.js";
 import { getPipeline, createPipeline, updatePipeline, getPipelineHook, resetWebhookSecret, fetchWebhookProbe } from "../api/pipeline.js";
 import { fetchImages } from "../api/image.js";
+import { fetchNamespaces } from "../api/k8s.js";
 import { fetchCredentials, listDepartments, listDepartmentUsers } from "../api/credential.js";
 import { RUNNER_CRED_KINDS, credKindLabel } from "../lib/kinds.js";
 import RunPipelineModal from "../components/RunPipelineModal.vue";
@@ -59,6 +60,17 @@ function selectNode(id) { selectedId.value = id; }
 // Shell 节点表单分 tab（降低填写压力）：base=运行环境 / script=执行脚本 / adv=输出与运行；切节点复位
 const shellTab = ref("base");
 watch(selectedId, () => { shellTab.value = "base"; });
+// Shell 节点命名空间下拉：凭证切换时按需加载集群命名空间
+const nsList = ref([]);
+const nsLoading = ref(false);
+async function loadNamespaces(credential) {
+  nsList.value = []; nsLoading.value = true;
+  try {
+    const res = await fetchNamespaces(credential).catch(() => null);
+    if (res && Array.isArray(res?.namespaces)) nsList.value = res.namespaces;
+  } finally { nsLoading.value = false; }
+}
+watch(() => selected.value?.params?.credential, (v) => { if (selected.value?.type === "shell") loadNamespaces(v); });
 // 边选中态：点选边进入边条件配置（与节点选中互斥：选择边时收起节点浮窗）
 const selEdgeId = ref("");
 const selEdge = computed(() => (spec.value.edges ?? []).find((e) => edgeIdOf(e) === selEdgeId.value) ?? null);
@@ -593,7 +605,7 @@ const addNode = (type, at) => {
     step: type,
     params:
         type === "shell"
-          ? { credential: "", namespace: "", image: images.value[0]?.image ?? "", command: "", env: [], outputs: [{ key: "step_out" }], cpu: "", memory: "", timeout: 300, backoffLimit: 0, ttlSecondsAfterFinished: "" }
+          ? { credential: "", namespace: "", image: images.value[0]?.image ?? "", command: "", env: [], outputs: [{ key: "step_out" }], cpu: "500m", memory: "512Mi", timeout: 300, backoffLimit: 0, ttlSecondsAfterFinished: 300 }
           : type === "sql"
             ? { credential: "", statements: [""], outputs: [{ key: "affected_rows" }], timeout: 60 }
             : type === "loop"
@@ -1075,7 +1087,7 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
           @edge-mouse-leave="onEdgeMouseLeave"
         >
           <template #node-dag-node="{ data }">
-            <div class="canvas-node" :data-type="data.n.type" :class="{ 'is-trigger': isTrigger(data.n) }">
+            <div class="canvas-node" :data-type="data.n.type" :class="{ 'is-trigger': isTrigger(data.n), 'is-selected': selectedId === data.n.id }">
               <Handle v-if="!isTrigger(data.n)" type="target" :position="Position.Left" />
               <span class="cn-ico" :style="{ color: NODE_KINDS[data.n.type].accent }">
                 <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path :d="NODE_KINDS[data.n.type].icon" /></svg>
@@ -1281,8 +1293,28 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
                   <p class="field-hint" v-else>凭证提供 kubeconfig；运行所需的权限与创建步骤见凭证页「权限说明」</p>
                 </div>
                 <div class="field">
-                  <label class="field-label">命名空间（可选）</label>
-                  <input class="input mono" v-model="n.params.namespace" placeholder="如 default / build，留空用凭证默认" />
+                  <label class="field-label">命名空间</label>
+                  <div class="group-row">
+                    <select class="input mono" v-model="n.params.namespace" :disabled="!n.params.credential" :loading="nsLoading">
+                      <option value="">(凭证默认命名空间)</option>
+                      <option v-for="ns in nsList" :key="ns" :value="ns">{{ ns }}</option>
+                    </select>
+                    <button type="button" class="btn btn-sm btn-ghost refresh-btn" title="重新加载命名空间" :disabled="nsLoading || !n.params.credential" @click="loadNamespaces(n.params.credential)">⟳</button>
+                  </div>
+                  <p class="field-hint" v-if="nsLoading">加载命名空间…</p>
+                  <p class="field-hint" v-else-if="n.params.credential && !nsList.length">无法获取命名空间列表（请确认集群凭证有 namespaces 的 list 权限），可留空使用凭证默认命名空间</p>
+                </div>
+                <div class="field">
+                  <label class="field-label">附加凭证（注入容器）</label>
+                  <div class="cred-check-list">
+                    <label v-for="c in runnerCredCandidates" :key="c.name" class="cred-check">
+                      <input type="checkbox" :checked="hasCredRef(n, c.name)" @change="toggleCredRef(n, c.name)" />
+                      <span class="cred-name">{{ c.name }}</span>
+                      <em class="cred-kind dim">{{ credKindLabel(c.kind) }}</em>
+                    </label>
+                  </div>
+                  <p v-if="!runnerCredCandidates.length" class="field-hint">暂无可用凭证：先在「凭证」创建 SSH / Maven / Docker 私有仓库 / npm / S3 类型后在此勾选</p>
+                  <p class="field-hint" v-else>勾选的凭证以文件注入容器（~/.ssh、~/.m2/settings.xml、~/.docker/config.json、~/.npmrc、/root/.s3cfg），命令内直接使用</p>
                 </div>
                 <div class="field">
                   <label class="field-label">运行镜像</label>
@@ -1346,18 +1378,6 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
                     <button type="button" class="btn btn-sm btn-ghost" @click="(n.params.env = n.params.env || []).push({ k: '', v: '' })">＋ 添加环境变量</button>
                   </div>
                 </div>
-                <div class="field">
-                  <label class="field-label">附加凭证（注入容器）</label>
-                  <div class="cred-check-list">
-                    <label v-for="c in runnerCredCandidates" :key="c.name" class="cred-check">
-                      <input type="checkbox" :checked="hasCredRef(n, c.name)" @change="toggleCredRef(n, c.name)" />
-                      <span class="cred-name">{{ c.name }}</span>
-                      <em class="cred-kind dim">{{ credKindLabel(c.kind) }}</em>
-                    </label>
-                  </div>
-                  <p v-if="!runnerCredCandidates.length" class="field-hint">暂无可用凭证：先在「凭证」创建 SSH / Maven / Docker 私有仓库 / npm / S3 类型后在此勾选</p>
-                  <p class="field-hint" v-else>勾选的凭证以文件注入容器（~/.ssh、~/.m2/settings.xml、~/.docker/config.json、~/.npmrc、/root/.s3cfg），命令内直接使用</p>
-                </div>
                 </div>
                 <div v-show="shellTab === 'adv'">
                 <div class="field">
@@ -1369,7 +1389,7 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
                   <p class="field-hint">脚本内可用 <code class="mono ph-code">echo "key=value" >> "$CLOUDSHUTTLE_OUT_FILE"</code> 写回；未声明 key 时默认输出单变量 <code class="mono ph-code">step_out</code>。</p>
                 </div>
                 <div class="field">
-                  <label class="field-label">资源规格（可选）</label>
+                  <label class="field-label">资源规格</label>
                   <div class="approval-grid">
                     <div class="sub-field">
                       <label class="sub-label">CPU（核）</label>
@@ -1380,7 +1400,6 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
                       <input class="input mono" v-model="n.params.memory" placeholder="如 1Gi 或 512Mi" />
                     </div>
                   </div>
-                  <p class="field-hint">填一组值同时用作请求量（requests）与上限（limits）；留空则由集群按默认调度。</p>
                 </div>
                 <div class="field">
                   <div class="approval-grid">
@@ -1389,11 +1408,10 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
                       <input class="input mono" type="number" min="0" v-model.number="n.params.backoffLimit" placeholder="0" />
                     </div>
                     <div class="sub-field">
-                      <label class="sub-label">保留时长（秒，可选）</label>
-                      <input class="input mono" type="number" min="0" v-model.number="n.params.ttlSecondsAfterFinished" placeholder="如 300" />
+                      <label class="sub-label">保留时长（秒）</label>
+                      <input class="input mono" type="number" min="0" v-model.number="n.params.ttlSecondsAfterFinished" placeholder="300" />
                     </div>
                   </div>
-                  <p class="field-hint">失败重试默认 0（失败立即结束并如实回报）；保留时长设值则运行结束后自动清理临时资源。两者仅高级场景需要，日常跑命令可以不填。</p>
                 </div>
                 <div class="field">
                   <label class="field-label">超时（秒）</label>
@@ -1648,11 +1666,11 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
 .tb-name-edit { flex: 0 0 auto; }
 .editor-body { flex: 1 1 auto; min-height: 0; display: flex; gap: 12px; position: relative; }
 .node-lib {
-  flex: 0 0 208px; display: flex; flex-direction: column; gap: 8px;
-  padding: 14px 12px; background: linear-gradient(180deg, var(--bg-2), var(--bg-1));
+  flex: 0 0 132px; display: flex; flex-direction: column; gap: 8px;
+  padding: 14px 10px; background: linear-gradient(180deg, var(--bg-2), var(--bg-1));
   border: 1px solid var(--line); border-radius: var(--radius); overflow-y: auto;
 }
-.lib-item { justify-content: flex-start; gap: 9px; }
+.lib-item { justify-content: flex-start; gap: 8px; padding: 7px 10px; font-size: 12.5px; white-space: nowrap; }
 .lib-item.shell { color: var(--accent); background: var(--accent-soft); border-color: transparent; }
 .lib-item.shell:hover { background: rgba(84,208,198,.2); }
 .lib-item.approval { color: var(--ember); background: var(--warn-soft); border-color: transparent; }
@@ -1694,7 +1712,7 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
 
 /* 悬浮参数浮窗（可拖动/关闭，仅选中节点时显示） */
 .param-float {
-  position: fixed; width: 480px; max-width: calc(100vw - 40px); max-height: calc(100vh - 130px);
+  position: fixed; width: 620px; max-width: calc(100vw - 40px); max-height: calc(100vh - 130px);
   display: flex; flex-direction: column; z-index: 50;
   background: linear-gradient(180deg, var(--bg-2), var(--bg-1));
   border: 1px solid var(--line-strong); border-radius: 14px; box-shadow: 0 18px 48px rgba(0,0,0,.5);
@@ -1708,6 +1726,12 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
 .param-float .input, .param-float .select, .param-float .textarea { padding: 8px 10px; font-size: 12.5px; }
 .param-float input[type="number"] { width: 140px; }
 .param-float .seg-tab { padding: 5px 12px; }
+/* 输出变量表单：宽浮窗内整行完整展示，各格不挤压 */
+.param-float .param-row { min-width: 0; }
+.param-float .param-row .param-cell { min-width: 0; }
+.param-float .param-row .param-cell input, .param-float .param-row .param-cell select { min-width: 0; }
+/* 画布选中节点高亮 */
+.canvas-node.is-selected { outline: 2px solid var(--accent); outline-offset: 2px; box-shadow: 0 0 0 4px rgba(84,208,198,.22); }
 .param-float .sql-out-row { gap: 6px; align-items: center; }
 .param-float .sql-out-row .sql-key { flex: 1 1 70px; min-width: 60px; }
 .param-float .sql-out-row .sql-mode { flex: 0 0 104px; width: 104px; padding: 8px 26px 8px 10px; font-size: 12px; }

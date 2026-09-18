@@ -169,6 +169,13 @@ export function createK8sProvider({ buildClient = buildK8sClient } = {}) {
       const resp = await client.get("/api/v1/namespaces", { timeout: 8_000 });
       return resp?.status === 200;
     },
+    // 列出命名空间（Shell 节点「命名空间」下拉数据源）
+    async listNamespaces(kube) {
+      const client = buildClient(kube);
+      const resp = await client.get("/api/v1/namespaces", { timeout: 8_000 });
+      const items = resp?.data?.items ?? [];
+      return items.map((i) => i?.metadata?.name).filter(Boolean).sort();
+    },
     // 创建凭据 Secret（secret-<jobName>）：data 值传入时 base64 化（K8s Secret.data 规范）
     async ensureSecret({ kube, name, namespace, data }) {
       const client = buildClient(kube);
