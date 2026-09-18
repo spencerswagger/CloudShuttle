@@ -80,7 +80,7 @@ docker compose up -d --build
 1. **建函数**：镜像选 ACR 的 `<ns>/cloudshuttle-backend:<tag>`；监听端口 `9000`，健康检查路径 `/healthz`。
 2. **网络**：FC 的 VPC 选与 RDS 相同，RDS 白名单加入该网段；Redis 同理。
 3. **环境变量**：见 B.3（务必配置，含 `SKIP_BOOTSTRAP=1`）。
-4. **首次迁移/seed**：`node backend/db/migrate.js` + `psql "$PG_URL" -f deploy/seed.sql`（因 `SKIP_BOOTSTRAP=1` 已跳过）。
+4. **首次迁移**：无需手动执行——后端启动时自动迁移（`buildApp` 首个请求前，幂等 + advisory lock）。仅 **seed** 需手动：`psql "$PG_URL" -f deploy/seed.sql`（因 `SKIP_BOOTSTRAP=1` 已跳过 seed）。
 5. **绑定自定义域名**并写入 `CONTROL_BASE`。
 
 > 备选：FC 走函数代码包（`index.js` 的 handler），见 [backend/README.md](../backend/README.md)。
@@ -103,7 +103,7 @@ SM4_KEY=a1b2c3d4e5f60718293a4b5c6d7e8f90
 ```
 
 - 公网 Redis（TLS）把 `redis://` 换成 `rediss://`；
-- `SKIP_BOOTSTRAP=1` 跳过建表/seed，需先手动执行一次 `node backend/db/migrate.js` + `psql "$PG_URL" -f deploy/seed.sql`；
+- `SKIP_BOOTSTRAP=1` 跳过 entrypoint 的 **seed**（`deploy/seed.sql`）；**迁移由后端启动自动执行**（`buildApp` 首个请求前，幂等 + advisory lock），无需手动 `node backend/db/migrate.js`；
 - 完整变量作用见 `deploy/env.example`。
 
 ### B.4 前端 → CDN（用 release 的 web zip）

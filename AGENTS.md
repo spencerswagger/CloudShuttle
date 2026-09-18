@@ -10,7 +10,7 @@
 
 * 示例教训：曾把 `git_hook_secret` 直接改成 `webhook_secret`（只改 001），存量库仍为旧列，新代码查询即 500。正确做法是新增 `003_webhook_secret_rename.sql`，用 `information_schema.columns` 判断旧列存在才 `RENAME`（保数据），新旧并存时优先 rename 不 ADD。
 
-* FC 自定义容器部署是 `SKIP_BOOTSTRAP=1`（跳过 entrypoint 里的 migrate/seed）：**部署后必须手动或 CI 执行一次** **`cd backend && node db/migrate.js`**，否则新迁移不生效。`deploy/README.md` 有 B.4 说明。
+* 迁移在**后端启动时自动执行**：`buildApp()` 首个请求前调用 `runMigrations({pool})`（`backend/db/migrate.js`），幂等 + `pg_advisory_lock` 跨实例串行，FC 多实例冷启动不会并发 DDL。**部署无需手动跑 migrate**（CLI `node backend/db/migrate.js` 仍可用）。`SKIP_BOOTSTRAP=1` 仅跳过 entrypoint 里的 seed，不再影响迁移。
 
 * 应用迁移前先想清两种库：全新库（001 起逐步应用）与存量库（跳着应用 N+1），迁移必须对两者都幂等安全。
 

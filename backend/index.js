@@ -25,6 +25,7 @@ import { assembleTriggerEnv } from "./engine/trigger.js";
 import { randomUUID } from "node:crypto";
 import axios from "axios";
 import { sm4Decrypt } from "./crypto/sm4.js";
+import { runMigrations } from "./db/migrate.js";
 import { HttpError } from "./errors.js";
 
 import * as api from "./handlers/api.js";
@@ -233,6 +234,16 @@ async function buildInitialEnvironment({ execId, pipelineId }) {
 export const STEP_TYPES = ["trigger", "shell", "approval", "sql", "branch", "join", "loop"];
 
 async function buildApp() {
+  // 后端启动即自动迁移（幂等 + advisory lock 跨实例串行，FC 多实例冷启动安全）：
+  // 新迁移随部署失效，无需再手动 node backend/db/migrate.js。
+  // DB 暂不可达（db_unreachable）降级为警告——后续任何 DB 操作都会失败，不掩盖故障；
+  // 迁移文件执行失败（Migration ... failed）则硬失败前移，不回退旧逻辑。
+  try {
+    await runMigrations({ pool });
+  } catch (err) {
+    if (!String(err?.message ?? "").startsWith("db_unreachable")) throw err;
+    console.warn(`[migrate] 跳过（DB 暂不可达）：${err.message}`);
+  }
   const snapshotStore = createSnapshotStore(redis);
   const mutex = createMutex(redis);
   // 凭证类型判定 + 解密（企业应用凭证用 corp provider）

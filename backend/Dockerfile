@@ -1,7 +1,7 @@
 # 通用「控制面」镜像：同一个 backend/ 以 local-server.js 起 HTTP，供 docker-compose 与 FC 自定义容器
-#   - docker-compose / 本机：entrypoint 先迁移+seed，再起 local-server.js 监听 HTTP
+#   - docker-compose / 本机：entrypoint 先 seed，再起 local-server.js 监听 HTTP
 #   - FC 自定义容器（镜像部署）：必须设 SKIP_BOOTSTRAP=1（否则 entrypoint 卡在 waiting for postgres，
-#     探活 9000 超时被回收），migrate/seed 改由部署时/CI 手动执行一次
+#     探活 9000 超时被回收），seed 需部署时/CI 手动执行；migrate 由后端启动时自动执行
 #   - FC 函数代码模式：用 backend/index.js 的 handler，不打包镜像
 # 端口：健康检查用 /healthz；应用入口由后端 routeToHandler 按 path 分发
 # 构建指纹：docker build --build-arg GIT_COMMIT=$(git rev-parse --short HEAD)
