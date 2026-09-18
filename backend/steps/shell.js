@@ -96,7 +96,7 @@ export function buildWrapperCommand(userCommand, { base, execId, token, secret }
   ].join("\n");
 }
 
-export function makeShellStep({ k8sProvider, genToken, controlPlaneBase, callbackBaseInternal, getK8s, getCredential, assembleCreds = assembleRunnerCredentials }) {
+export function makeShellStep({ k8sProvider, genToken, controlPlaneBase, callbackBaseInternal, getK8s, getCredential, assembleCreds = assembleRunnerCredentials, resolveImage = async (v) => v }) {
   return async function shellStep(node, ctx) {
     const p = node.params;
     const credential = p?.credential;
@@ -104,6 +104,8 @@ export function makeShellStep({ k8sProvider, genToken, controlPlaneBase, callbac
     const kube = await getK8s(credential); // { server, namespace, ...鉴权 }（kubeconfig 已解析）
     // params 深渲染：命令/env/附加凭证引用里的 ${变量} 全部替换（outputs 声明不渲染）
     const rendered = renderParams(p, ctx.environment instanceof Map ? ctx.environment : new Map(Object.entries(ctx.environment ?? {})));
+    // 镜像：params.image 存 exec_image.id（引用，编辑镜像后节点自动跟随新地址）；兼容旧字符串地址
+    const image = String(await resolveImage(rendered.image ?? "") ?? "");
 
     const base = typeof controlPlaneBase === "function" ? controlPlaneBase(ctx) : controlPlaneBase;
     // 回调地址：配置了内网前缀就优先走内网（集群与控制面同 VPC 时可达），否则用外网地址
@@ -154,7 +156,7 @@ export function makeShellStep({ k8sProvider, genToken, controlPlaneBase, callbac
       kube,
       name: jobNameFor(ctx.execId, node.id),
       namespace: String(p.namespace ?? "").trim(),
-      image: rendered.image || "",
+      image,
       command,
       env,
       volumes,

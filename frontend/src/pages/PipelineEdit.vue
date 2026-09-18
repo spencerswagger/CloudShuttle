@@ -29,7 +29,16 @@ const saving = ref(false);
 // 下拉数据按需懒加载：仅在需要时请求，并提供刷新
 async function loadImages() {
   imagesLoading.value = true;
-  try { images.value = await fetchImages().catch(() => []); }
+  try {
+    images.value = await fetchImages().catch(() => []);
+    // 镜像引用归一化：旧数据 params.image 存的是镜像地址字符串 → 映射为 exec_image.id（编辑镜像后节点自动跟随新地址）
+    const byImage = new Map(images.value.map((im) => [im.image, im.id]));
+    for (const n of nodes.value) {
+      if (n.type === "shell" && typeof n.params.image === "string" && byImage.has(n.params.image) && n.params.image !== String(byImage.get(n.params.image))) {
+        n.params.image = byImage.get(n.params.image);
+      }
+    }
+  }
   finally { imagesLoading.value = false; }
 }
 async function loadCreds() {
@@ -605,7 +614,7 @@ const addNode = (type, at) => {
     step: type,
     params:
         type === "shell"
-          ? { credential: "", namespace: "", image: images.value[0]?.image ?? "", command: "", env: [], outputs: [{ key: "step_out" }], cpu: "500m", memory: "512Mi", timeout: 300, backoffLimit: 0, ttlSecondsAfterFinished: 300 }
+          ? { credential: "", namespace: "", image: images.value[0]?.id ?? "", command: "", env: [], outputs: [{ key: "step_out" }], cpu: "500m", memory: "512Mi", timeout: 300, backoffLimit: 0, ttlSecondsAfterFinished: 300 }
           : type === "sql"
             ? { credential: "", statements: [""], outputs: [{ key: "affected_rows" }], timeout: 60 }
             : type === "loop"
@@ -1321,7 +1330,7 @@ watch(() => current.value.id, () => maybeAutoLoadHook());
                   <div class="group-row">
                     <select class="input mono" v-model="n.params.image" :disabled="!images.length">
                       <option value="" disabled>请选择镜像（仅可选用镜像管理中的镜像）</option>
-                      <option v-for="im in images" :key="im.image" :value="im.image">{{ im.name }} · {{ im.image }}</option>
+                      <option v-for="im in images" :key="im.id" :value="im.id">{{ im.name }} · {{ im.image }}</option>
                     </select>
                     <button type="button" class="btn btn-sm btn-ghost refresh-btn" title="加载/刷新镜像" @click="loadImages" :disabled="imagesLoading">⟳</button>
                   </div>
