@@ -25,7 +25,6 @@ import { assembleTriggerEnv } from "./engine/trigger.js";
 import { randomUUID } from "node:crypto";
 import axios from "axios";
 import { sm4Decrypt } from "./crypto/sm4.js";
-import { staleWaiting } from "./engine/stale.js";
 import { runMigrations } from "./db/migrate.js";
 import { HttpError } from "./errors.js";
 
@@ -321,39 +320,6 @@ async function buildApp() {
     }
     return s;
   }
-  // 挂起兜底：等待回调的 Shell(Job) 节点超过（timeout + 60s）未回报 → 终止执行为 failed，避免永久 running
-  // 派发时刻由 webhook_registry.expires_at - 24h 反推（注册即派发，ON CONFLICT 更新场景忽略精度误差）。
-  // FC 无定时器 → 在运行/列表等 push 入口惰性调用（DISPATCH api.listExecutions / runPipeline / rerunExecution）。
-  async function settleStale() {
-    const now = Date.now();
-    const { rows } = await pool.query(`SELECT id FROM execution WHERE status IN ('queued','running')`);
-    for (const { id } of rows) {
-      const snap = await snapshotStore.get(id).catch(() => null);
-      if (!snap || !(Array.isArray(snap.waiting) && snap.waiting.length)) continue;
-      const nodes = Array.isArray(snap.spec?.nodes) ? snap.spec.nodes : [];
-      const timeoutOf = (nid) => {
-        const n = nodes.find((x) => x.id === nid);
-        const t = Number(n?.params?.timeout);
-        return t > 0 ? t : 300;
-      };
-      const { rows: regs } = await pool.query(
-        `SELECT node_id, expires_at FROM webhook_registry WHERE exec_id=$1 AND kind='job'`, [id]);
-      const sinceByNode = new Map(regs.map((r) => [r.node_id, new Date(r.expires_at).getTime() - 24 * 3600 * 1000]));
-      const stale = staleWaiting(snap.waiting, (nid) => sinceByNode.get(nid), (nid) => timeoutOf(nid), now);
-      if (!stale.length) continue;
-      await schedLog(id, `✗ 节点 ${stale.join(",")} 等待回调超时（>${timeoutOf(stale[0])}s）→ 执行标记为 failed`);
-      await pool.query(`UPDATE execution SET status='failed', finished_at=now() WHERE id=$1 AND status IN ('queued','running')`, [id]);
-      for (const nid of stale) {
-        await pool.query(
-          `INSERT INTO execution_node(exec_id, node_id, step, type, status, output)
-           VALUES($1,$2,'shell','shell','failed',$3::jsonb)
-           ON CONFLICT (exec_id, node_id) DO UPDATE SET status='failed', output=EXCLUDED.output, finished_at=now()`,
-          [id, nid, JSON.stringify({ error: `等待回调超时（>${timeoutOf(nid)}s），Job 未回报结果` })]
-        );
-      }
-      await snapshotStore.save(id, { ...snap, status: "failed", waiting: null });
-    }
-  }
   const steps = {
     trigger: makeTriggerStep(),
     shell: makeShellStep({
@@ -471,7 +437,7 @@ async function buildApp() {
   return {
     orchestrator, snapshotStore, mutex, getCredentialSecrets,
     dingtalkTokenCache, enroll: dingtalkEnroll, hydrateForRun,
-    getK8sConfig, settleStale,
+    getK8sConfig,
   };
 }
 
@@ -576,12 +542,11 @@ const DISPATCH = {
   "api.getImage": async ({ path }) => ok(api.getImage(Number(m(path, RE.imageOne)))),
   "api.listImages": async () => ok(api.listImages()),
   "api.createImage": async ({ body }) => ok(api.createImage(body)),
-  "api.listExecutions": async ({ app }) => { await app.settleStale().catch(() => {}); return ok(api.listExecutions()); },
+  "api.listExecutions": async () => ok(api.listExecutions()),
   "api.createExecution": async ({ body }) => ok(api.createExecution(body)),
   "api.getExecution": async ({ path }) => ok(api.getExecution(Number(m(path, RE.executionOne)))),
   "api.cancelExecution": async ({ path }) => ok(api.cancelExecution(Number(m(path, RE.executionCancel)))),
   "api.runPipeline": async ({ app, path, body }) => {
-    await app.settleStale().catch(() => {});
     const id = Number(RE.pipelineRun.exec(path)?.[1]);
     const { spec, environment, triggerRaw } = await app.hydrateForRun({ pipelineId: id, kind: "manual", formValue: body?.params });
     const out = await app.orchestrator.run(spec, environment, { triggerRaw });
@@ -595,7 +560,6 @@ const DISPATCH = {
     };
   },
   "api.rerunExecution": async ({ app, path }) => {
-    await app.settleStale().catch(() => {});
     const id = Number(m(path, RE.executionRerun));
     // 读取原执行留痕的 trigger，恢复其触发源输入后走统一 hydrateForRun 重新装配
     const orig = await api.getExecution(id);
